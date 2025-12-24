@@ -6,9 +6,13 @@
 #include <memory>
 #include "titankv/db.h"
 #include "lsm/memtable.h"
+#include "lsm/version_set.h" 
+#include "lsm/table_cache.h"
 #include "blob/blob_store.h"
 #include "wal/log_writer.h"
 #include "util/env.h"
+#include "lsm/version_set.h"
+
 
 namespace titankv {
 
@@ -33,14 +37,26 @@ class DBImpl : public DB {
   MemTable* mem_;
   BlobStore* blob_store_;
   
-  // --- 关键修复：确保这里的名字与 .cc 中一致 ---
-  std::unique_ptr<WritableFile> logfile_; // .cc 中用的是 logfile_
-  std::unique_ptr<log::Writer> log_;      // .cc 中用的是 log_
-  std::atomic<SequenceNumber> last_sequence_; // .cc 中用到了这个
+  std::unique_ptr<WritableFile> logfile_; 
+  std::unique_ptr<log::Writer> log_;     
+  std::atomic<SequenceNumber> last_sequence_; 
+
+  // Flush相关
+  MemTable* imm_;                // 不可变内存表 (准备 Flush)
+  TableCache* table_cache_;      // SSTable 缓存
+  VersionSet* versions_; 
+
+  // 核心函数：将 MemTable 写入 SSTable
+  Status WriteLevel0Table(MemTable* mem,  Version* version);
+  
+  // 触发 Flush
+  Status MaybeScheduleCompaction(); // Day 4 我们改为 MakeRoomForWrite 同步刷盘
+  Status MakeRoomForWrite(bool force); // 检查 MemTable 是否满了
 
   // 私有辅助函数声明
   std::string EncodeLogRecord(ValueType type, const Slice& key, const Slice& value);
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
+  Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   
   DBImpl(const DBImpl&) = delete;
   DBImpl& operator=(const DBImpl&) = delete;

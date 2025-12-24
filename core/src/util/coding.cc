@@ -140,14 +140,12 @@ const char* GetVarint64Ptr(const char* p, const char* limit, uint64_t* value) {
 }
 
 bool GetVarint32(Slice* input, uint32_t* value) {
-    uint64_t v;
     const char* p = input->data();
     const char* limit = p + input->size();
-    const char* q = GetVarint64Ptr(p, limit, &v);
+    const char* q = GetVarint32Ptr(p, limit, value); // 复用刚写的函数
     if (q == nullptr) {
         return false;
     } else {
-        *value = static_cast<uint32_t>(v);
         input->remove_prefix(q - p);
         return true;
     }
@@ -163,6 +161,51 @@ bool GetVarint64(Slice* input, uint64_t* value) {
         input->remove_prefix(q - p);
         return true;
     }
+}
+
+const char* GetVarint32Ptr(const char* p, const char* limit, uint32_t* value) {
+    if (p < limit) {
+        uint32_t result = *(reinterpret_cast<const uint8_t*>(p));
+        if ((result & 128) == 0) {
+            // 快速路径：只有 1 个字节，直接返回
+            *value = result;
+            return p + 1;
+        }
+    }
+
+    // 慢速路径：多字节解析
+    uint32_t result = 0;
+    for (uint32_t shift = 0; shift <= 28 && p < limit; shift += 7) {
+        uint32_t byte = *(reinterpret_cast<const uint8_t*>(p));
+        p++;
+        if (byte & 128) {
+            // 最高位是 1，说明后面还有数据
+            // 取低 7 位，左移后累加到 result
+            result |= ((byte & 127) << shift);
+        } else {
+            // 最高位是 0，这是最后一个字节
+            result |= (byte << shift);
+            *value = result;
+            return p;
+        }
+    }
+    
+    // 解析失败：读过了 limit 或者数字太大超过了 32 位 (5字节)
+    return nullptr;
+}
+
+bool GetLengthPrefixedSlice(Slice* input, Slice* result) {
+    uint32_t len;
+    // 1. 读取长度
+    if (GetVarint32(input, &len)) {
+        // 2. 检查剩余数据是否足够
+        if (input->size() >= len) {
+            *result = Slice(input->data(), len);
+            input->remove_prefix(len);
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace titankv

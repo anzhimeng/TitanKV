@@ -1,5 +1,6 @@
 #include <filesystem> // C++17
 #include "blob/blob_store.h"
+#include "util/crc32c.h"
 #include <cstdio>
 
 namespace titankv {
@@ -84,44 +85,60 @@ Status BlobStore::GetFile(uint32_t file_id, RandomAccessFile** file) {
 }
 
 Status BlobStore::Get(const BlobIndex& index, std::string* value) {
-    std::lock_guard<std::mutex> lock(mutex_); // 简单保护 open_files_ map
+  std::lock_guard<std::mutex> lock(mutex_);
 
-    RandomAccessFile* file;
-    Status s = GetFile(index.file_id, &file);
-    if (!s.ok()) return s;
+  RandomAccessFile* file;
+  Status s = GetFile(index.file_id, &file);
+  if (!s.ok()) return s;
 
-    // Record 格式: [Header(12B)] [Key] [Value]
-    // BlobIndex 指向 Record 的开头
-    
-    // 1. 读取 Header
-    char header_buf[BlobRecordHeader::kHeaderSize];
-    Slice header_slice;
-    s = file->Read(index.offset, BlobRecordHeader::kHeaderSize, &header_slice, header_buf);
-    if (!s.ok()) return s;
+  // 1. 读取 Header (12 字节)
+  char header_buf[BlobRecordHeader::kHeaderSize];
+  Slice header_slice;
+  s = file->Read(index.offset, BlobRecordHeader::kHeaderSize, &header_slice, header_buf);
+  if (!s.ok()) return s;
 
-    BlobRecordHeader header;
-    s = header.DecodeFrom(&header_slice);
-    if (!s.ok()) return s;
+  BlobRecordHeader header;
+  s = header.DecodeFrom(&header_slice);
+  if (!s.ok()) return s;
 
-    // 2. 计算 Value 的偏移量
-    // Offset + HeaderSize + KeySize
-    uint64_t value_offset = index.offset + BlobRecordHeader::kHeaderSize + header.key_size;
-    
-    // 3. 读取 Value
-    // 这里的 buffer 分配是个优化点，现在直接 resize string
-    value->resize(header.size);
-    Slice value_slice;
-    // string 的内存是连续的，可以直接写入 &(*value)[0]
-    s = file->Read(value_offset, header.size, &value_slice, &(*value)[0]);
-    
-    if (!s.ok()) return s;
-    
-    fprintf(stderr, "[DEBUG] Get Blob: Header.size=%u, Header.key_size=%u, Actual KeyLen=%lu\n", 
-        header.size, header.key_size, (unsigned long)index.size); // 注意 index.size 是总大小
-    // TODO: 这里应该计算 CRC 并校验。
-    // Week 1 暂时跳过 CRC 验证，只要读出来就行。
+  // 2. 读取 Key 和 Value
+  // 为了校验 CRC，我们必须读取 Key，虽然用户只请求 Value。
+  // 优化：我们可以一次性读取 Key + Value，减少一次系统调用 (pread)。
+  
+  size_t total_payload_size = header.key_size + header.size;
+  std::string buffer; // 临时缓冲区，用于存放 Key + Value
+  buffer.resize(total_payload_size);
+  
+  Slice payload_slice;
+  uint64_t payload_offset = index.offset + BlobRecordHeader::kHeaderSize;
+  
+  s = file->Read(payload_offset, total_payload_size, &payload_slice, &buffer[0]);
+  if (!s.ok()) return s;
 
-    return Status::OK();
+  // 3. 校验 CRC
+  // 校验范围：Header的长度字段(后8字节) + Key + Value
+  // header_buf[0..3] 是 CRC，header_buf[4..11] 是 Size 和 KeySize
+  
+  uint32_t calc_crc = crc32c::Value(header_buf + 4, 8); // 计算 Header 后半部分
+  calc_crc = crc32c::Extend(calc_crc, payload_slice.data(), payload_slice.size()); // 加上 Key + Value
+  calc_crc = crc32c::Mask(calc_crc); // Mask
+
+  if (calc_crc != header.crc) {
+      return Status::Corruption("Blob checksum mismatch");
+  }
+
+  // 4. 提取 Value 返回给用户
+  // payload_slice 包含 Key + Value
+  // Value 位于 Key 之后
+  if (payload_slice.size() != total_payload_size) {
+      return Status::Corruption("Read incomplete blob data");
+  }
+  
+  // 从 buffer 中截取 Value 部分
+  // buffer: [Key...][Value...]
+  value->assign(payload_slice.data() + header.key_size, header.size);
+
+  return Status::OK();
 }
 
 }

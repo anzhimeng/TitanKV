@@ -37,4 +37,16 @@ namespace titankv {
     // // 失败返回 false
     bool GetVarint32(Slice* input, uint32_t* value);
     bool GetVarint64(Slice* input, uint64_t* value);
+    // 核心解析函数：从指针 p 开始解析 Varint32
+    // limit: 内存边界，防止越界
+    // value: 输出参数
+    // 返回值: 解析成功后指向下一个字节的指针；如果解析失败（越界或溢出），返回 nullptr
+    const char* GetVarint32Ptr(const char* p, const char* limit, uint32_t* value);
+
+    // 从 input 中解析出带长度前缀的 Slice
+    // 格式: [Varint32 Length] [Data...]
+    // 成功返回 true 并更新 input 指针；失败返回 false
+    bool GetLengthPrefixedSlice(Slice* input, Slice* result);
+
+    
 }   // namespace titankv

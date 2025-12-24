@@ -50,4 +50,12 @@ class InternalKeyComparator {
   const char* Name() const { return "titankv.InternalKeyComparator"; }
 };
 
+
+class UserKeyComparator {
+ public:
+  // 直接调用 Slice 的比较函数
+  int Compare(const Slice& a, const Slice& b) const { return a.compare(b); }
+  const char* Name() const { return "titankv.UserKeyComparator"; }
+};
+
 } // namespace titankv

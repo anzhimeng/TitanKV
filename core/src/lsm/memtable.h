@@ -2,6 +2,7 @@
 
 #include "lsm/dbformat.h"
 #include "lsm/skiplist.h"
+#include "lsm/block.h" 
 #include "util/arena.h"
 #include "titankv/status.h"
 #include <string>
@@ -42,13 +43,9 @@ class MemTable {
   bool Get(const LookupKey& key, std::string* value, Status* s);
 
   // 迭代器 (用于 Flush)
-  // Iterator* NewIterator();
+  Iterator* NewIterator();
 
- private:
-  // 私有析构，只能通过 Unref 删除
-  ~MemTable();
-
-  // SkipList 需要一个比较器适配器
+    // SkipList 需要一个比较器适配器
   struct KeyComparator {
     const InternalKeyComparator comparator;
     explicit KeyComparator(const InternalKeyComparator& c) : comparator(c) {}
@@ -58,6 +55,10 @@ class MemTable {
   };
 
   typedef SkipList<const char*, KeyComparator> Table;
+
+ private:
+  // 私有析构，只能通过 Unref 删除
+  ~MemTable();
 
   InternalKeyComparator comparator_;
   int refs_;

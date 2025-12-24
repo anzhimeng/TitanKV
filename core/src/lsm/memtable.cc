@@ -128,4 +128,49 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
   return false;
 }
 
+// 包装类：把 SkipList::Iterator 适配成 titankv::Iterator 接口
+class MemTableIterator : public Iterator {
+ public:
+  explicit MemTableIterator(MemTable::Table::Iterator* iter) : iter_(iter) {}
+  ~MemTableIterator() override { delete iter_; }
+
+  bool Valid() const override { return iter_->Valid(); }
+  void Seek(const Slice& k) override { iter_->Seek(k.data()); }
+  void SeekToFirst() override { iter_->SeekToFirst(); }
+  void SeekToLast() override { iter_->SeekToLast(); }
+  void Next() override { iter_->Next(); }
+  void Prev() override { iter_->Prev(); }
+  
+  Slice key() const override { 
+      // SkipList 存的是带长度前缀的 Key，我们需要解析一下
+      // 参考 MemTable::Get 里的逻辑
+      Slice k = GetLengthPrefixedSlice(iter_->key()); 
+      return k;
+  }
+  
+  Slice value() const override {
+      Slice key_slice = GetLengthPrefixedSlice(iter_->key());
+      // Value 紧跟在 Key 后面，也是带长度前缀的
+      const char* v_ptr = key_slice.data() + key_slice.size();
+      return GetLengthPrefixedSlice(v_ptr);
+  }
+
+ private:
+  MemTable::Table::Iterator* iter_;
+  
+  // 辅助：从 ptr 解析 Varint 长度并返回 Slice
+  Slice GetLengthPrefixedSlice(const char* data) const {
+      uint32_t len;
+      Slice input(data, 5);
+      GetVarint32(&input, &len); // 你的 GetVarint32 会移动 input 指针
+      // 计算头部长度：input.data() - data
+      size_t header_len = input.data() - data;
+      return Slice(data + header_len, len);
+  }
+};
+
+Iterator* MemTable::NewIterator() {
+  return new MemTableIterator(table_.NewIterator());
+}
+
 } // namespace titankv
