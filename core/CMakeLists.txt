@@ -29,6 +29,9 @@ set(CORE_SOURCES
     # 日志组件
     src/wal/log_reader.cc
     src/wal/log_writer.cc
+
+    # 对外接口
+    src/api/titan_c.cc
 )
 
 # 2. 生成静态库

@@ -1,0 +1,83 @@
+#include "titan_c.h"
+#include "titan_db.h" // Week 2 整理的总入口
+#include <cstring>
+#include <cstdlib>
+
+using namespace titankv;
+
+// 内部辅助：将 Status 转换为 char* 错误信息
+static void set_error(char** err, const Status& s) {
+    if (s.ok()) {
+        *err = nullptr;
+    } else {
+        std::string msg = s.ToString();
+        *err = static_cast<char*>(malloc(msg.size() + 1));
+        std::strcpy(*err, msg.c_str());
+    }
+}
+
+extern "C" {
+
+struct titan_db_t {
+    DB* rep;
+};
+
+titan_db_t* titan_open(const char* name, char** err) {
+    Options options;
+    options.create_if_missing = true;
+    
+    DB* db;
+    Status s = DB::Open(options, std::string(name), &db);
+    
+    if (!s.ok()) {
+        set_error(err, s);
+        return nullptr;
+    }
+    
+    titan_db_t* wrapper = new titan_db_t;
+    wrapper->rep = db;
+    *err = nullptr;
+    return wrapper;
+}
+
+void titan_close(titan_db_t* db) {
+    if (db) {
+        delete db->rep;
+        delete db;
+    }
+}
+
+void titan_put(titan_db_t* db, const char* key, size_t klen, 
+               const char* val, size_t vlen, char** err) {
+    Status s = db->rep->Put(WriteOptions(), Slice(key, klen), Slice(val, vlen));
+    set_error(err, s);
+}
+
+void titan_get(titan_db_t* db, const char* key, size_t klen, 
+               char** val, size_t* vlen, char** err) {
+    std::string result;
+    Status s = db->rep->Get(ReadOptions(), Slice(key, klen), &result);
+    
+    if (s.ok()) {
+        *vlen = result.size();
+        // 必须 malloc 内存传给 Go，因为 std::string 出栈就析构了
+        *val = static_cast<char*>(malloc(result.size()));
+        memcpy(*val, result.data(), result.size());
+        *err = nullptr;
+    } else {
+        *val = nullptr;
+        *vlen = 0;
+        set_error(err, s);
+    }
+}
+
+void titan_delete(titan_db_t* db, const char* key, size_t klen, char** err) {
+    Status s = db->rep->Delete(WriteOptions(), Slice(key, klen));
+    set_error(err, s);
+}
+
+void titan_free(void* ptr) {
+    if (ptr) free(ptr);
+}
+
+} // extern "C"

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package titankv;
+option go_package = "titankv/api/titankvpb";
+
+// 定义 KV 服务
+service TitanKV {
+    // Client API
+    rpc Get(GetRequest) returns (GetResponse);
+    rpc Put(PutRequest) returns (PutResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+    // 【新增】Raft Node API
+    // 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
+    rpc Raft(RaftMessage) returns (RaftResponse);
+}
+
+message GetRequest {
+    bytes key = 1;
+}
+
+message GetResponse {
+    bytes value = 1;
+    // 如果找不到，通过 gRPC 错误码 (NotFound) 返回，这里不需要 extra field
+}
+
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {
+    // 错误码：0=成功, 1=不是Leader
+    int32 err_code = 1; 
+    // 如果不是 Leader，这里返回 Leader 的 Node ID
+    uint64 leader_id = 2;
+}
+message DeleteRequest {
+    bytes key = 1;
+}
+
+message DeleteResponse {}
+
+// 这一层是给 Raft Log 用的，不直接暴露给外部 Client
+message RaftCommand {
+    enum OpType {
+        PUT = 0;
+        DELETE = 1;
+    }
+    OpType op = 1;
+    bytes key = 2;
+    bytes value = 3;
+}
+
+message RaftMessage {
+    // 直接传输序列化后的 etcd/raft/raftpb.Message
+    bytes data = 1;
+}
+
+message RaftResponse {} // 空响应，只要不报错就代表收到
