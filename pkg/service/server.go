@@ -5,7 +5,6 @@ import (
 	"titankv/api/titankvpb"
 	"titankv/pkg/raft"
 	"titankv/pkg/store" // 用于 Get 直接读
-	"log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -13,47 +12,68 @@ import (
 type Server struct {
 	titankvpb.UnimplementedTitanKVServer
 	raftNode *raft.TitanRaft // 改用 RaftNode
+	batcher  *raft.Batcher
 	store    *store.TitanStore // 保留 store 用于读 (Day 3 暂不实现 ReadIndex)
 }
 
-func NewServer(r *raft.TitanRaft, s *store.TitanStore) *Server {
-	return &Server{raftNode: r, store: s}
+func NewServer(r *raft.TitanRaft, b *raft.Batcher, s *store.TitanStore) *Server {
+	return &Server{
+		raftNode: r,
+		batcher:  b,
+		store:    s,
+	}
 }
 
 func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb.PutResponse, error) {
-    // 1. 检查自己是不是 Leader
-    // Status() 开销较大，生产环境通常缓存 Leader ID
+    // 1. 检查 Leader
     if s.raftNode.Node.Status().Lead != s.raftNode.ID {
         return &titankvpb.PutResponse{
-            ErrCode:  1, // Not Leader
+            ErrCode:  1,
             LeaderId: s.raftNode.Node.Status().Lead,
         }, nil
     }
+    
+	cmd := &titankvpb.RaftCommand{
+		Op:    titankvpb.RaftCommand_PUT,
+		Key:   req.Key,
+		Value: req.Value,
+	}
 
-    // 2. 是 Leader，正常处理
-    cmd := &titankvpb.RaftCommand{
-        Op:    titankvpb.RaftCommand_PUT,
-        Key:   req.Key,
-        Value: req.Value,
-    }
+	err := s.batcher.Propose(ctx, cmd)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 
-    err := s.raftNode.Propose(ctx, cmd)
-    if err != nil {
-        return nil, status.Error(codes.Internal, err.Error())
-    }
-
-    return &titankvpb.PutResponse{ErrCode: 0}, nil
+	return &titankvpb.PutResponse{ErrCode: 0}, nil
 }
 
-// Get 依然直接查 store (暂时牺牲强一致性，为了先跑通写链路)
 func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb.GetResponse, error) {
-    // ... 保持 Day 2 的逻辑不变 ...
-    val, err := s.store.Get(req.Key)
-    	if err != nil {
-		log.Fatalf("Failed to get key: %v", req.Key)
+	if len(req.Key) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "key cannot be empty")
 	}
-    // ...
-    return &titankvpb.GetResponse{Value: val}, nil
+
+	// 【Day 4 核心逻辑】
+	// 1. 发起 ReadIndex (这一步会阻塞直到 Leader 确认身份)
+	readIndex, err := s.raftNode.LinearizableRead(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "raft read index failed: "+err.Error())
+	}
+
+	// 2. 等待状态机追上 ReadIndex
+	if err := s.raftNode.WaitApplied(ctx, readIndex); err != nil {
+		return nil, status.Error(codes.DeadlineExceeded, "wait applied failed")
+	}
+
+	// 3. 安全读取 C++ 引擎
+	val, err := s.store.Get(req.Key)
+	if err != nil {
+		if err.Error() == "key not found" {
+			return nil, status.Error(codes.NotFound, "key not found")
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &titankvpb.GetResponse{Value: val}, nil
 }
 
 // Delete 也要走 Raft

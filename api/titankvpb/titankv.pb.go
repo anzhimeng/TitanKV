@@ -347,6 +347,7 @@ type RaftCommand struct {
 	Op            RaftCommand_OpType     `protobuf:"varint,1,opt,name=op,proto3,enum=titankv.RaftCommand_OpType" json:"op,omitempty"`
 	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	Value         []byte                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	RequestId     uint64                 `protobuf:"varint,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -402,6 +403,57 @@ func (x *RaftCommand) GetValue() []byte {
 	return nil
 }
 
+func (x *RaftCommand) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+type BatchRaftCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Commands      []*RaftCommand         `protobuf:"bytes,1,rep,name=commands,proto3" json:"commands,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchRaftCommand) Reset() {
+	*x = BatchRaftCommand{}
+	mi := &file_titankv_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchRaftCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchRaftCommand) ProtoMessage() {}
+
+func (x *BatchRaftCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_titankv_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchRaftCommand.ProtoReflect.Descriptor instead.
+func (*BatchRaftCommand) Descriptor() ([]byte, []int) {
+	return file_titankv_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *BatchRaftCommand) GetCommands() []*RaftCommand {
+	if x != nil {
+		return x.Commands
+	}
+	return nil
+}
+
 type RaftMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 直接传输序列化后的 etcd/raft/raftpb.Message
@@ -412,7 +464,7 @@ type RaftMessage struct {
 
 func (x *RaftMessage) Reset() {
 	*x = RaftMessage{}
-	mi := &file_titankv_proto_msgTypes[7]
+	mi := &file_titankv_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -424,7 +476,7 @@ func (x *RaftMessage) String() string {
 func (*RaftMessage) ProtoMessage() {}
 
 func (x *RaftMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[7]
+	mi := &file_titankv_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -437,7 +489,7 @@ func (x *RaftMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftMessage.ProtoReflect.Descriptor instead.
 func (*RaftMessage) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{7}
+	return file_titankv_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RaftMessage) GetData() []byte {
@@ -455,7 +507,7 @@ type RaftResponse struct {
 
 func (x *RaftResponse) Reset() {
 	*x = RaftResponse{}
-	mi := &file_titankv_proto_msgTypes[8]
+	mi := &file_titankv_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -467,7 +519,7 @@ func (x *RaftResponse) String() string {
 func (*RaftResponse) ProtoMessage() {}
 
 func (x *RaftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[8]
+	mi := &file_titankv_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -480,7 +532,7 @@ func (x *RaftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftResponse.ProtoReflect.Descriptor instead.
 func (*RaftResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{8}
+	return file_titankv_proto_rawDescGZIP(), []int{9}
 }
 
 var File_titankv_proto protoreflect.FileDescriptor
@@ -502,15 +554,19 @@ const file_titankv_proto_rawDesc = "" +
 	"\tleader_id\x18\x02 \x01(\x04R\bleaderId\"!\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\fR\x03key\"\x10\n" +
-	"\x0eDeleteResponse\"\x81\x01\n" +
+	"\x0eDeleteResponse\"\xa0\x01\n" +
 	"\vRaftCommand\x12+\n" +
 	"\x02op\x18\x01 \x01(\x0e2\x1b.titankv.RaftCommand.OpTypeR\x02op\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\fR\x05value\"\x1d\n" +
+	"\x05value\x18\x03 \x01(\fR\x05value\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x04 \x01(\x04R\trequestId\"\x1d\n" +
 	"\x06OpType\x12\a\n" +
 	"\x03PUT\x10\x00\x12\n" +
 	"\n" +
-	"\x06DELETE\x10\x01\"!\n" +
+	"\x06DELETE\x10\x01\"D\n" +
+	"\x10BatchRaftCommand\x120\n" +
+	"\bcommands\x18\x01 \x03(\v2\x14.titankv.RaftCommandR\bcommands\"!\n" +
 	"\vRaftMessage\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"\x0e\n" +
 	"\fRaftResponse2\xdd\x01\n" +
@@ -533,34 +589,36 @@ func file_titankv_proto_rawDescGZIP() []byte {
 }
 
 var file_titankv_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_titankv_proto_goTypes = []any{
-	(RaftCommand_OpType)(0), // 0: titankv.RaftCommand.OpType
-	(*GetRequest)(nil),      // 1: titankv.GetRequest
-	(*GetResponse)(nil),     // 2: titankv.GetResponse
-	(*PutRequest)(nil),      // 3: titankv.PutRequest
-	(*PutResponse)(nil),     // 4: titankv.PutResponse
-	(*DeleteRequest)(nil),   // 5: titankv.DeleteRequest
-	(*DeleteResponse)(nil),  // 6: titankv.DeleteResponse
-	(*RaftCommand)(nil),     // 7: titankv.RaftCommand
-	(*RaftMessage)(nil),     // 8: titankv.RaftMessage
-	(*RaftResponse)(nil),    // 9: titankv.RaftResponse
+	(RaftCommand_OpType)(0),  // 0: titankv.RaftCommand.OpType
+	(*GetRequest)(nil),       // 1: titankv.GetRequest
+	(*GetResponse)(nil),      // 2: titankv.GetResponse
+	(*PutRequest)(nil),       // 3: titankv.PutRequest
+	(*PutResponse)(nil),      // 4: titankv.PutResponse
+	(*DeleteRequest)(nil),    // 5: titankv.DeleteRequest
+	(*DeleteResponse)(nil),   // 6: titankv.DeleteResponse
+	(*RaftCommand)(nil),      // 7: titankv.RaftCommand
+	(*BatchRaftCommand)(nil), // 8: titankv.BatchRaftCommand
+	(*RaftMessage)(nil),      // 9: titankv.RaftMessage
+	(*RaftResponse)(nil),     // 10: titankv.RaftResponse
 }
 var file_titankv_proto_depIdxs = []int32{
-	0, // 0: titankv.RaftCommand.op:type_name -> titankv.RaftCommand.OpType
-	1, // 1: titankv.TitanKV.Get:input_type -> titankv.GetRequest
-	3, // 2: titankv.TitanKV.Put:input_type -> titankv.PutRequest
-	5, // 3: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
-	8, // 4: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
-	2, // 5: titankv.TitanKV.Get:output_type -> titankv.GetResponse
-	4, // 6: titankv.TitanKV.Put:output_type -> titankv.PutResponse
-	6, // 7: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
-	9, // 8: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0,  // 0: titankv.RaftCommand.op:type_name -> titankv.RaftCommand.OpType
+	7,  // 1: titankv.BatchRaftCommand.commands:type_name -> titankv.RaftCommand
+	1,  // 2: titankv.TitanKV.Get:input_type -> titankv.GetRequest
+	3,  // 3: titankv.TitanKV.Put:input_type -> titankv.PutRequest
+	5,  // 4: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
+	9,  // 5: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
+	2,  // 6: titankv.TitanKV.Get:output_type -> titankv.GetResponse
+	4,  // 7: titankv.TitanKV.Put:output_type -> titankv.PutResponse
+	6,  // 8: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
+	10, // 9: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
+	6,  // [6:10] is the sub-list for method output_type
+	2,  // [2:6] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_titankv_proto_init() }
@@ -574,7 +632,7 @@ func file_titankv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_titankv_proto_rawDesc), len(file_titankv_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

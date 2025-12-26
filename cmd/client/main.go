@@ -19,7 +19,7 @@ var clusterMap = map[uint64]string{
 
 func main() {
 	// 循环写入 20 条数据，足以触发 snapshotCount=10 的阈值
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 30; i++ {
 		key := fmt.Sprintf("key-%d", i)
 		val := fmt.Sprintf("val-%d", i)
 		put(key, val)

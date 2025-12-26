@@ -50,6 +50,11 @@ message RaftCommand {
     OpType op = 1;
     bytes key = 2;
     bytes value = 3;
+    uint64 request_id = 4;
+}
+
+message BatchRaftCommand {
+    repeated RaftCommand commands = 1;
 }
 
 message RaftMessage {
