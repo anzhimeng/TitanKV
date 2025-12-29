@@ -13,7 +13,7 @@ class Table {
  public:
   // 打开 SSTable 文件
   static Status Open(const Options& options, RandomAccessFile* file,
-                     uint64_t file_size, Table** table);
+                     uint64_t file_number, uint64_t file_size, Table** table);
 
   ~Table();
 

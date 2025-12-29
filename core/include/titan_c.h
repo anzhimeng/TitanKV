@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,10 +11,13 @@ extern "C" {
 // 定义一个不透明指针 (Opaque Pointer)，Go 只需要持有它，不需要知道内部结构
 typedef struct titan_db_t titan_db_t;
 
-// 打开数据库
-// name: 路径
-// err: 输出参数，如果出错，*err 会指向一个错误信息字符串(malloc分配)，调用者需释放
-titan_db_t* titan_open(const char* name, char** err);
+typedef struct {
+    bool create_if_missing;
+    bool use_direct_io; // 【新增】
+} titan_options_t;
+
+// 修改 open 接口，接收 options
+titan_db_t* titan_open(const char* name, const titan_options_t* options, char** err);
 
 // 关闭数据库
 void titan_close(titan_db_t* db);

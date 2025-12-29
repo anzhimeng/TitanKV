@@ -114,12 +114,21 @@ public:
         *result = Slice(scratch, r);
         return Status::OK();
     }
+    // 【新增】实现接口
+    int UnsafeGetFD() const override { return fd_; }
 };
 
-Status NewRandomAccessFile(const std::string& fname, std::unique_ptr<RandomAccessFile>* result) {
-    int fd = open(fname.c_str(), O_RDONLY);
+Status NewRandomAccessFile(const std::string& fname, 
+                           std::unique_ptr<RandomAccessFile>* result,
+                           bool use_direct_io) {
+    int flags = O_RDONLY;
+    if (use_direct_io) {
+        flags |= O_DIRECT;
+    }
+    
+    int fd = open(fname.c_str(), flags);
     if (fd < 0) {
-        return Status::IOError("Failed to open file for random reading", strerror(errno));
+        return Status::IOError("Failed to open file", strerror(errno));
     }
     result->reset(new PosixRandomAccessFile(fname, fd));
     return Status::OK();

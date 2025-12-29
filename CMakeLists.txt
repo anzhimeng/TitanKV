@@ -15,6 +15,7 @@ set(CRC32C_USE_GLOG OFF CACHE BOOL "" FORCE)
 
 # 引入第三方库
 add_subdirectory(third_party/crc32c)
+add_subdirectory(third_party/liburing)
 
 # GTest 配置 (保持不变)
 enable_testing()

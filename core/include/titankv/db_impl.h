@@ -12,6 +12,7 @@
 #include "wal/log_writer.h"
 #include "util/env.h"
 #include "lsm/version_set.h"
+#include "util/io_uring_executor.h" // 新增
 
 
 namespace titankv {
@@ -31,7 +32,7 @@ class DBImpl : public DB {
   friend class DB;
 
   const std::string dbname_;
-  const Options options_;
+  Options options_;
 
   std::mutex mutex_;
   MemTable* mem_;
@@ -46,8 +47,10 @@ class DBImpl : public DB {
   TableCache* table_cache_;      // SSTable 缓存
   VersionSet* versions_; 
 
+  std::unique_ptr<IoUringExecutor> uring_executor_; // 新增成员
+
   // 核心函数：将 MemTable 写入 SSTable
-  Status WriteLevel0Table(MemTable* mem,  Version* version);
+  Status WriteLevel0Table(MemTable* mem,  VersionEdit* edit);
   
   // 触发 Flush
   Status MaybeScheduleCompaction(); // Day 4 我们改为 MakeRoomForWrite 同步刷盘

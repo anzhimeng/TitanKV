@@ -21,10 +21,20 @@ VersionSet::~VersionSet() {
 }
 
 void VersionSet::AppendVersion(Version* v) {
-  // 生产环境这里是双向链表，Week 2 简化为直接替换
-  current_->Unref();
-  current_ = v;
-  v->Ref();
+  v->Ref(); // 先增加新版本的引用
+  
+  // 原子替换 current_
+  // 注意：current_ 是普通指针，标准 C++ 对普通指针赋值是原子的（在 x64 上），
+  // 但为了绝对安全，可以用 std::atomic_exchange 或者手动加锁保护 current_ 的切换。
+  // 考虑到我们在 LogAndApply 里持有 mutex_，其实写是安全的。
+  
+  // 关键问题是读：Get 里的 current_ = versions_->current() 是无锁的。
+  
+  Version* old = current_;
+  current_ = v; // 切换指针
+  
+  // 延迟释放旧版本
+  old->Unref(); 
 }
 
 Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {

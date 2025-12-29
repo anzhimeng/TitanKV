@@ -41,8 +41,14 @@ public:
     // scratch: 调用者提供的缓冲区
     // result: 返回实际读取的 Slice (指向 scratch 或内部缓存)
     virtual Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const = 0;
+    // 【新增】获取原始文件描述符 (用于 io_uring)
+    // 默认返回 -1 表示不支持
+    virtual int UnsafeGetFD() const { return -1; }
 };
 
-Status NewRandomAccessFile(const std::string& fname, std::unique_ptr<RandomAccessFile>* result);
+// 增加 use_direct_io 参数，默认为 false
+Status NewRandomAccessFile(const std::string& fname, 
+                           std::unique_ptr<RandomAccessFile>* result,
+                           bool use_direct_io = false);
 
 }

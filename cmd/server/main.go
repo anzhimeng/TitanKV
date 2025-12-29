@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time" // ✅ 删除：不再需要，Batcher 配置已移至 Raft 内部
+	"net/http"
+     _ "net/http/pprof" // 注册 pprof 路由
 
 	"titankv/api/titankvpb"
 	"titankv/pkg/raft"
@@ -25,6 +27,7 @@ var (
 	dbPath  = flag.String("db_path", "/tmp/titankv_data", "Path to DB data")
 	nodeID  = flag.Uint64("id", 1, "Raft Node ID")
 	cluster = flag.String("cluster", "1=127.0.0.1:9090", "Cluster configuration")
+	directIO = flag.Bool("direct_io", false, "Enable Direct IO (io_uring)")
 )
 
 func main() {
@@ -50,8 +53,8 @@ func main() {
 	// 2. 初始化 C++ 存储引擎
 	// 建议：为了防止同一台机器开多个节点冲突，可以在路径后追加 ID
 	// 但为了保持和你原有逻辑一致，这里先不做修改
-	log.Printf("Opening storage at %s...", *dbPath)
-	db, err := store.Open(*dbPath)
+    log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
+    db, err := store.Open(*dbPath, *directIO)
 	if err != nil {
 		log.Fatalf("Failed to open db: %v", err)
 	}
@@ -67,6 +70,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
+
+    go func() {
+        pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID) // 避免端口冲突: 6061, 6062...
+        log.Printf("Pprof listening on %s", pprofAddr)
+        log.Println(http.ListenAndServe(pprofAddr, nil))
+    }()
 
 	// 5. 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()

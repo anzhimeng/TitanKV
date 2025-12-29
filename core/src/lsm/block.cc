@@ -9,15 +9,13 @@ namespace titankv {
 static inline const char* DecodeEntry(const char* p, const char* limit,
                                       uint32_t* shared, uint32_t* non_shared,
                                       uint32_t* value_length) {
-  if (limit - p < 3) return nullptr; // 至少 3 个字节
+  if (limit - p < 3) return nullptr;
   *shared = static_cast<uint8_t>(p[0]);
   *non_shared = static_cast<uint8_t>(p[1]);
   *value_length = static_cast<uint8_t>(p[2]);
   if ((*shared | *non_shared | *value_length) < 128) {
-    // 快速路径：所有长度都 < 128 (1字节)
     p += 3;
   } else {
-    // 慢速路径：完整的 Varint 解析
     if ((p = GetVarint32Ptr(p, limit, shared)) == nullptr) return nullptr;
     if ((p = GetVarint32Ptr(p, limit, non_shared)) == nullptr) return nullptr;
     if ((p = GetVarint32Ptr(p, limit, value_length)) == nullptr) return nullptr;
@@ -30,14 +28,12 @@ Block::Block(const BlockContents& contents)
       size_(contents.data.size()),
       owned_(contents.heap_allocated) {
   if (size_ < sizeof(uint32_t)) {
-    size_ = 0;  // 错误：数据太小
+    size_ = 0; 
   } else {
-    // 读取最后的 restart_count
-    // restart_array 位于: total_size - sizeof(uint32) - (count * 4)
     size_t max_restarts_allowed = (size_ - sizeof(uint32_t)) / sizeof(uint32_t);
     uint32_t num_restarts = DecodeFixed32(data_ + size_ - sizeof(uint32_t));
     if (num_restarts > max_restarts_allowed) {
-      size_ = 0; // 错误：restart count 太大
+      size_ = 0; 
     } else {
       restart_offset_ = size_ - (1 + num_restarts) * sizeof(uint32_t);
     }
@@ -82,18 +78,31 @@ class BlockIterator : public Iterator {
     ParseNextKey();
   }
 
+  // 【完善】实现了真正的 Prev 逻辑
   void Prev() override {
-    // 简单实现 Prev：二分查找找到比当前 key 小的最后一个
-    // 这里的实现比较复杂，Week 2 Day 3 可以先留空或者抛出 NotSupported
-    // 为了编译通过，我们先 Seek 到当前 Key 之前
-    // 实际生产中 Prev 效率较低，通常通过 Restart Point 回溯实现
-    const Slice target = key();
-    Seek(target); // 这是一个 stub，实际 Prev 逻辑很长
-    // 暂时留空或者后续补充
+    assert(Valid());
+
+    // 扫描直到 current_ 之前的位置
+    const uint32_t original = current_;
+    while (GetRestartPoint(restart_index_) >= original) {
+      if (restart_index_ == 0) {
+        // 到头了
+        current_ = restart_offset_;
+        restart_index_ = num_restarts_;
+        return;
+      }
+      restart_index_--;
+    }
+
+    SeekToRestartPoint(restart_index_);
+    
+    // 线性扫描直到下一个就是 original
+    while (NextEntryOffset() < original) {
+      ParseNextKey();
+    }
   }
 
   void Seek(const Slice& target) override {
-    // 1. 二分查找 Restart Points
     uint32_t left = 0;
     uint32_t right = num_restarts_ - 1;
     
@@ -120,12 +129,7 @@ class BlockIterator : public Iterator {
     SeekToRestartPoint(left);
     
     while (true) {
-      if (!Valid())
-      {
-      	fprintf(stderr, "[BlockIter] Seek Hit End. Target: %s\n", target.ToString().c_str());
-      	return;
-      }
-      fprintf(stderr, "[BlockIter] Scanning Key: %s\n", key_.c_str());
+      if (!Valid()) return;
       if (comparator_->Compare(key_, target) >= 0) {
         return;
       }
@@ -166,6 +170,7 @@ class BlockIterator : public Iterator {
     restart_index_ = index;
     uint32_t offset = GetRestartPoint(index);
     current_ = offset;
+    // 【关键修复】确保 NextEntryOffset 计算正确
     value_ = Slice(data_ + offset, 0); 
   }
 
@@ -212,7 +217,6 @@ Iterator* Block::NewIterator(const UserKeyComparator* comparator) {
     return nullptr;
   }
   
-  // 这里 new 的是 BlockIterator，但返回类型是 Iterator* (多态)
   return new BlockIterator(comparator, data_, restart_offset_, num_restarts);
 }
 

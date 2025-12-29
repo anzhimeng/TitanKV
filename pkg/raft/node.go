@@ -23,6 +23,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	electionTicks = 20 // 2秒超时，容忍 IO 抖动
+	tickMs        = 100
+	
+	// 时钟漂移保护时间
+	ClockDriftBound = 5 * time.Millisecond
+)
+
 type TitanRaft struct {
 	Node        raft.Node
 	ID          uint64
@@ -31,23 +39,24 @@ type TitanRaft struct {
 	snapshotter *snap.Snapshotter
 	fsm         *store.TitanStore
 	transport   *Transport
+	batcher     *Batcher
 	peers       []uint64
 	walDir      string
 
-	// lastApplied 保持 uint64，通过 atomic 函数操作
-	lastApplied uint64
+	lastApplied uint64 // atomic
+	reqIDGen    uint64 // atomic
 
-	// 原子计数器，用于生成 ReadIndex 的唯一 Request ID
-	reqIDGen uint64
-
-	// ReadIndex 通知机制
 	readWaitC map[string]chan uint64
 	readMu    sync.Mutex
 
-	// 使用 Cond 优化 WaitApplied 性能
 	applyMu   sync.Mutex
 	applyCond *sync.Cond
 
+	// Lease Read 相关
+	peerLastActive  sync.Map
+	leaseExpiration time.Time
+	leaseMu         sync.Mutex 
+	electionTimeout time.Duration
 }
 
 func replayWAL(walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, *raft.MemoryStorage) {
@@ -111,7 +120,7 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 
 	c := &raft.Config{
 		ID:              id,
-		ElectionTick:    10,
+		ElectionTick:    electionTicks,
 		HeartbeatTick:   1,
 		Storage:         storage,
 		MaxSizePerMsg:   4096,
@@ -128,11 +137,7 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 	}
 
 	var n raft.Node
-	hs, _, err := storage.InitialState()
-	if err != nil {
-		log.Fatalf("Failed to get initial state: %v", err)
-	}
-
+	hs, _, _ := storage.InitialState()
 	lastIndex, _ := storage.LastIndex()
 
 	if lastIndex > 0 || !raft.IsEmptyHardState(hs) {
@@ -146,24 +151,28 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 	trans := NewTransport(peers)
 
 	tr := &TitanRaft{
-		Node:        n,
-		ID:          id,
-		raftStorage: storage,
-		wal:         w,
-		snapshotter: snapshotter,
-		fsm:         fsm,
-		transport:   trans,
-		peers:       peerIDs,
-		walDir:      walDir,
-		readWaitC:   make(map[string]chan uint64),
+		Node:            n,
+		ID:              id,
+		raftStorage:     storage,
+		wal:             w,
+		snapshotter:     snapshotter,
+		fsm:             fsm,
+		transport:       trans,
+		peers:           peerIDs,
+		walDir:          walDir,
+		readWaitC:       make(map[string]chan uint64),
+		electionTimeout: time.Duration(electionTicks*tickMs) * time.Millisecond,
 	}
+	
+	// 内部初始化 Batcher
+	tr.batcher = NewBatcher(tr, 100, 10*time.Millisecond)
 
-	// 初始化 Condition Variable
 	tr.applyCond = sync.NewCond(&tr.applyMu)
 
 	if snapshot != nil {
 		atomic.StoreUint64(&tr.lastApplied, snapshot.Metadata.Index)
 	}
+
 	go tr.run()
 	return tr
 }
@@ -172,9 +181,31 @@ func (tr *TitanRaft) getApplied() uint64 {
 	return atomic.LoadUint64(&tr.lastApplied)
 }
 
+// 核心读入口：线性一致性读
 func (tr *TitanRaft) LinearizableRead(ctx context.Context) (uint64, error) {
-	reqID := atomic.AddUint64(&tr.reqIDGen, 1)
+	// 1. 尝试 Lease Read (Fast Path)
+	if tr.isLeaseValid() {
+		return tr.getApplied(), nil
+	}
+
+	// 2. 回退到标准 ReadIndex (Slow Path)
+	return tr.requestReadIndex(ctx)
+}
+
+// 检查租约有效性
+func (tr *TitanRaft) isLeaseValid() bool {
+	if tr.Node.Status().Lead != tr.ID {
+		return false
+	}
+	tr.leaseMu.Lock()
+	defer tr.leaseMu.Unlock()
 	
+	safeTime := time.Now().Add(ClockDriftBound)
+	return safeTime.Before(tr.leaseExpiration)
+}
+
+func (tr *TitanRaft) requestReadIndex(ctx context.Context) (uint64, error) {
+	reqID := atomic.AddUint64(&tr.reqIDGen, 1)
 	idBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(idBytes, reqID)
 	idStr := string(idBytes)
@@ -198,17 +229,21 @@ func (tr *TitanRaft) LinearizableRead(ctx context.Context) (uint64, error) {
 	}
 }
 
+func (tr *TitanRaft) cleanupReadWait(id string) {
+	tr.readMu.Lock()
+	delete(tr.readWaitC, id)
+	tr.readMu.Unlock()
+}
+
 func (tr *TitanRaft) WaitApplied(ctx context.Context, targetIndex uint64) error {
 	if tr.getApplied() >= targetIndex {
 		return nil
 	}
 
 	doneC := make(chan struct{})
-
 	go func() {
 		tr.applyMu.Lock()
 		defer tr.applyMu.Unlock()
-		
 		for tr.getApplied() < targetIndex {
 			tr.applyCond.Wait()
 		}
@@ -219,20 +254,18 @@ func (tr *TitanRaft) WaitApplied(ctx context.Context, targetIndex uint64) error 
 	case <-doneC:
 		return nil
 	case <-ctx.Done():
-		// 注意：这里的 ctx 取消无法直接中断 Wait，只能放弃等待。
-		// 被阻塞的 goroutine 会在下一次 Broadcast 后自行退出。
 		return ctx.Err()
 	}
 }
 
-func (tr *TitanRaft) cleanupReadWait(id string) {
-	tr.readMu.Lock()
-	delete(tr.readWaitC, id)
-	tr.readMu.Unlock()
+// Client 调用的 Propose (走 Batcher)
+func (tr *TitanRaft) Propose(ctx context.Context, cmd *titankvpb.RaftCommand) error {
+	return tr.batcher.Propose(ctx, cmd)
 }
 
-func (tr *TitanRaft) Propose(ctx context.Context, cmd *titankvpb.RaftCommand) error {
-	data, err := proto.Marshal(cmd)
+// Batcher 调用的批量 Propose
+func (tr *TitanRaft) ProposeBatch(ctx context.Context, batch *titankvpb.BatchRaftCommand) error {
+	data, err := proto.Marshal(batch)
 	if err != nil {
 		return err
 	}
@@ -244,22 +277,60 @@ func (tr *TitanRaft) Step(ctx context.Context, msg *titankvpb.RaftMessage) error
 	if err := rMsg.Unmarshal(msg.Data); err != nil {
 		return err
 	}
+
+	// 拦截心跳，更新租约
+	if rMsg.Type == raftpb.MsgHeartbeatResp {
+		tr.peerLastActive.Store(rMsg.From, time.Now())
+		tr.leaseMu.Lock()
+		tr.updateLease()
+		tr.leaseMu.Unlock()
+	}
+
 	return tr.Node.Step(ctx, rMsg)
 }
 
-func (tr *TitanRaft) run() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+func (tr *TitanRaft) updateLease() {
+	if tr.Node.Status().Lead != tr.ID {
+		return
+	}
 
-	log.Printf("Raft run loop started for Node %d", tr.ID)
+	activeCount := 1
+	now := time.Now()
+	
+	tr.peerLastActive.Range(func(key, value interface{}) bool {
+		lastActive := value.(time.Time)
+		if now.Sub(lastActive) < tr.electionTimeout {
+			activeCount++
+		}
+		return true
+	})
+
+	quorum := len(tr.peers)/2 + 1
+	if activeCount >= quorum {
+		newExpiry := now.Add(tr.electionTimeout)
+		if newExpiry.After(tr.leaseExpiration) {
+			tr.leaseExpiration = newExpiry
+		}
+	}
+}
+
+func (tr *TitanRaft) run() {
+	// 独立 Ticker
+	go func() {
+		ticker := time.NewTicker(time.Duration(tickMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				tr.Node.Tick()
+			}
+		}
+	}()
 
 	for {
 		select {
-		case <-ticker.C:
-			tr.Node.Tick()
-
 		case rd := <-tr.Node.Ready():
-			// 1. 处理 ReadStates (ReadIndex 回调)
+			// 1. ReadIndex
 			if len(rd.ReadStates) > 0 {
 				tr.readMu.Lock()
 				for _, rs := range rd.ReadStates {
@@ -272,12 +343,12 @@ func (tr *TitanRaft) run() {
 				tr.readMu.Unlock()
 			}
 
-			// 2. 处理快照
+			// 2. Snapshot
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				tr.handleSnapshot(rd.Snapshot)
 			}
 
-			// 3. 持久化 WAL
+			// 3. WAL
 			if !raft.IsEmptyHardState(rd.HardState) || len(rd.Entries) > 0 {
 				if err := tr.wal.Save(rd.HardState, rd.Entries); err != nil {
 					log.Fatalf("Failed to save WAL: %v", err)
@@ -286,15 +357,15 @@ func (tr *TitanRaft) run() {
 
 			tr.raftStorage.Append(rd.Entries)
 
+			// 4. Send
 			for _, msg := range rd.Messages {
 				tr.sendRaftMessage(msg)
 			}
 
-			// 4. 应用日志
+			// 5. Apply
 			for _, entry := range rd.CommittedEntries {
 				tr.processEntry(entry)
 				
-				// 原子更新并广播
 				currentApplied := tr.getApplied()
 				if entry.Index > currentApplied {
 					atomic.StoreUint64(&tr.lastApplied, entry.Index)
@@ -311,27 +382,27 @@ func (tr *TitanRaft) run() {
 func (tr *TitanRaft) handleSnapshot(snap raftpb.Snapshot) {
 	if raft.IsEmptySnap(snap) { return }
 	
-	log.Printf("Received snapshot from leader! Index: %d", snap.Metadata.Index)
+	log.Printf("Received snapshot! Index: %d", snap.Metadata.Index)
 	if err := tr.snapshotter.SaveSnap(snap); err != nil {
-		log.Fatalf("Failed to save received snapshot: %v", err)
+		log.Fatalf("Save snap fail: %v", err)
 	}
 	if err := tr.raftStorage.ApplySnapshot(snap); err != nil {
-		log.Fatalf("Failed to apply snapshot to storage: %v", err)
+		log.Fatalf("Apply snap fail: %v", err)
 	}
 	tr.processSnapshot(snap)
 
 	if err := tr.wal.Close(); err != nil {
-		log.Fatalf("Failed to close WAL: %v", err)
+		log.Fatalf("Close WAL fail: %v", err)
 	}
 	if err := os.RemoveAll(tr.walDir); err != nil {
-		log.Fatalf("Failed to remove old WAL: %v", err)
+		log.Fatalf("Remove old WAL fail: %v", err)
 	}
 	if err := os.MkdirAll(tr.walDir, 0750); err != nil {
-		log.Fatalf("Failed to recreate wal dir: %v", err)
+		log.Fatalf("Recreate wal dir fail: %v", err)
 	}
 	w, err := wal.Create(zap.NewExample(), tr.walDir, nil)
 	if err != nil {
-		log.Fatalf("Failed to recreate WAL: %v", err)
+		log.Fatalf("Recreate WAL fail: %v", err)
 	}
 	tr.wal = w
 	if err := tr.wal.SaveSnapshot(walpb.Snapshot{
@@ -339,7 +410,7 @@ func (tr *TitanRaft) handleSnapshot(snap raftpb.Snapshot) {
 		Term:      snap.Metadata.Term,
 		ConfState: &snap.Metadata.ConfState,
 	}); err != nil {
-		log.Fatalf("Failed to save snapshot to WAL: %v", err)
+		log.Fatalf("Save snap to WAL fail: %v", err)
 	}
 }
 
@@ -349,28 +420,24 @@ func (tr *TitanRaft) maybeTriggerSnapshot() {
 	applied := tr.getApplied()
 
 	if applied >= first && (applied-first >= snapshotCount) {
-		log.Printf("Compacting log up to index %d...", applied)
-		
+		log.Printf("Compacting log to %d...", applied)
 		confState := raftpb.ConfState{Voters: tr.peers}
 		snap, err := tr.raftStorage.CreateSnapshot(applied, &confState, nil)
 		if err != nil {
 			if err != raft.ErrSnapOutOfDate {
-				log.Printf("CreateSnapshot failed: %v", err)
+				log.Printf("CreateSnapshot fail: %v", err)
 			}
 			return
 		}
 
 		if err := tr.snapshotter.SaveSnap(snap); err != nil {
-			log.Fatalf("Failed to save snapshot: %v", err)
+			log.Fatalf("Save snap fail: %v", err)
 		}
-		
 		if err := tr.wal.ReleaseLockTo(snap.Metadata.Index); err != nil {
-			log.Printf("Failed to release WAL lock: %v", err)
+			log.Printf("Release WAL fail: %v", err)
 		}
-
 		if err := tr.raftStorage.Compact(applied); err != nil {
-			log.Printf("Compact failed: %v", err)
-			return
+			log.Printf("Compact fail: %v", err)
 		}
 	}
 }
@@ -378,7 +445,7 @@ func (tr *TitanRaft) maybeTriggerSnapshot() {
 func (tr *TitanRaft) sendRaftMessage(msg raftpb.Message) {
 	data, err := msg.Marshal()
 	if err != nil {
-		log.Printf("Failed to marshal raft msg: %v", err)
+		log.Printf("Marshal fail: %v", err)
 		return
 	}
 	go func() {
@@ -391,32 +458,24 @@ func (tr *TitanRaft) sendRaftMessage(msg raftpb.Message) {
 
 func (tr *TitanRaft) processEntry(entry raftpb.Entry) {
 	if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
-		// 1. 优先尝试解析为 BatchCommand
 		var batch titankvpb.BatchRaftCommand
 		if err := proto.Unmarshal(entry.Data, &batch); err == nil && len(batch.Commands) > 0 {
-			// 是批处理，循环执行
 			for _, cmd := range batch.Commands {
 				tr.applySingleCommand(cmd)
 			}
 			return
 		}
 
-		// 2. 如果解析 Batch 失败，尝试解析为单条 Command (兼容旧数据)
 		var cmd titankvpb.RaftCommand
 		if err := proto.Unmarshal(entry.Data, &cmd); err == nil {
 			tr.applySingleCommand(&cmd)
-		} else {
-			log.Printf("Failed to unmarshal raft entry data")
 		}
 	}
 }
 
-// 提取出的单条执行逻辑
 func (tr *TitanRaft) applySingleCommand(cmd *titankvpb.RaftCommand) {
 	if cmd.Op == titankvpb.RaftCommand_PUT {
 		tr.fsm.Put(cmd.Key, cmd.Value)
-		// 高并发下建议注释掉日志，否则 IO 会成为瓶颈
-		// log.Printf("[Apply] Put Key=%s", string(cmd.Key))
 	} else if cmd.Op == titankvpb.RaftCommand_DELETE {
 		tr.fsm.Delete(cmd.Key)
 	}
@@ -425,15 +484,4 @@ func (tr *TitanRaft) applySingleCommand(cmd *titankvpb.RaftCommand) {
 func (tr *TitanRaft) processSnapshot(snap raftpb.Snapshot) {
 	atomic.StoreUint64(&tr.lastApplied, snap.Metadata.Index)
 	tr.applyCond.Broadcast()
-	log.Printf("Snapshot applied. LastApplied: %d", snap.Metadata.Index)
-}
-
-// 新增：ProposeBatch
-func (tr *TitanRaft) ProposeBatch(ctx context.Context, batch *titankvpb.BatchRaftCommand) error {
-	data, err := proto.Marshal(batch)
-	if err != nil {
-		return err
-	}
-	// 将整个 batch 作为一个 Log Entry 提交
-	return tr.Node.Propose(ctx, data)
 }

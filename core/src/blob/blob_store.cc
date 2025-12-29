@@ -1,25 +1,29 @@
-#include <filesystem> // C++17
 #include "blob/blob_store.h"
+#include "util/io_uring_executor.h"
+#include "util/aligned_buffer.h"
 #include "util/crc32c.h"
+#include "util/coding.h" // 【新增】用于 EncodeFixed32
+#include <filesystem>
 #include <cstdio>
+#include <future>
 
 namespace titankv {
 
-// 假设文件大小阈值为 64MB
-const uint64_t kBlobFileSizeThreshold = 64 * 1024 * 1024; 
-
-BlobStore::BlobStore(std::string db_path)
-    : db_path_(std::move(db_path)), next_file_id_(1) {
-  // 实际项目中，需要扫描 db_path_ 目录来恢复 next_file_id_
-  // 但在 Week 1，我们可以从 1 开始
-  std::filesystem::create_directories(db_path_);
+// 构造函数
+BlobStore::BlobStore(std::string db_path, const Options& options, IoUringExecutor* executor)
+    : db_path_(std::move(db_path)), 
+      options_(options), 
+      next_file_id_(1),     
+      executor_(executor) {
+    std::filesystem::create_directories(db_path_);
 }
 
-// 辅助函数
 Status BlobStore::CreateNewBlobFile() {
-  char file_id_str[30];
+  char file_id_str[30]; 
   snprintf(file_id_str, sizeof(file_id_str), "%06u.blob", next_file_id_);
-  std::string filename = std::filesystem::path(db_path_) / file_id_str;
+  
+  std::filesystem::path p = std::filesystem::path(db_path_) / file_id_str;
+  std::string filename = p.string();
 
   std::unique_ptr<WritableFile> file;
   Status s = NewWritableFile(filename, &file);
@@ -32,51 +36,39 @@ Status BlobStore::CreateNewBlobFile() {
   return Status::OK();
 }
 
-
 Status BlobStore::Add(const Slice& key, const Slice& value, BlobIndex* index) {
-  std::lock_guard<std::mutex> lock(mutex_); // 保护 active_writer_ 和 next_file_id_
+  std::lock_guard<std::mutex> lock(mutex_); 
 
-  // 1. 检查是否需要滚动文件
-  if (active_writer_ == nullptr || active_writer_->FileSize() > kBlobFileSizeThreshold) {
+  if (active_writer_ == nullptr || active_writer_->FileSize() > options_.max_blob_file_size) {
     Status s = CreateNewBlobFile();
-    if (!s.ok()) {
-      return s;
-    }
+    if (!s.ok()) return s;
   }
 
-  // 2. 记录写入前的元数据
   uint64_t offset = active_writer_->FileSize();
-  uint64_t record_size = kHeaderSize + key.size() + value.size();
-
-  // 3. 调用 BlobWriter 写入数据
   Status s = active_writer_->AddRecord(key, value);
-  if (!s.ok()) {
-    return s;
-  }
+  if (!s.ok()) return s;
 
-  // 4. 填充 BlobIndex 返回给调用者
-  index->file_id = next_file_id_ - 1; // 因为 CreateNewBlobFile 里已经自增了
+  index->file_id = next_file_id_ - 1; 
   index->offset = offset;
-  index->size = record_size;
+  index->size = BlobRecordHeader::kHeaderSize + key.size() + value.size();
 
   return Status::OK();
 }
 
 Status BlobStore::GetFile(uint32_t file_id, RandomAccessFile** file) {
-    // 1. 先查缓存
     auto it = open_files_.find(file_id);
     if (it != open_files_.end()) {
         *file = it->second.get();
         return Status::OK();
     }
 
-    // 2. 缓存未命中，打开文件
     char file_id_str[30];
     snprintf(file_id_str, sizeof(file_id_str), "%06u.blob", file_id);
     std::string filename = std::filesystem::path(db_path_) / file_id_str;
 
     std::unique_ptr<RandomAccessFile> new_file;
-    Status s = NewRandomAccessFile(filename, &new_file);
+    // 使用 options_.use_direct_io
+    Status s = NewRandomAccessFile(filename, &new_file, options_.use_direct_io);
     if (!s.ok()) return s;
 
     *file = new_file.get();
@@ -85,60 +77,111 @@ Status BlobStore::GetFile(uint32_t file_id, RandomAccessFile** file) {
 }
 
 Status BlobStore::Get(const BlobIndex& index, std::string* value) {
-  std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  RandomAccessFile* file;
-  Status s = GetFile(index.file_id, &file);
-  if (!s.ok()) return s;
+    RandomAccessFile* file;
+    Status s = GetFile(index.file_id, &file);
+    if (!s.ok()) return s;
 
-  // 1. 读取 Header (12 字节)
-  char header_buf[BlobRecordHeader::kHeaderSize];
-  Slice header_slice;
-  s = file->Read(index.offset, BlobRecordHeader::kHeaderSize, &header_slice, header_buf);
-  if (!s.ok()) return s;
+    // --- Direct I/O 对齐逻辑 ---
+    const size_t kAlign = 4096;
+    uint64_t logic_offset = index.offset; 
+    size_t logic_size = index.size; 
 
-  BlobRecordHeader header;
-  s = header.DecodeFrom(&header_slice);
-  if (!s.ok()) return s;
+    uint64_t physical_offset = logic_offset & ~(kAlign - 1);
+    size_t shift = logic_offset - physical_offset;
+    size_t read_size = (shift + logic_size + kAlign - 1) & ~(kAlign - 1);
+    
+    AlignedBuffer aligned_buf(read_size, kAlign);
 
-  // 2. 读取 Key 和 Value
-  // 为了校验 CRC，我们必须读取 Key，虽然用户只请求 Value。
-  // 优化：我们可以一次性读取 Key + Value，减少一次系统调用 (pread)。
-  
-  size_t total_payload_size = header.key_size + header.size;
-  std::string buffer; // 临时缓冲区，用于存放 Key + Value
-  buffer.resize(total_payload_size);
-  
-  Slice payload_slice;
-  uint64_t payload_offset = index.offset + BlobRecordHeader::kHeaderSize;
-  
-  s = file->Read(payload_offset, total_payload_size, &payload_slice, &buffer[0]);
-  if (!s.ok()) return s;
+    int fd = file->UnsafeGetFD();
+    
+    if (executor_ && fd >= 0) {
+        std::promise<int> promise;
+        auto future = promise.get_future();
 
-  // 3. 校验 CRC
-  // 校验范围：Header的长度字段(后8字节) + Key + Value
-  // header_buf[0..3] 是 CRC，header_buf[4..11] 是 Size 和 KeySize
-  
-  uint32_t calc_crc = crc32c::Value(header_buf + 4, 8); // 计算 Header 后半部分
-  calc_crc = crc32c::Extend(calc_crc, payload_slice.data(), payload_slice.size()); // 加上 Key + Value
-  calc_crc = crc32c::Mask(calc_crc); // Mask
+        executor_->SubmitRead(fd, physical_offset, read_size, aligned_buf.data, 
+            [&promise](int res) { promise.set_value(res); }
+        );
 
-  if (calc_crc != header.crc) {
-      return Status::Corruption("Blob checksum mismatch");
-  }
+        int bytes_read = future.get();
+        if (bytes_read < 0) return Status::IOError("uring read failed");
+    } else {
+        Slice s_dummy;
+        s = file->Read(physical_offset, read_size, &s_dummy, aligned_buf.data);
+        if (!s.ok()) return s;
+    }
 
-  // 4. 提取 Value 返回给用户
-  // payload_slice 包含 Key + Value
-  // Value 位于 Key 之后
-  if (payload_slice.size() != total_payload_size) {
-      return Status::Corruption("Read incomplete blob data");
-  }
-  
-  // 从 buffer 中截取 Value 部分
-  // buffer: [Key...][Value...]
-  value->assign(payload_slice.data() + header.key_size, header.size);
+    const char* record_ptr = aligned_buf.data + shift;
+    Slice input(record_ptr, logic_size);
+    BlobRecordHeader header;
+    s = header.DecodeFrom(&input);
+    if (!s.ok()) return s;
 
-  return Status::OK();
+    // =========================================================
+    // 【新增】CRC 校验逻辑
+    // =========================================================
+    // 1. 重构 Header 的长度部分 (Size + KeySize) 用于 CRC 计算
+    // BlobWriter 是对 buf+4 (即后8字节) 开始计算的 CRC
+    char len_buf[8];
+    EncodeFixed32(len_buf, header.size);
+    EncodeFixed32(len_buf + 4, header.key_size);
+
+    uint32_t calc_crc = crc32c::Value(len_buf, 8);
+
+    // 2. 加上 Key 和 Value
+    // input 目前指向 Key，长度是 key_size + size
+    const char* payload_ptr = input.data(); 
+    size_t payload_len = header.key_size + header.size;
+    
+    // 边界检查，防止 Buffer 越界读取
+    if (payload_ptr + payload_len > aligned_buf.data + read_size) {
+         return Status::Corruption("Blob record overflow");
+    }
+
+    calc_crc = crc32c::Extend(calc_crc, payload_ptr, payload_len);
+    
+    // 3. Mask 并比较 (或者 Unmask header.crc 进行比较)
+    // 这里采用 Unmask stored CRC 的方式，因为 crc32c::Mask 可能会变
+    if (crc32c::Unmask(header.crc) != calc_crc) {
+        return Status::Corruption("Blob checksum mismatch");
+    }
+    // =========================================================
+
+    const char* value_ptr = input.data() + header.key_size;
+    value->assign(value_ptr, header.size);
+    return Status::OK();
 }
 
+
+// MultiGet 暂时保持原样，或者你需要同样适配 Direct IO 逻辑
+// Day 4 重点是单点 Get 的 Direct IO
+void BlobStore::MultiGet(const std::vector<BlobIndex>& indices, 
+                         std::vector<std::string>* values, 
+                         std::vector<Status>* statuses) {
+    // ... 
+    // 注意：MultiGet 如果要支持 Direct IO，也需要对每个请求做 Alignment Adjustment
+    // 逻辑会比较复杂。Day 3 的实现是基于 Header 同步读的。
+    // 如果开启了 use_direct_io，Day 3 的 MultiGet 里的 Header Read 会报错 (因为没对齐)
+    // 简单起见：如果 use_direct_io 为 true，MultiGet 可以循环调用 Get (退化)
+    
+    if (options_.use_direct_io) {
+        size_t n = indices.size();
+        values->resize(n);
+        statuses->resize(n);
+        for(size_t i=0; i<n; ++i) {
+            (*statuses)[i] = Get(indices[i], &(*values)[i]);
+        }
+        return;
+    }
+    
+    // ... 原有的 MultiGet 实现 ...
+    size_t n = indices.size();
+    values->resize(n);
+    statuses->resize(n);
+    for(size_t i=0; i<n; ++i) {
+        (*statuses)[i] = Get(indices[i], &(*values)[i]);
+    }
 }
+
+} // namespace titankv

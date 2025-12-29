@@ -4,6 +4,8 @@
 
 namespace titankv {
 
+class Cache; // 前置声明
+
 // ==========================================
 // Options: 数据库配置参数
 // ==========================================
@@ -16,7 +18,7 @@ struct Options {
 
     // MemTable 的大小阈值 (默认 4MB)
     // 超过此大小时，MemTable 会变成 Immutable 并 Flush 到磁盘
-    size_t write_buffer_size = 100;
+    size_t write_buffer_size = 4 * 1024 * 1024;;
 
     // 【KV分离核心参数】Blob 分离阈值
     // Value 大小 >= 此值时，写入 BlobStore；否则直接内联到 LSM Tree
@@ -31,6 +33,12 @@ struct Options {
     
     // Block 大小 (默认 4KB)
     size_t block_size = 4 * 1024;
+    
+    bool use_direct_io = false; // 【新增】开关
+
+    // 【新增】Block Cache
+    // 使用 shared_ptr 方便管理生命周期
+    std::shared_ptr<Cache> block_cache = nullptr;
 };
 
 // ==========================================

@@ -22,9 +22,16 @@ struct titan_db_t {
     DB* rep;
 };
 
-titan_db_t* titan_open(const char* name, char** err) {
+titan_db_t* titan_open(const char* name, const titan_options_t* c_opt, char** err) {
     Options options;
-    options.create_if_missing = true;
+    // 转换配置
+    if (c_opt) {
+        options.create_if_missing = c_opt->create_if_missing;
+        options.use_direct_io = c_opt->use_direct_io;
+    } else {
+        options.create_if_missing = true;
+        options.use_direct_io = false;
+    }
     
     DB* db;
     Status s = DB::Open(options, std::string(name), &db);

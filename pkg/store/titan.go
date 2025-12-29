@@ -2,7 +2,7 @@ package store
 
 /*
 #cgo CFLAGS: -I../../core/include
-#cgo LDFLAGS: -L../../build/core -ltitankv -L../../build/third_party/crc32c -lcrc32c -lstdc++
+#cgo LDFLAGS: -L../../build/core -ltitankv -L../../build/third_party/liburing -luring -L../../build/third_party/crc32c -lcrc32c -lstdc++
 #include <stdlib.h>
 #include "titan_c.h"
 */
@@ -16,12 +16,20 @@ type TitanStore struct {
 	db *C.titan_db_t
 }
 
-func Open(path string) (*TitanStore, error) {
+// 修改 Open 函数，增加 directIO 参数
+func Open(path string, useDirectIO bool) (*TitanStore, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
+    // 构造 C 结构体
+	cOpts := C.titan_options_t{
+		create_if_missing: C.bool(true),
+		use_direct_io:     C.bool(useDirectIO),
+	}
+
 	var cErr *C.char
-	db := C.titan_open(cPath, &cErr)
+    // 传入 &cOpts
+	db := C.titan_open(cPath, &cOpts, &cErr)
 
 	if cErr != nil {
 		defer C.titan_free(unsafe.Pointer(cErr))

@@ -65,8 +65,8 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key, const Sli
   assert(p == buf + encoded_len);
   
   // DEBUG LOG
-  fprintf(stderr, "[MemTable::Add] Inserted Key: %s, Seq: %lu, InternalLen: %lu\n", 
-          key.ToString().c_str(), s, internal_key_size);
+  // fprintf(stderr, "[MemTable::Add] Inserted Key: %s, Seq: %lu, InternalLen: %lu\n", 
+          //key.ToString().c_str(), s, internal_key_size);
   
   table_.Insert(buf);
 }
@@ -76,7 +76,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
   Table::Iterator iter(&table_);
   
   // DEBUG LOG
-  fprintf(stderr, "[MemTable::Get] Seeking UserKey: %s\n", key.user_key().ToString().c_str());
+  // fprintf(stderr, "[MemTable::Get] Seeking UserKey: %s\n", key.user_key().ToString().c_str());
   
   iter.Seek(mem_key.data()); 
 
@@ -94,16 +94,16 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
     Slice entry_key(key_ptr, key_length - 8); 
     
     // DEBUG LOG
-    fprintf(stderr, "[MemTable::Get] Found Entry. UserKey: %s (Len: %lu)\n", 
-            entry_key.ToString().c_str(), entry_key.size());
+    // fprintf(stderr, "[MemTable::Get] Found Entry. UserKey: %s (Len: %lu)\n", 
+            //entry_key.ToString().c_str(), entry_key.size());
 
     if (comparator_.user_key_compare(entry_key, key.user_key()) == 0) {
       
       const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
       ValueType type = static_cast<ValueType>(tag & 0xff);
-      SequenceNumber seq = tag >> 8;
+      //SequenceNumber seq = tag >> 8;
 
-      fprintf(stderr, "[MemTable::Get] Key Match! Seq: %lu, Type: %d\n", seq, type);
+      //fprintf(stderr, "[MemTable::Get] Key Match! Seq: %lu, Type: %d\n", seq, type);
 
       if (type == kTypeValue) {
         Slice val_slice(key_ptr + key_length, 5);
@@ -119,11 +119,11 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
         return true;
       }
     } else {
-        fprintf(stderr, "[MemTable::Get] Key Mismatch! Wanted: %s, Got: %s\n", 
-                key.user_key().ToString().c_str(), entry_key.ToString().c_str());
+        //fprintf(stderr, "[MemTable::Get] Key Mismatch! Wanted: %s, Got: %s\n", 
+                //key.user_key().ToString().c_str(), entry_key.ToString().c_str());
     }
   } else {
-      fprintf(stderr, "[MemTable::Get] Seek returned Invalid iterator!\n");
+      //fprintf(stderr, "[MemTable::Get] Seek returned Invalid iterator!\n");
   }
   return false;
 }
