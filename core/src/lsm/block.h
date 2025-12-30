@@ -35,6 +35,7 @@ class Block {
   ~Block();
 
   size_t size() const { return size_; }
+  const char* data() const { return data_; } 
   
   // 创建迭代器
   Iterator* NewIterator(const UserKeyComparator* comparator);

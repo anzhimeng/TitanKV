@@ -67,6 +67,10 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
   options_.block_cache.reset(NewLRUCache(8 * 1024 * 1024)); // 8MB
   }
 
+  if (options_.filter_policy == nullptr) {
+    options_.filter_policy = NewBloomFilterPolicy(10);
+  }
+
 
   InternalKeyComparator cmp;
   mem_ = new MemTable(cmp);

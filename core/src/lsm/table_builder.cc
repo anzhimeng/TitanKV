@@ -16,6 +16,11 @@ TableBuilder::TableBuilder(const Options& options, WritableFile* file)
       closed_(false),
       pending_index_entry_(false),
       pending_handle_(new BlockHandle()) {
+    if (options.filter_policy) {
+        filter_block_ = new FilterBlockBuilder(options.filter_policy.get());
+    } else {
+        filter_block_ = nullptr;
+    }
 }
 
 TableBuilder::~TableBuilder() {
@@ -23,6 +28,7 @@ TableBuilder::~TableBuilder() {
   delete data_block_;
   delete index_block_;
   delete pending_handle_;
+  delete filter_block_;
 }
 
 void TableBuilder::Add(const Slice& key, const Slice& value) {
@@ -45,6 +51,14 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
     
     index_block_->Add(last_user_key, Slice(handle_encoding));
     pending_index_entry_ = false;
+  }
+
+  // 【新增】添加 User Key 到过滤器
+  if (filter_block_) {
+      // key 是 InternalKey，需要提取 User Key
+      assert(key.size() >= 8);
+      Slice user_key(key.data(), key.size() - 8);
+      filter_block_->AddKey(user_key);
   }
 
   // 2. 写入当前的 Data Block
@@ -126,6 +140,23 @@ Status TableBuilder::Finish() {
   BlockHandle index_block_handle;
   BlockHandle metaindex_block_handle; // 暂时为空
 
+  // 【新增】写入 Filter Block (如果有)
+  BlockHandle filter_block_handle;
+  if (ok() && filter_block_) {
+     Slice filter_content = filter_block_->Finish();
+     // 作为一个 Raw Block 写入（不加 BlockBuilder 包装）
+     // 复用 WriteBlock 的逻辑不太合适，因为 WriteBlock 封装了 BlockBuilder
+     // 我们直接 Append
+     filter_block_handle.set_offset(offset_);
+     filter_block_handle.set_size(filter_content.size());
+   
+     status_ = file_->Append(filter_content);
+     if (status_.ok()) {
+         offset_ += filter_content.size();
+     }
+  }
+    
+
   // 2. 写入 Index Block
   // 如果有 pending 的索引项（最后一个 Block），先写进去
   if (ok() && pending_index_entry_) {
@@ -144,7 +175,25 @@ Status TableBuilder::Finish() {
     Footer footer;
     footer.set_index_handle(index_block_handle);
     // footer.set_metaindex_handle(...) 
-    
+
+    // 复用 metaindex_handle 字段存储 filter handle
+    if (filter_block_) {
+        // footer.set_metaindex_handle(filter_block_handle);
+        Slice content = filter_block_->Finish();
+        // 手动构造 Trailer
+        char trailer[5];
+        trailer[0] = 0; // NoCompression
+        uint32_t crc = crc32c::Value(content.data(), content.size());
+        crc = crc32c::Extend(crc, trailer, 1);
+        EncodeFixed32(trailer + 1, crc32c::Mask(crc));
+        
+        filter_block_handle.set_offset(offset_);
+        filter_block_handle.set_size(content.size());
+        
+        file_->Append(content);
+        file_->Append(Slice(trailer, 5));
+        offset_ += content.size() + 5;
+    }
     std::string footer_encoding;
     footer.EncodeTo(&footer_encoding);
     status_ = file_->Append(footer_encoding);

@@ -43,6 +43,10 @@ class Footer {
   const BlockHandle& index_handle() const { return index_handle_; }
   void set_index_handle(const BlockHandle& h) { index_handle_ = h; }
 
+  // 【新增】Meta Index Handle 的访问器
+  const BlockHandle& metaindex_handle() const { return metaindex_handle_; }
+  void set_metaindex_handle(const BlockHandle& h) { metaindex_handle_ = h; }
+
   // 序列化/反序列化
   void EncodeTo(std::string* dst) const;
   Status DecodeFrom(Slice* input);
@@ -55,7 +59,7 @@ class Footer {
 
  private:
   BlockHandle index_handle_;
-  // BlockHandle metaindex_handle_; // 暂时不需要 Filter Block，先留空
+  BlockHandle metaindex_handle_; 
 };
 
 // Magic Number (用于校验文件类型)
@@ -81,6 +85,7 @@ inline Status BlockHandle::DecodeFrom(Slice* input) {
 inline void Footer::EncodeTo(std::string* dst) const {
   const size_t original_size = dst->size();
   index_handle_.EncodeTo(dst);
+  metaindex_handle_.EncodeTo(dst);
   // Padding 到固定长度，方便读取
   dst->resize(original_size + 2 * BlockHandle::kMaxEncodedLength); 
   PutFixed64(dst, kTableMagicNumber);
@@ -94,6 +99,9 @@ inline Status Footer::DecodeFrom(Slice* input) {
   }
 
   Status result = index_handle_.DecodeFrom(input);
+  if (result.ok()) {
+    result = metaindex_handle_.DecodeFrom(input); // 【新增】读取 Meta Handle
+  }
   if (result.ok()) {
     // 忽略 Padding
   }

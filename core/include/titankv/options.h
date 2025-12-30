@@ -2,11 +2,27 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 #include "titankv/statistics.h"
+#include "titankv/slice.h"
 
 namespace titankv {
 
 class Cache; // 前置声明
+
+class FilterPolicy {
+ public:
+  virtual ~FilterPolicy() = default;
+  virtual const char* Name() const = 0;
+  // 生成过滤器: keys 是输入，dst 是输出的 bitset
+  virtual void CreateFilter(const std::vector<std::string>& keys, std::string* dst) const = 0;
+  // 检查 key 是否匹配
+  virtual bool KeyMayMatch(const Slice& key, const Slice& filter) const = 0;
+};
+
+// 工厂函数
+std::shared_ptr<FilterPolicy> NewBloomFilterPolicy(int bits_per_key);
+
 
 // ==========================================
 // Options: 数据库配置参数
@@ -46,6 +62,7 @@ struct Options {
     std::shared_ptr<Cache> block_cache = nullptr;
     // 【新增】统计对象 (Shared Pointer)
     std::shared_ptr<Statistics> statistics = std::make_shared<Statistics>();
+    std::shared_ptr<FilterPolicy> filter_policy = nullptr;
 };
 
 // ==========================================

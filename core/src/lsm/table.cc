@@ -24,11 +24,16 @@ struct Table::Rep {
 
   // 【新增】记录文件号，用于生成 Cache Key
   uint64_t file_number; 
+  // 【新增】Filter 相关成员
+  FilterBlockReader* filter = nullptr;
+  Block* filter_data_block = nullptr; // 仅用于管理内存
 
   Rep() : file(nullptr), index_block(nullptr) {} // 构造函数初始化指针
 
   ~Rep() {
     delete index_block;
+    delete filter_data_block; // 析构时释放内存
+    delete filter;
     delete file; // 【修复】在 Rep 析构时释放 file
   }
 };
@@ -36,9 +41,6 @@ struct Table::Rep {
 Status Table::Open(const Options& options, RandomAccessFile* file,
                    uint64_t file_number, uint64_t file_size, Table** table) {
   *table = nullptr;
-  
-  // 使用 unique_ptr 接管 file，确保出错时自动 delete
-  // 成功时 release() 给 Rep
   std::unique_ptr<RandomAccessFile> file_guard(file);
 
   if (file_size < Footer::kEncodedLength) {
@@ -55,18 +57,40 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   s = footer.DecodeFrom(&footer_input);
   if (!s.ok()) return s;
 
+  // 1. 读取 Index Block
   BlockContents index_block_contents;
-  // 这里的 file 还是 file_guard.get()
   s = ReadBlock(file, ReadOptions(), footer.index_handle(), &index_block_contents);
   if (!s.ok()) return s;
-
   Block* index_block = new Block(index_block_contents);
+
+  // 2. 读取 Filter Block (如果有)
+  Block* filter_data_block = nullptr;
+  FilterBlockReader* filter_reader = nullptr;
   
+  // 检查是否有 Filter Policy 且 Meta Handle 有效
+  if (options.filter_policy && footer.metaindex_handle().size() > 0) {
+      BlockContents contents; // 【新增】定义变量
+      if (ReadBlock(file, ReadOptions(), footer.metaindex_handle(), &contents).ok()) {
+          filter_data_block = new Block(contents); // 这里复用 Block 来管理内存
+          
+          // 创建 Reader
+          // 注意：Block::data() 返回 const char*，size() 返回 size_t
+          // 构造 Slice 传给 FilterBlockReader
+          Slice filter_content(filter_data_block->data(), filter_data_block->size());
+          filter_reader = new FilterBlockReader(options.filter_policy.get(), filter_content);
+      }
+  }
+  
+  // 3. 创建 Rep 并赋值
   Rep* rep = new Table::Rep;
   rep->options = options;
-  rep->file = file_guard.release(); // 【关键】转移所有权给 Rep
+  rep->file = file_guard.release();
   rep->index_block = index_block;
-  rep->file_number = file_number; // 【新增】赋值
+  rep->file_number = file_number;
+  
+  // 【新增】赋值 Filter 组件
+  rep->filter_data_block = filter_data_block;
+  rep->filter = filter_reader;
   
   *table = new Table(rep);
   return Status::OK();
@@ -134,6 +158,12 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   
   assert(k.size() >= 8);
   Slice target_user_key(k.data(), k.size() - 8);
+
+  // 【新增】Bloom Filter 过滤
+  if (rep_->filter != nullptr && !rep_->filter->KeyMayMatch(target_user_key)) {
+      // 没命中，直接返回！无需读取 Index Block 和 Data Block
+      return Status::OK(); // NotFound 也可以，但 Get 语义通常是没找到就 OK
+  }
 
   iiter->Seek(target_user_key);
   if (iiter->Valid()) {

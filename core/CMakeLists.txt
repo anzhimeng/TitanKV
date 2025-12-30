@@ -18,6 +18,7 @@ set(CORE_SOURCES
     src/lsm/table_cache.cc
     src/lsm/version_edit.cc
     src/lsm/version_set.cc
+    src/lsm/filter_block.cc
     
     # 工具组件
     src/util/arena.cc
@@ -26,6 +27,8 @@ set(CORE_SOURCES
     src/util/env.cc
     src/util/filename.cc
     src/util/status.cc
+    src/util/hash.cc
+    src/util/bloom.cc
     
     # 日志组件
     src/wal/log_reader.cc

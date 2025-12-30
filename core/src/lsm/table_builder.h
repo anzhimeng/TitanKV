@@ -4,6 +4,7 @@
 #include "titankv/options.h"
 #include "titankv/status.h"
 #include "util/env.h"
+#include "lsm/filter_block.h"
 
 namespace titankv {
 
@@ -64,6 +65,8 @@ class TableBuilder {
   
   // 临时存储 BlockHandle 编码后的数据
   BlockHandle* pending_handle_; 
+
+  FilterBlockBuilder* filter_block_; // 新增
 };
 
 } // namespace titankv

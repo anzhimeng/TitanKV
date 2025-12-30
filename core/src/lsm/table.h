@@ -6,6 +6,7 @@
 #include "lsm/dbformat.h"
 #include "lsm/block.h"
 #include "lsm/table_format.h"
+#include "lsm/filter_block.h"
 
 namespace titankv {
 
