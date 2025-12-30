@@ -535,6 +535,87 @@ func (*RaftResponse) Descriptor() ([]byte, []int) {
 	return file_titankv_proto_rawDescGZIP(), []int{9}
 }
 
+type UpdateConfigRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 如果 > 0 则更新，否则忽略
+	GcThreshold   float64 `protobuf:"fixed64,1,opt,name=gc_threshold,json=gcThreshold,proto3" json:"gc_threshold,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateConfigRequest) Reset() {
+	*x = UpdateConfigRequest{}
+	mi := &file_titankv_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateConfigRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateConfigRequest) ProtoMessage() {}
+
+func (x *UpdateConfigRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_titankv_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateConfigRequest.ProtoReflect.Descriptor instead.
+func (*UpdateConfigRequest) Descriptor() ([]byte, []int) {
+	return file_titankv_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *UpdateConfigRequest) GetGcThreshold() float64 {
+	if x != nil {
+		return x.GcThreshold
+	}
+	return 0
+}
+
+type UpdateConfigResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateConfigResponse) Reset() {
+	*x = UpdateConfigResponse{}
+	mi := &file_titankv_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateConfigResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateConfigResponse) ProtoMessage() {}
+
+func (x *UpdateConfigResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_titankv_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateConfigResponse.ProtoReflect.Descriptor instead.
+func (*UpdateConfigResponse) Descriptor() ([]byte, []int) {
+	return file_titankv_proto_rawDescGZIP(), []int{11}
+}
+
 var File_titankv_proto protoreflect.FileDescriptor
 
 const file_titankv_proto_rawDesc = "" +
@@ -569,12 +650,16 @@ const file_titankv_proto_rawDesc = "" +
 	"\bcommands\x18\x01 \x03(\v2\x14.titankv.RaftCommandR\bcommands\"!\n" +
 	"\vRaftMessage\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"\x0e\n" +
-	"\fRaftResponse2\xdd\x01\n" +
+	"\fRaftResponse\"8\n" +
+	"\x13UpdateConfigRequest\x12!\n" +
+	"\fgc_threshold\x18\x01 \x01(\x01R\vgcThreshold\"\x16\n" +
+	"\x14UpdateConfigResponse2\xaa\x02\n" +
 	"\aTitanKV\x120\n" +
 	"\x03Get\x12\x13.titankv.GetRequest\x1a\x14.titankv.GetResponse\x120\n" +
 	"\x03Put\x12\x13.titankv.PutRequest\x1a\x14.titankv.PutResponse\x129\n" +
 	"\x06Delete\x12\x16.titankv.DeleteRequest\x1a\x17.titankv.DeleteResponse\x123\n" +
-	"\x04Raft\x12\x14.titankv.RaftMessage\x1a\x15.titankv.RaftResponseB\x17Z\x15titankv/api/titankvpbb\x06proto3"
+	"\x04Raft\x12\x14.titankv.RaftMessage\x1a\x15.titankv.RaftResponse\x12K\n" +
+	"\fUpdateConfig\x12\x1c.titankv.UpdateConfigRequest\x1a\x1d.titankv.UpdateConfigResponseB\x17Z\x15titankv/api/titankvpbb\x06proto3"
 
 var (
 	file_titankv_proto_rawDescOnce sync.Once
@@ -589,19 +674,21 @@ func file_titankv_proto_rawDescGZIP() []byte {
 }
 
 var file_titankv_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_titankv_proto_goTypes = []any{
-	(RaftCommand_OpType)(0),  // 0: titankv.RaftCommand.OpType
-	(*GetRequest)(nil),       // 1: titankv.GetRequest
-	(*GetResponse)(nil),      // 2: titankv.GetResponse
-	(*PutRequest)(nil),       // 3: titankv.PutRequest
-	(*PutResponse)(nil),      // 4: titankv.PutResponse
-	(*DeleteRequest)(nil),    // 5: titankv.DeleteRequest
-	(*DeleteResponse)(nil),   // 6: titankv.DeleteResponse
-	(*RaftCommand)(nil),      // 7: titankv.RaftCommand
-	(*BatchRaftCommand)(nil), // 8: titankv.BatchRaftCommand
-	(*RaftMessage)(nil),      // 9: titankv.RaftMessage
-	(*RaftResponse)(nil),     // 10: titankv.RaftResponse
+	(RaftCommand_OpType)(0),      // 0: titankv.RaftCommand.OpType
+	(*GetRequest)(nil),           // 1: titankv.GetRequest
+	(*GetResponse)(nil),          // 2: titankv.GetResponse
+	(*PutRequest)(nil),           // 3: titankv.PutRequest
+	(*PutResponse)(nil),          // 4: titankv.PutResponse
+	(*DeleteRequest)(nil),        // 5: titankv.DeleteRequest
+	(*DeleteResponse)(nil),       // 6: titankv.DeleteResponse
+	(*RaftCommand)(nil),          // 7: titankv.RaftCommand
+	(*BatchRaftCommand)(nil),     // 8: titankv.BatchRaftCommand
+	(*RaftMessage)(nil),          // 9: titankv.RaftMessage
+	(*RaftResponse)(nil),         // 10: titankv.RaftResponse
+	(*UpdateConfigRequest)(nil),  // 11: titankv.UpdateConfigRequest
+	(*UpdateConfigResponse)(nil), // 12: titankv.UpdateConfigResponse
 }
 var file_titankv_proto_depIdxs = []int32{
 	0,  // 0: titankv.RaftCommand.op:type_name -> titankv.RaftCommand.OpType
@@ -610,12 +697,14 @@ var file_titankv_proto_depIdxs = []int32{
 	3,  // 3: titankv.TitanKV.Put:input_type -> titankv.PutRequest
 	5,  // 4: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
 	9,  // 5: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
-	2,  // 6: titankv.TitanKV.Get:output_type -> titankv.GetResponse
-	4,  // 7: titankv.TitanKV.Put:output_type -> titankv.PutResponse
-	6,  // 8: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
-	10, // 9: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
-	6,  // [6:10] is the sub-list for method output_type
-	2,  // [2:6] is the sub-list for method input_type
+	11, // 6: titankv.TitanKV.UpdateConfig:input_type -> titankv.UpdateConfigRequest
+	2,  // 7: titankv.TitanKV.Get:output_type -> titankv.GetResponse
+	4,  // 8: titankv.TitanKV.Put:output_type -> titankv.PutResponse
+	6,  // 9: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
+	10, // 10: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
+	12, // 11: titankv.TitanKV.UpdateConfig:output_type -> titankv.UpdateConfigResponse
+	7,  // [7:12] is the sub-list for method output_type
+	2,  // [2:7] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -632,7 +721,7 @@ func file_titankv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_titankv_proto_rawDesc), len(file_titankv_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

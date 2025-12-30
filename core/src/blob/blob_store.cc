@@ -16,9 +16,22 @@ BlobStore::BlobStore(std::string db_path, const Options& options, IoUringExecuto
       next_file_id_(1),     
       executor_(executor) {
     std::filesystem::create_directories(db_path_);
+    // 【新增调试日志】确认阈值到底是多少
+    fprintf(stderr, "[BlobStore] Init. MaxFileSize: %lu bytes. DirectIO: %d\n", 
+        options_.max_blob_file_size, options_.use_direct_io);
 }
 
 Status BlobStore::CreateNewBlobFile() {
+  // 【新增】在创建新文件前，保存旧文件的 Meta
+  if (active_writer_ != nullptr) {
+      uint32_t old_id = next_file_id_ - 1;
+      uint64_t old_size = active_writer_->FileSize();
+      RegisterNewFile(old_id, old_size);
+      
+      // 记得 Sync，确保大小正确落盘
+      // active_writer_->Sync(); 
+  }
+
   char file_id_str[30]; 
   snprintf(file_id_str, sizeof(file_id_str), "%06u.blob", next_file_id_);
   
@@ -182,6 +195,158 @@ void BlobStore::MultiGet(const std::vector<BlobIndex>& indices,
     for(size_t i=0; i<n; ++i) {
         (*statuses)[i] = Get(indices[i], &(*values)[i]);
     }
+}
+
+void BlobStore::RegisterNewFile(uint32_t file_id, uint64_t size) {
+    auto meta = std::make_shared<BlobFileMeta>(file_id, size);
+    files_stats_[file_id] = meta;
+    fprintf(stderr, "[BlobStore] Registered File %u, Size %lu\n", file_id, size);
+}
+
+void BlobStore::NotifyGarbage(uint32_t file_id, uint64_t size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = files_stats_.find(file_id);
+    if (it != files_stats_.end()) {
+        it->second->garbage_size += size;
+        
+        // 简单的边界检查
+        if (it->second->garbage_size > it->second->file_size) {
+            it->second->garbage_size = it->second->file_size;
+        }
+        
+        // 调试日志 (可选)
+        // fprintf(stderr, "[GC-Stat] File %u: Garbage +%lu, Ratio now: %.2f\n", 
+        //         file_id, size, it->second->GetValidRatio());
+    } else {
+        // 可能是重启后还没加载 Meta (Day 1 暂不处理持久化，只处理内存)
+        // 或者文件已经被删除了
+    }
+}
+
+double BlobStore::GetValidRatio(uint32_t file_id) const {
+    // 注意：这里没加锁，生产环境建议加锁或使用原子变量
+    auto it = files_stats_.find(file_id);
+    if (it != files_stats_.end()) {
+        return it->second->GetValidRatio();
+    }
+    return 0.0;
+}
+
+void BlobStore::SetGCThreshold(double threshold) {
+    gc_threshold_.store(threshold);
+    fprintf(stderr, "[BlobStore] GC Threshold updated to %.2f\n", threshold);
+}
+
+bool BlobStore::PickGCVictim(uint32_t* file_number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    double min_ratio = 1.0;
+    uint32_t victim = 0;
+    bool found = false;
+
+    // 【修改】读取原子变量
+    double current_threshold = gc_threshold_.load();
+
+    // 【新增】看看当前有多少个文件被监控
+    // fprintf(stderr, "[PickGC] Stats map size: %lu. Active File ID: %u\n", 
+    //        files_stats_.size(), next_file_id_ - 1);
+
+
+    for (const auto& kv : files_stats_) {
+        uint32_t fid = kv.first;
+        // 跳过正在写的活跃文件！
+        if (active_writer_ && next_file_id_ - 1 == fid) {
+            continue; 
+        }
+
+        double ratio = kv.second->GetValidRatio();
+
+        if (ratio <= current_threshold && ratio < min_ratio) {
+            min_ratio = ratio;
+            victim = fid;
+            found = true;
+        }
+    }
+
+    if (found) {
+        *file_number = victim;
+        return true;
+    }
+    return false;
+}
+
+Status BlobStore::RunGC(std::function<bool(const Slice&, const BlobIndex&)> is_valid_cb,
+                        std::vector<GCRecord>* out_new_indexes) {
+    uint32_t victim_file_id;
+    if (!PickGCVictim(&victim_file_id)) {
+        return Status::NotFound("No file needs GC");
+    }
+
+    fprintf(stderr, "[BlobGC] Picked file %u for GC.\n", victim_file_id);
+
+    // 1. 打开 Victim 文件
+    RandomAccessFile* file;
+    Status s = GetFile(victim_file_id, &file);
+    if (!s.ok()) return s;
+
+    // 获取文件大小 (从 meta 获取，或者 file system)
+    uint64_t file_size = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        file_size = files_stats_[victim_file_id]->file_size;
+    }
+
+    // 2. 遍历文件
+    BlobFileIterator iter(file, victim_file_id, file_size);
+    for (iter.Next(); iter.Valid(); iter.Next()) {
+        Slice key = iter.key();
+        BlobIndex old_index = iter.GetBlobIndex();
+
+        // 3. 判活 (调用外部回调，查 LSM)
+        if (is_valid_cb(key, old_index)) {
+            // 4. 有效数据 -> 搬运
+            BlobIndex new_index;
+            // 直接调用 Add 写入当前活跃文件
+            // 注意：Add 内部有锁，这里是安全的
+            s = Add(key, iter.value(), &new_index);
+            if (!s.ok()) return s;
+
+            // 收集回填信息
+            GCRecord record;
+            record.key = key.ToString();
+            record.old_index = old_index; // 【新增】赋值
+            record.new_index = new_index;
+            out_new_indexes->push_back(record);
+        } else {
+            // 垃圾数据 -> 丢弃，啥也不做
+        }
+    }
+
+    // 5. 标记 Victim 文件待删除 (Day 2 先不物理删除，只是打印日志)
+    fprintf(stderr, "[BlobGC] Rewrite done. %lu records moved.\n", out_new_indexes->size());
+    // 【新增】清理元数据和物理文件
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        files_stats_.erase(victim_file_id); // 从统计中移除，防止下次再选
+    }
+    
+    // 物理删除文件 (C++17)
+    // 注意：在生产环境中，这里应该有一个 ObsoleteFile 机制，延迟删除，防止读请求并发访问。
+    // 但在 Week 7 简化版中，只要我们确定没有 Iterator 正在读这个文件，就可以删。
+    char file_id_str[30]; 
+    snprintf(file_id_str, sizeof(file_id_str), "%06u.blob", victim_file_id);
+    std::filesystem::path p = std::filesystem::path(db_path_) / file_id_str;
+    
+    std::error_code ec;
+    std::filesystem::remove(p, ec); 
+    if (ec) {
+        fprintf(stderr, "[BlobGC] Failed to delete file %s: %s\n", p.c_str(), ec.message().c_str());
+    } else {
+        fprintf(stderr, "[BlobGC] Deleted file %u\n", victim_file_id);
+    }
+    
+    return Status::OK();
 }
 
 } // namespace titankv

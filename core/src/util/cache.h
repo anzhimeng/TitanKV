@@ -15,7 +15,7 @@ Cache* NewLRUCache(size_t capacity);
 class Cache {
  public:
   Cache() = default;
-  virtual ~Cache();
+  virtual ~Cache() = default;;
 
   // 缓存项的句柄 (Handle)，用于管理引用计数
   struct Handle {};

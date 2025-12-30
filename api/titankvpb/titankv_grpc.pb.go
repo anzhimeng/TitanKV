@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TitanKV_Get_FullMethodName    = "/titankv.TitanKV/Get"
-	TitanKV_Put_FullMethodName    = "/titankv.TitanKV/Put"
-	TitanKV_Delete_FullMethodName = "/titankv.TitanKV/Delete"
-	TitanKV_Raft_FullMethodName   = "/titankv.TitanKV/Raft"
+	TitanKV_Get_FullMethodName          = "/titankv.TitanKV/Get"
+	TitanKV_Put_FullMethodName          = "/titankv.TitanKV/Put"
+	TitanKV_Delete_FullMethodName       = "/titankv.TitanKV/Delete"
+	TitanKV_Raft_FullMethodName         = "/titankv.TitanKV/Raft"
+	TitanKV_UpdateConfig_FullMethodName = "/titankv.TitanKV/UpdateConfig"
 )
 
 // TitanKVClient is the client API for TitanKV service.
@@ -38,6 +39,7 @@ type TitanKVClient interface {
 	// 【新增】Raft Node API
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftResponse, error)
+	UpdateConfig(ctx context.Context, in *UpdateConfigRequest, opts ...grpc.CallOption) (*UpdateConfigResponse, error)
 }
 
 type titanKVClient struct {
@@ -88,6 +90,16 @@ func (c *titanKVClient) Raft(ctx context.Context, in *RaftMessage, opts ...grpc.
 	return out, nil
 }
 
+func (c *titanKVClient) UpdateConfig(ctx context.Context, in *UpdateConfigRequest, opts ...grpc.CallOption) (*UpdateConfigResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateConfigResponse)
+	err := c.cc.Invoke(ctx, TitanKV_UpdateConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TitanKVServer is the server API for TitanKV service.
 // All implementations must embed UnimplementedTitanKVServer
 // for forward compatibility.
@@ -101,6 +113,7 @@ type TitanKVServer interface {
 	// 【新增】Raft Node API
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(context.Context, *RaftMessage) (*RaftResponse, error)
+	UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error)
 	mustEmbedUnimplementedTitanKVServer()
 }
 
@@ -122,6 +135,9 @@ func (UnimplementedTitanKVServer) Delete(context.Context, *DeleteRequest) (*Dele
 }
 func (UnimplementedTitanKVServer) Raft(context.Context, *RaftMessage) (*RaftResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Raft not implemented")
+}
+func (UnimplementedTitanKVServer) UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateConfig not implemented")
 }
 func (UnimplementedTitanKVServer) mustEmbedUnimplementedTitanKVServer() {}
 func (UnimplementedTitanKVServer) testEmbeddedByValue()                 {}
@@ -216,6 +232,24 @@ func _TitanKV_Raft_Handler(srv interface{}, ctx context.Context, dec func(interf
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitanKV_UpdateConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitanKVServer).UpdateConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitanKV_UpdateConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitanKVServer).UpdateConfig(ctx, req.(*UpdateConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TitanKV_ServiceDesc is the grpc.ServiceDesc for TitanKV service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -238,6 +272,10 @@ var TitanKV_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Raft",
 			Handler:    _TitanKV_Raft_Handler,
+		},
+		{
+			MethodName: "UpdateConfig",
+			Handler:    _TitanKV_UpdateConfig_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

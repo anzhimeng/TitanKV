@@ -49,7 +49,8 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
       last_sequence_(0),
       imm_(nullptr),
       table_cache_(nullptr),
-      versions_(nullptr) 
+      versions_(nullptr),
+      bg_running_(true)
 {
   // 1. 初始化 io_uring
   // 生产环境可以做成配置项，这里直接启用
@@ -77,9 +78,20 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
 
   table_cache_ = new TableCache(dbname_, options_);
   versions_ = new VersionSet(dbname_, options_);
+  // 启动后台线程
+  bg_thread_ = std::thread(&DBImpl::BGWork, this);
 }
 
 DBImpl::~DBImpl() {
+  // 1. 停止后台线程
+  {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    bg_running_ = false;
+    bg_cv_.notify_all();
+  }
+  if (bg_thread_.joinable()) {
+    bg_thread_.join();
+  }
   if (mem_) mem_->Unref();
   if (imm_) imm_->Unref();
   delete blob_store_;
@@ -229,6 +241,31 @@ Status DBImpl::Delete(const WriteOptions& opt, const Slice& key) {
 Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice& key, const Slice& value) {
   Status s;
   std::string value_to_store;
+
+    // 【模拟垃圾检测逻辑】
+  if (type == kTypeValue && options_.simulate_garbage_generation) { // 仅 Put 时检查
+      std::string old_val_idx;
+      // 1. 尝试读取旧索引
+      Status s = GetLSMValue(key, &old_val_idx);
+      
+      if (s.ok()) {
+          BlobIndex old_idx;
+          Slice input(old_val_idx);
+          if (old_idx.DecodeFrom(&input).ok()) {
+              // 2. 只有解码成功才通知
+              blob_store_->NotifyGarbage(old_idx.file_id, old_idx.size);
+              
+              // 【新增调试】看看是否真的进来了 (生产环境需删除)
+              // fprintf(stderr, "[DEBUG] Marked garbage for Key: %s, File: %u\n", 
+              //         key.ToString().c_str(), old_idx.file_number);
+          } else {
+              // fprintf(stderr, "[DEBUG] Found key %s but decode BlobIndex failed\n", key.ToString().c_str());
+          }
+      } else {
+          // 没找到旧值？可能是 GetLSMValue 没查到 SSTable
+          // fprintf(stderr, "[DEBUG] Key %s not found in LSM during overwrite.\n", key.ToString().c_str());
+      }
+  }
 
   // 1. 键值分离逻辑
   if (type == kTypeValue && value.size() >= options_.min_blob_size) {
@@ -441,7 +478,7 @@ Status DBImpl::Get(const ReadOptions& opt, const Slice& key, std::string* value)
     
     Status status = table_cache_->Get(opt, f->file_number, f->file_size, lkey.internal_key(), &ctx, callback);
     if (!status.ok()) {
-    	   //fprintf(stderr, "[DBImpl::Get] Error reading SST #%lu: %s\n", f->file_number, status.ToString().c_str());
+    	   // fprintf(stderr, "[DBImpl::Get] Error reading SST #%lu: %s\n", f->file_number, status.ToString().c_str());
         result = status;
         break;
     }
@@ -472,5 +509,180 @@ std::string DBImpl::EncodeLogRecord(ValueType type, const Slice& key, const Slic
   dst.append(value.data(), value.size());
   return dst;
 }
+
+// 内部辅助：只查 LSM (Mem->Imm->SST)，返回 Raw String
+Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
+  // 1. 获取快照
+  SequenceNumber snapshot = last_sequence_.load(std::memory_order_acquire);
+  LookupKey lkey(key, snapshot);
+  Status s;
+
+  // 2. 查 MemTable
+  if (mem_->Get(lkey, val_buf, &s)) {
+    return s; // Found or Deleted
+  }
+
+  // 3. 查 Immutable
+  if (imm_ != nullptr) {
+    if (imm_->Get(lkey, val_buf, &s)) {
+      return s;
+    }
+  }
+
+  // 4. 查 SSTables
+  Version* current = versions_->current();
+  current->Ref();
+  std::vector<FileMetaData*> files = current->GetFiles();
+  
+  Status result = Status::NotFound("Key not found");
+
+  for (auto it = files.rbegin(); it != files.rend(); ++it) {
+    FileMetaData* f = *it;
+    
+    struct Context {
+        std::string* val;
+        bool found;
+    } ctx {val_buf, false};
+    
+    auto callback = [](void* arg, const Slice& k, const Slice& v) {
+        (void)k;
+        Context* c = static_cast<Context*>(arg);
+        c->found = true;
+        *(c->val) = v.ToString();
+    };
+    
+    Status status = table_cache_->Get(ReadOptions(), f->file_number, f->file_size, lkey.internal_key(), &ctx, callback);
+    if (!status.ok()) {
+        result = status;
+        break;
+    }
+
+    if (ctx.found) {
+        result = Status::OK();
+        break;
+    }
+  }
+
+  current->Unref();
+  return result;
+}
+
+Status DBImpl::FinishGC(const std::vector<GCRecord>& gc_records) {
+    // 这一步需要加锁，确保原子写入 WriteBatch
+    // 但查询 GetLSMValue 是否需要加锁？
+    // 为了保证 Check-And-Set 的原子性，我们在检查期间持有锁。
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    int success_count = 0;
+    
+    for (const auto& rec : gc_records) {
+        std::string current_val_str;
+        
+        // 1. Check: 查询当前 LSM 中的值
+        Status s = GetLSMValue(rec.key, &current_val_str);
+        
+        bool can_update = false;
+        
+        if (s.ok()) {
+            // 解析当前值是否为 BlobIndex
+            BlobIndex current_index;
+            Slice input(current_val_str);
+            if (current_index.DecodeFrom(&input).ok()) {
+                // 2. Compare: 比较是否等于 GC 前的旧索引
+                if (current_index == rec.old_index) {
+                    can_update = true;
+                }
+            }
+        }
+        
+        // 3. Set: 如果匹配，则更新为新索引
+        if (can_update) {
+            std::string new_val_str;
+            rec.new_index.EncodeTo(&new_val_str);
+            
+            // 复用 WriteLocked 写入 WAL 和 MemTable
+            // 注意：这里我们是在循环里多次调用 WriteLocked，这会产生多条 WAL 日志。
+            // 生产环境通常使用 WriteBatch 一次性写入。
+            // 但为了复用现有逻辑，循环写是可以接受的（只是性能稍差）。
+            WriteLocked(WriteOptions(), kTypeValue, rec.key, new_val_str);
+            success_count++;
+        } else {
+            // 冲突！用户已经更新或删除了该 Key，放弃回填。
+            // 新写入 BlobStore 的数据变成了垃圾（浪费了一点空间），下次 GC 会清理它。
+            // fprintf(stderr, "[GC] Conflict detected for key: %s\n", rec.key.c_str());
+        }
+    }
+    
+    fprintf(stderr, "[GC] Rewrite finished. Success: %d/%lu\n", 
+            success_count, gc_records.size());
+            
+    return Status::OK();
+}
+
+Status DBImpl::GarbageCollect() {
+    // 1. 判活回调：查询 LSM 确认 BlobIndex 是否有效
+    // 注意：RunGC 运行在锁外（耗时操作），所以回调里需要加锁或处理并发
+    // 为了简单，我们让 RunGC 先做物理搬运（不查 LSM，或者只查简单的 Bloom），
+    // 真正的强一致性检查放在 FinishGC 的 CAS 阶段。
+    
+    // 但 RunGC 需要一个回调来决定“这个 Key 是否值得搬运”。
+    // 如果我们不在 RunGC 阶段查 LSM，就会搬运所有数据（包括已删除的），这就变成了 Full Compaction，效率低但正确。
+    // 为了更高效，我们在 RunGC 里也查一次 LSM (无锁或短锁)。
+    
+    auto is_valid_cb = [&](const Slice& key, const BlobIndex& old_index) {
+        std::string val;
+        // 这里调用 GetLSMValue 需要注意锁的问题。
+        // 如果 GetLSMValue 访问 MemTable，MemTable 是无锁读的，安全。
+        // 如果访问 VersionSet，VersionSet 有 Ref 计数，安全。
+        // 所以在锁外调用 GetLSMValue 是安全的。
+        Status s = GetLSMValue(key, &val);
+        if (!s.ok()) return false;
+        
+        BlobIndex current_index;
+        Slice input(val);
+        if (current_index.DecodeFrom(&input).ok()) {
+            return current_index == old_index;
+        }
+        return false;
+    };
+
+    // 2. 执行物理搬运 (耗时，无锁)
+    std::vector<GCRecord> records;
+    Status s = blob_store_->RunGC(is_valid_cb, &records);
+    if (!s.ok()) return s; // 没找到需要 GC 的文件
+
+    options_.statistics->gc_run_count++;
+
+    // 3. 执行索引回填
+    if (!records.empty()) {
+        s = FinishGC(records);
+        
+        // 【新增】更新统计信息
+        if (s.ok()) {
+            options_.statistics->gc_run_count++;
+            options_.statistics->gc_keys_moved += records.size();
+            // 这里还可以统计回收了多少字节，需要 RunGC 返回更多信息，暂略
+        }
+    }
+    
+    return s;
+}
+
+// 后台循环
+void DBImpl::BGWork() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(bg_mutex_);
+            // 等待 10 秒，或者被析构唤醒
+            bg_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !bg_running_; });
+            
+            if (!bg_running_) break;
+        }
+
+        // 执行 GC
+        // 注意：GarbageCollect 内部会自己处理锁，这里不要加锁
+        GarbageCollect();
+    }
+} 
 
 } // namespace titankv

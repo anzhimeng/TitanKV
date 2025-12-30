@@ -21,6 +21,13 @@ struct BlobIndex {
     void EncodeTo(std::string* dst) const;
     Status DecodeFrom(Slice* input);
     std::string ToString() const;
+
+    // 【新增】相等比较操作符
+    bool operator==(const BlobIndex& other) const {
+        return file_id == other.file_id &&
+               offset == other.offset &&
+               size == other.size;
+    }
 };
 
 // ==========================================

@@ -7,7 +7,7 @@
 
 namespace titankv {
 
-/ 当 Cache 驱逐一个 Block 时，自动调用此函数释放内存
+// 当 Cache 驱逐一个 Block 时，自动调用此函数释放内存
 static void DeleteCachedBlock(const Slice& key, void* value) {
   (void)key;
   Block* block = reinterpret_cast<Block*>(value);
@@ -34,7 +34,7 @@ struct Table::Rep {
 };
 
 Status Table::Open(const Options& options, RandomAccessFile* file,
-                   uint64_t file_size, Table** table) {
+                   uint64_t file_number, uint64_t file_size, Table** table) {
   *table = nullptr;
   
   // 使用 unique_ptr 接管 file，确保出错时自动 delete

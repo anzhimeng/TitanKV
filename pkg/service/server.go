@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log"
 	"titankv/api/titankvpb"
 	"titankv/pkg/raft"
 	"titankv/pkg/store" // 用于 Get 直接读
@@ -94,4 +95,15 @@ func (s *Server) Raft(ctx context.Context, req *titankvpb.RaftMessage) (*titankv
         return nil, status.Error(codes.Internal, err.Error())
     }
     return &titankvpb.RaftResponse{}, nil
+}
+
+func (s *Server) UpdateConfig(ctx context.Context, req *titankvpb.UpdateConfigRequest) (*titankvpb.UpdateConfigResponse, error) {
+    // 只有 Leader 才能改配置？其实这是单机配置，每个节点都可以独立改
+    // 但为了集群一致性，通常通过 Raft 走 Config Change，这里简化为直接改本地
+    
+    if req.GcThreshold > 0 {
+        log.Printf("Updating GC Threshold to %.2f", req.GcThreshold)
+        s.store.SetGCThreshold(req.GcThreshold)
+    }
+    return &titankvpb.UpdateConfigResponse{}, nil
 }

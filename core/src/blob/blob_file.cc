@@ -54,4 +54,90 @@ Status BlobWriter::AddRecord(const Slice& key, const Slice& value) {
   return Status::OK();
 }
 
+// --- BlobFileIterator 实现 ---
+
+void BlobFileIterator::Next() {
+  record_offset_ = current_offset_;
+  valid_ = false;
+  if (current_offset_ >= file_size_) {
+    return; // EOF
+  }
+
+  // 1. 读取 Header
+  char header_buf[BlobRecordHeader::kHeaderSize];
+  Slice header_slice;
+  status_ = file_->Read(current_offset_, BlobRecordHeader::kHeaderSize, &header_slice, header_buf);
+  if (!status_.ok()) return;
+  
+  // 处理截断或损坏的文件
+  if (header_slice.size() < BlobRecordHeader::kHeaderSize) {
+      status_ = Status::Corruption("Truncated blob header");
+      return;
+  }
+
+  BlobRecordHeader header;
+  status_ = header.DecodeFrom(&header_slice);
+  if (!status_.ok()) return;
+
+  // 2. 读取 Key + Value
+  size_t payload_size = header.key_size + header.size;
+  buffer_.resize(payload_size);
+  
+  Slice payload_slice;
+  status_ = file_->Read(current_offset_ + BlobRecordHeader::kHeaderSize, payload_size, &payload_slice, &buffer_[0]);
+  if (!status_.ok()) return;
+  
+  if (payload_slice.size() != payload_size) {
+      status_ = Status::Corruption("Truncated blob payload");
+      return;
+  }
+
+  // 3. 【新增】校验 CRC
+  // =========================================================
+  // 3.1 重构长度部分 (必须与 Writer 顺序一致：ValueSize 然后 KeySize)
+  char len_buf[8];
+  EncodeFixed32(len_buf, header.size);      // Offset 0 (对应 Writer 的 buf+4)
+  EncodeFixed32(len_buf + 4, header.key_size); // Offset 4 (对应 Writer 的 buf+8)
+
+  // 3.2 计算 CRC
+  uint32_t actual_crc = crc32c::Value(len_buf, 8);
+  actual_crc = crc32c::Extend(actual_crc, buffer_.data(), buffer_.size());
+
+  // 3.3 比较 (Header 里的 CRC 是 Mask 过的，需要 Unmask)
+  if (crc32c::Unmask(header.crc) != actual_crc) {
+      status_ = Status::Corruption("Blob CRC mismatch");
+      // 遇到 CRC 错误，通常应该停止迭代，或者标记当前无效但继续尝试下一个（取决于策略）
+      // 这里我们停止并报错
+      return;
+  }
+
+  // 4. 填充 current_record_
+  current_record_.header = header;
+  current_record_.key = Slice(buffer_.data(), header.key_size);
+  current_record_.value = Slice(buffer_.data() + header.key_size, header.size);
+
+
+  current_offset_ += BlobRecordHeader::kHeaderSize + payload_size;
+  valid_ = true;
+  
+  // 更新 offset 准备下一次读取
+  // 注意：我们在这里不改变 current_offset_，而是记录下当前的，等下次 Next 再加？
+  // 不，Next() 的语义是移动到下一个。所以我们需要记录当前 record 的起始位置供 GetBlobIndex 使用
+  // 因此，我们需要一个 member 记录 record_start_offset
+}
+
+BlobIndex BlobFileIterator::GetBlobIndex() const {
+    BlobIndex idx;
+    idx.file_id = file_number_;
+    // 注意：这里需要 careful。Next() 执行完后，current_offset_ 应该指向下一个 record
+    // 所以当前的 offset 应该是 current_offset_ - total_record_size
+    // 让我们重构一下 offset 管理：
+    // current_offset_ 始终指向“下一个待读取的位置”
+    // record_offset_ 指向“当前 Valid 的 record 的位置”
+    
+    idx.offset = record_offset_;
+    idx.size = BlobRecordHeader::kHeaderSize + current_record_.header.key_size + current_record_.header.size;
+    return idx;
+}
+
 } // namespace titankv

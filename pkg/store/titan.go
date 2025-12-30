@@ -12,6 +12,27 @@ import (
 	"unsafe"
 )
 
+type Statistics struct {
+	BlobBytesWritten uint64
+	BlobBytesRead    uint64
+	GCRunCount       uint64
+	GCBytesReclaimed uint64
+	GCKeysMoved      uint64
+}
+
+func (s *TitanStore) GetStatistics() *Statistics {
+	var cStats C.titan_stats_t
+	C.titan_get_statistics(s.db, &cStats)
+
+	return &Statistics{
+		BlobBytesWritten: uint64(cStats.blob_bytes_written),
+		BlobBytesRead:    uint64(cStats.blob_bytes_read),
+		GCRunCount:       uint64(cStats.gc_run_count),
+		GCBytesReclaimed: uint64(cStats.gc_bytes_reclaimed),
+		GCKeysMoved:      uint64(cStats.gc_keys_moved),
+	}
+}
+
 type TitanStore struct {
 	db *C.titan_db_t
 }
@@ -103,4 +124,8 @@ func (s *TitanStore) Delete(key []byte) error {
 		return errors.New(C.GoString(cErr))
 	}
     return nil
+}
+
+func (s *TitanStore) SetGCThreshold(threshold float64) {
+    C.titan_set_gc_threshold(s.db, C.double(threshold))
 }

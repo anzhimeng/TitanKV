@@ -36,6 +36,7 @@ set(CORE_SOURCES
     
     # 异步 IO
     src/util/io_uring_executor.cc
+    src/util/cache.cc
 )
 
 # 2. 生成静态库

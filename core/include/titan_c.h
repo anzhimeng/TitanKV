@@ -38,6 +38,20 @@ void titan_delete(titan_db_t* db, const char* key, size_t klen, char** err);
 // 释放由 titan_get 或 错误信息 返回的字符串内存
 void titan_free(void* ptr);
 
+typedef struct {
+    uint64_t blob_bytes_written;
+    uint64_t blob_bytes_read;
+    uint64_t gc_run_count;
+    uint64_t gc_bytes_reclaimed;
+    uint64_t gc_keys_moved;
+} titan_stats_t;
+
+// 获取统计信息
+void titan_get_statistics(titan_db_t* db, titan_stats_t* stats);
+
+// 【新增】
+void titan_set_gc_threshold(titan_db_t* db, double threshold);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,6 +20,10 @@ import (
 	"titankv/pkg/store"
 
 	"google.golang.org/grpc"
+
+	
+	"github.com/prometheus/client_golang/prometheus"
+     "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -28,7 +32,20 @@ var (
 	nodeID  = flag.Uint64("id", 1, "Raft Node ID")
 	cluster = flag.String("cluster", "1=127.0.0.1:9090", "Cluster configuration")
 	directIO = flag.Bool("direct_io", false, "Enable Direct IO (io_uring)")
+	gcRunCounter = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "titankv_gc_run_count",
+        Help: "Total number of GC runs",
+     })
+     gcKeysMoved = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "titankv_gc_keys_moved",
+        Help: "Total keys moved by GC",
+     })
 )
+
+func init() {
+    prometheus.MustRegister(gcRunCounter)
+    prometheus.MustRegister(gcKeysMoved)
+}
 
 func main() {
 	flag.Parse()
@@ -60,6 +77,17 @@ func main() {
 	}
 	defer db.Close()
 
+	// 【新增】启动 Metrics 采集循环
+    go func() {
+        ticker := time.NewTicker(5 * time.Second)
+        for range ticker.C {
+            stats := db.GetStatistics()
+            gcRunCounter.Set(float64(stats.GCRunCount))
+            gcKeysMoved.Set(float64(stats.GCKeysMoved))
+            // log.Printf("GC Stats: Run=%d, Moved=%d", stats.GCRunCount, stats.GCKeysMoved)
+        }
+    }()
+
 	// 3. 初始化 Raft 节点
 	// 注意：NewTitanRaft 内部现在会自动初始化 Batcher，不需要外部手动创建了
 	log.Printf("Starting Raft Node %d...", *nodeID)
@@ -72,6 +100,7 @@ func main() {
 	}
 
     go func() {
+    	   http.Handle("/metrics", promhttp.Handler())
         pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID) // 避免端口冲突: 6061, 6062...
         log.Printf("Pprof listening on %s", pprofAddr)
         log.Println(http.ListenAndServe(pprofAddr, nil))

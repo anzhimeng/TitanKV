@@ -22,40 +22,40 @@ TEST(Debug, InspectSSTables) {
         return;
     }
 
-    std::vector<std::string> sst_files;
-    for (const auto& entry : std::filesystem::directory_iterator(dbname)) {
-        if (entry.path().extension() == ".sst") {
-            sst_files.push_back(entry.path().string());
-        }
-    }
-    
-    // 排序，方便看
-    std::sort(sst_files.begin(), sst_files.end());
-
-    std::cout << "Found " << sst_files.size() << " SSTable files." << std::endl;
-
-    Options options;
-    for (const auto& fname : sst_files) {
-        uint64_t fsize = std::filesystem::file_size(fname);
-        std::cout << "Checking " << fname << " (Size: " << fsize << ")... ";
-
-        std::unique_ptr<RandomAccessFile> file;
-        Status s = NewRandomAccessFile(fname, &file);
-        if (!s.ok()) {
-            std::cout << "FAILED to open file: " << s.ToString() << std::endl;
-            continue;
-        }
-
-        Table* table = nullptr;
-        // 尝试解析 Footer 和 Index Block
-        s = Table::Open(options, file.release(), fsize, &table);
-        
-        if (s.ok()) {
-            std::cout << "OK (Valid SSTable)" << std::endl;
-            delete table;
-        } else {
-            std::cout << "CORRUPTED: " << s.ToString() << std::endl;
-            // 如果这里报错 Bad Magic Number，说明文件没写完或者被截断了
-        }
-    }
+	Options options;
+	for (const auto& entry : std::filesystem::directory_iterator(dbname)) {
+	        if (entry.path().extension() == ".sst") {
+	            std::string fname = entry.path().string();
+	            uint64_t fsize = std::filesystem::file_size(fname);
+	            
+	            // 【新增】解析文件编号 (例如 000005.sst -> 5)
+	            std::string filename_only = entry.path().filename().string();
+	            uint64_t file_number = 0;
+	            try {
+	                file_number = std::stoull(filename_only.substr(0, filename_only.length() - 4));
+	            } catch (...) {
+	                std::cout << "Warning: could not parse file number from " << filename_only << std::endl;
+	            }
+	
+	            std::cout << "Checking " << fname << " (Size: " << fsize << ")... ";
+	
+	            std::unique_ptr<RandomAccessFile> file;
+	            Status s = NewRandomAccessFile(fname, &file);
+	            if (!s.ok()) {
+	                std::cout << "FAILED to open file: " << s.ToString() << std::endl;
+	                continue;
+	            }
+	
+	            Table* table = nullptr;
+	            // 【关键修复】传入 file_number (第3个参数)
+	            s = Table::Open(options, file.release(), file_number, fsize, &table);
+	            
+	            if (s.ok()) {
+	                std::cout << "OK (Valid SSTable)" << std::endl;
+	                delete table;
+	            } else {
+	                std::cout << "CORRUPTED: " << s.ToString() << std::endl;
+	            }
+	        }
+	    }
 }

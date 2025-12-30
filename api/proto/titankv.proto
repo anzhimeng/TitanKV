@@ -13,6 +13,7 @@ service TitanKV {
     // 【新增】Raft Node API
     // 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
     rpc Raft(RaftMessage) returns (RaftResponse);
+    rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
 }
 
 message GetRequest {
@@ -63,3 +64,10 @@ message RaftMessage {
 }
 
 message RaftResponse {} // 空响应，只要不报错就代表收到
+
+message UpdateConfigRequest {
+    // 如果 > 0 则更新，否则忽略
+    double gc_threshold = 1;
+}
+
+message UpdateConfigResponse {}

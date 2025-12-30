@@ -1,5 +1,6 @@
 #include "titan_c.h"
 #include "titan_db.h" // Week 2 整理的总入口
+#include "titankv/db_impl.h"
 #include <cstring>
 #include <cstdlib>
 
@@ -32,6 +33,10 @@ titan_db_t* titan_open(const char* name, const titan_options_t* c_opt, char** er
         options.create_if_missing = true;
         options.use_direct_io = false;
     }
+
+    // 保留测试能力，可以在 titan_options_t 里加个字段传进来
+    // 这里简单处理：默认 false，高性能模式
+    options.simulate_garbage_generation = false; 
     
     DB* db;
     Status s = DB::Open(options, std::string(name), &db);
@@ -85,6 +90,26 @@ void titan_delete(titan_db_t* db, const char* key, size_t klen, char** err) {
 
 void titan_free(void* ptr) {
     if (ptr) free(ptr);
+}
+
+void titan_get_statistics(titan_db_t* db, titan_stats_t* stats) {
+    if (!db || !db->rep) return;
+    
+    auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+    auto cpp_stats = impl->GetOptions().statistics;
+
+    stats->blob_bytes_read = cpp_stats->blob_bytes_read.load();
+    stats->blob_bytes_written = cpp_stats->blob_bytes_written.load();
+    stats->gc_run_count = cpp_stats->gc_run_count.load();
+    stats->gc_bytes_reclaimed = cpp_stats->gc_bytes_reclaimed.load();
+    stats->gc_keys_moved = cpp_stats->gc_keys_moved.load();
+}
+
+void titan_set_gc_threshold(titan_db_t* db, double threshold) {
+    if (db && db->rep) {
+        auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+        impl->SetGCThreshold(threshold);
+    }
 }
 
 } // extern "C"

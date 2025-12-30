@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include "titankv/statistics.h"
 
 namespace titankv {
 
@@ -35,10 +37,15 @@ struct Options {
     size_t block_size = 4 * 1024;
     
     bool use_direct_io = false; // 【新增】开关
+    
+    // 【新增】是否开启写前读来模拟垃圾 (默认关闭，仅用于测试)
+    bool simulate_garbage_generation = false; 
 
     // 【新增】Block Cache
     // 使用 shared_ptr 方便管理生命周期
     std::shared_ptr<Cache> block_cache = nullptr;
+    // 【新增】统计对象 (Shared Pointer)
+    std::shared_ptr<Statistics> statistics = std::make_shared<Statistics>();
 };
 
 // ==========================================

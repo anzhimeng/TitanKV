@@ -4,6 +4,8 @@
 #include <string>
 #include <atomic>
 #include <memory>
+#include <thread>
+#include <condition_variable>
 #include "titankv/db.h"
 #include "lsm/memtable.h"
 #include "lsm/version_set.h" 
@@ -28,11 +30,20 @@ class DBImpl : public DB {
 
   Status Recover();
 
+  // 【新增】手动触发 GC (Day 3 入口)
+  Status GarbageCollect();
+
+  const Options& GetOptions() const { return options_; } // 新增
+  // 【新增】
+  void SetGCThreshold(double threshold) {
+  	blob_store_->SetGCThreshold(threshold);
+  }
+
  private:
   friend class DB;
 
   const std::string dbname_;
-  Options options_;
+  Options options_; 
 
   std::mutex mutex_;
   MemTable* mem_;
@@ -49,6 +60,15 @@ class DBImpl : public DB {
 
   std::unique_ptr<IoUringExecutor> uring_executor_; // 新增成员
 
+  // 后台任务控制
+  std::thread bg_thread_;
+  std::mutex bg_mutex_;
+  std::condition_variable bg_cv_;
+  bool bg_running_;
+
+  // 后台线程主函数
+  void BGWork();
+
   // 核心函数：将 MemTable 写入 SSTable
   Status WriteLevel0Table(MemTable* mem,  VersionEdit* edit);
   
@@ -60,6 +80,12 @@ class DBImpl : public DB {
   std::string EncodeLogRecord(ValueType type, const Slice& key, const Slice& value);
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
+
+  // 【新增】辅助：只读取 LSM 中的 Raw Value (即 BlobIndex)
+  Status GetLSMValue(const Slice& key, std::string* blob_index_str);
+    
+  // 【新增】辅助：完成 GC 回填
+  Status FinishGC(const std::vector<GCRecord>& gc_records);
   
   DBImpl(const DBImpl&) = delete;
   DBImpl& operator=(const DBImpl&) = delete;
