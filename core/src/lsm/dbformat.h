@@ -15,6 +15,17 @@ enum ValueType : unsigned char {
   kTypeValue = 0x1
 };
 
+struct FileMetaData {
+  uint32_t refs = 0;
+  int allowed_seeks = 1 << 30; 
+  uint64_t file_number = 0;
+  uint64_t file_size = 0;
+  std::string smallest; 
+  std::string largest;  
+
+  FileMetaData() {}
+};
+
 static const SequenceNumber kMaxSequenceNumber = ((0x1ull << 56) - 1);
 
 inline uint64_t PackSequenceAndType(uint64_t seq, ValueType t) {
@@ -57,5 +68,19 @@ class UserKeyComparator {
   int Compare(const Slice& a, const Slice& b) const { return a.compare(b); }
   const char* Name() const { return "titankv.UserKeyComparator"; }
 };
+
+// 【新增】定义层级数量
+static const int kNumLevels = 7;
+
+// 【新增】辅助函数：从 InternalKey (Slice/string) 提取 UserKey
+inline Slice ExtractUserKey(const Slice& internal_key) {
+  assert(internal_key.size() >= 8);
+  return Slice(internal_key.data(), internal_key.size() - 8);
+}
+
+// 重载一个 string 版本的，方便使用
+inline Slice ExtractUserKey(const std::string& internal_key) {
+  return ExtractUserKey(Slice(internal_key));
+}
 
 } // namespace titankv

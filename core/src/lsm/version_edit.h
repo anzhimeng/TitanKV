@@ -3,7 +3,7 @@
 #include <string>
 #include <set>
 #include "lsm/dbformat.h"
-#include "lsm/version_set.h" // for FileMetaData
+#include "titankv/status.h"
 
 namespace titankv {
 

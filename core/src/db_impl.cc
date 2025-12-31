@@ -421,37 +421,25 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit) {
 // --- 读取路径 ---
 
 Status DBImpl::Get(const ReadOptions& opt, const Slice& key, std::string* value) {
-  (void)opt;
   SequenceNumber snapshot = last_sequence_.load(std::memory_order_acquire);
   LookupKey lkey(key, snapshot);
   Status s;
 
   // 1. 查 MemTable
   if (mem_->Get(lkey, value, &s)) {
-    if (s.IsNotFound()) return s;
-    BlobIndex b_index;
-    Slice input(*value);
-    if (b_index.DecodeFrom(&input).ok() && input.empty()) {
-       return blob_store_->Get(b_index, value);
-    }
-    return Status::OK();
+      if (s.IsNotFound()) return s;
+      return ResolveBlobIndex(value); // 封装 Blob 读取逻辑
   }
 
   // 2. 查 Immutable
   if (imm_ != nullptr) {
-    if (imm_->Get(lkey, value, &s)) {
-      if (s.IsNotFound()) return s;
-      BlobIndex b_index;
-      Slice input(*value);
-      if (b_index.DecodeFrom(&input).ok() && input.empty()) {
-         return blob_store_->Get(b_index, value);
+      if (imm_->Get(lkey, value, &s)) {
+          if (s.IsNotFound()) return s;
+          return ResolveBlobIndex(value);
       }
-      return Status::OK();
-    }
   }
 
-  // 3. 查 SSTables (L0)
-  // 获取当前版本并加引用
+  // 3. 查 Version (L0 - L6)
   Version* current;
   {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -459,49 +447,28 @@ Status DBImpl::Get(const ReadOptions& opt, const Slice& key, std::string* value)
       current->Ref();
   }
 
-  std::vector<FileMetaData*> files = current->GetFiles();
-  fprintf(stderr, "[DBImpl::Get] Key: %s. Checking %lu SSTables.\n", 
-          key.ToString().c_str(), files.size());
-  Status result = Status::NotFound("Key not found");
+  bool found = false;
+  // 定义 BlobGetter 回调
+  auto blob_getter = [&](const Slice& blob_idx_slice, std::string* val_out) -> Status {
+      // 这里的 blob_idx_slice 是编码后的 BlobIndex
+      // 我们其实不需要传 slice，因为 Version::Get 内部已经有了 string value
+      // 但为了配合上面的接口设计，这里做个适配
+      // 实际上最好把 ResolveBlobIndex 逻辑放到 Version::Get 外面，Version只负责返回 Raw Value
+      // 但为了利用 Version::Get 内部的 found 判断，我们在外面做 Resolve 比较好。
+      return Status::OK();
+  };
 
-  // L0 文件可能有重叠，必须按时间倒序（新的在后）查找
-  for (auto it = files.rbegin(); it != files.rend(); ++it) {
-    FileMetaData* f = *it;
-    
-    struct Context {
-        std::string* val;
-        bool found;
-    } ctx {value, false};
-    
-    auto callback = [](void* arg, const Slice& k, const Slice& v) {
-        (void)k;
-        Context* c = static_cast<Context*>(arg);
-        c->found = true;
-        *(c->val) = v.ToString();
-    };
-    
-    Status status = table_cache_->Get(opt, f->file_number, f->file_size, lkey.internal_key(), &ctx, callback);
-    if (!status.ok()) {
-    	   // fprintf(stderr, "[DBImpl::Get] Error reading SST #%lu: %s\n", f->file_number, status.ToString().c_str());
-        result = status;
-        break;
-    }
+  // 调用 Version::Get 获取 Raw Value
+  s = current->Get(opt, lkey, value, &found, table_cache_, blob_getter);
+  
+  current->Unref();
 
-    if (ctx.found) {
-        BlobIndex b_index;
-        Slice input(*value);
-        if (b_index.DecodeFrom(&input).ok() && input.empty()) {
-             result = blob_store_->Get(b_index, value);
-        } else {
-             result = Status::OK();
-        }
-        break; // 找到了，停止搜索
-    }
+  if (s.ok() && found) {
+      // 找到了 Raw Value，处理 Blob
+      return ResolveBlobIndex(value);
   }
 
-  // 释放版本引用
-  current->Unref();
-  return result;
+  return Status::NotFound("Key not found");
 }
 
 std::string DBImpl::EncodeLogRecord(ValueType type, const Slice& key, const Slice& value) {
@@ -514,62 +481,59 @@ std::string DBImpl::EncodeLogRecord(ValueType type, const Slice& key, const Slic
   return dst;
 }
 
-// 内部辅助：只查 LSM (Mem->Imm->SST)，返回 Raw String
 Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
-  // 1. 获取快照
   SequenceNumber snapshot = last_sequence_.load(std::memory_order_acquire);
   LookupKey lkey(key, snapshot);
   Status s;
 
-  // 2. 查 MemTable
-  if (mem_->Get(lkey, val_buf, &s)) {
-    return s; // Found or Deleted
-  }
+  // 1. 查 MemTable
+  if (mem_->Get(lkey, val_buf, &s)) return s;
 
-  // 3. 查 Immutable
+  // 2. 查 Immutable
   if (imm_ != nullptr) {
-    if (imm_->Get(lkey, val_buf, &s)) {
-      return s;
-    }
+    if (imm_->Get(lkey, val_buf, &s)) return s;
   }
 
-  // 4. 查 SSTables
-  Version* current = versions_->current();
-  current->Ref();
-  std::vector<FileMetaData*> files = current->GetFiles();
+  // 3. 查 Version (L0 - L6)
+  Version* current;
+  {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current = versions_->current();
+      current->Ref();
+  }
+
+  bool found = false;
   
-  Status result = Status::NotFound("Key not found");
+  // 定义一个“空”的 BlobGetter
+  // 因为 GetLSMValue 的目的就是获取 Raw Value (BlobIndex)，不需要去读 Blob
+  auto noop_blob_getter = [&](const Slice& idx, std::string* val) {
+      return Status::OK(); // 什么都不做，保留 val 中的 BlobIndex 字符串
+  };
 
-  for (auto it = files.rbegin(); it != files.rend(); ++it) {
-    FileMetaData* f = *it;
-    
-    struct Context {
-        std::string* val;
-        bool found;
-    } ctx {val_buf, false};
-    
-    auto callback = [](void* arg, const Slice& k, const Slice& v) {
-        (void)k;
-        Context* c = static_cast<Context*>(arg);
-        c->found = true;
-        *(c->val) = v.ToString();
-    };
-    
-    Status status = table_cache_->Get(ReadOptions(), f->file_number, f->file_size, lkey.internal_key(), &ctx, callback);
-    if (!status.ok()) {
-        result = status;
-        break;
-    }
+  // 复用 Version::Get 的多层查找逻辑
+  s = current->Get(ReadOptions(), lkey, val_buf, &found, table_cache_, noop_blob_getter);
+  
+  current->Unref();
 
-    if (ctx.found) {
-        result = Status::OK();
-        break;
-    }
+  if (s.ok() && found) {
+      return Status::OK();
   }
 
-  current->Unref();
-  return result;
+  return Status::NotFound("Key not found");
 }
+
+// 【新增】实现 ResolveBlobIndex
+Status DBImpl::ResolveBlobIndex(std::string* value) {
+    BlobIndex b_index;
+    Slice input(*value);
+    // 尝试解码，如果成功且无剩余数据，说明是 BlobIndex
+    if (b_index.DecodeFrom(&input).ok() && input.empty()) {
+        return blob_store_->Get(b_index, value);
+    }
+    // 否则是普通 Value，直接返回 OK
+    return Status::OK();
+}
+
 
 Status DBImpl::FinishGC(const std::vector<GCRecord>& gc_records) {
     // 这一步需要加锁，确保原子写入 WriteBatch

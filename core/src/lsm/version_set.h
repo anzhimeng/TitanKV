@@ -1,111 +1,90 @@
 #pragma once
-#include <string>
 #include <vector>
-#include <memory>
-#include <mutex>        
+#include <string>
 #include <atomic>
-#include "lsm/dbformat.h"
-#include "titankv/options.h"
+#include <functional>
+#include <mutex>         
+#include <memory>      
+#include "titankv/slice.h"
 #include "titankv/status.h"
-#include "util/env.h"     
-#include "wal/log_writer.h" 
+#include "titankv/options.h"
+#include "lsm/dbformat.h" 
+#include "lsm/version_edit.h"
+#include "util/env.h"   
+#include "wal/log_writer.h"
+
 namespace titankv {
 
-class VersionEdit;
-
-struct FileMetaData {
-  uint32_t refs = 0;
-  int allowed_seeks = 1 << 30; // 用于读放大优化，暂不使用
-  uint64_t file_number = 0;
-  uint64_t file_size = 0;
-  
-  // 该文件中最小和最大的 InternalKey
-  // 用于读请求过滤：如果 target < smallest 或 target > largest，直接跳过此文件
-  std::string smallest;
-  std::string largest;
-
-  FileMetaData() {}
-};
+class TableCache;
+class VersionSet;
 
 class Version {
  public:
-  Version() : refs_(0) {} // 初始化
+  explicit Version(VersionSet* vset) : vset_(vset), refs_(0) {}
 
-  // 追加新文件到 L0
+  ~Version(); // 在 .cc 中实现
+
+  // 【修改】只保留声明，去掉了花括号里的实现
   void AddFile(int level, uint64_t file_number, uint64_t file_size,
-               const Slice& smallest, const Slice& largest) {
-      (void)level;
-      FileMetaData* f = new FileMetaData();
-      f->file_number = file_number;
-      f->file_size = file_size;
-      f->smallest = smallest.ToString();
-      f->largest = largest.ToString();
-      files_.push_back(f);
-  }
+               const Slice& smallest, const Slice& largest);
 
-  // 【关键修复】析构函数必须是私有的，或者确保只有 Unref 能调用
-  // 这里保持原样，但在 Unref 中 delete
-  ~Version() {
-      for (auto* f : files_) delete f;
-  }
+  // 核心读取接口
+  Status Get(const ReadOptions& options, const LookupKey& key, std::string* val,
+             bool* found, TableCache* table_cache,
+             std::function<Status(const Slice&, std::string*)> blob_getter);
 
-  // 【关键修复】使用原子操作
-  void Ref() {
-      refs_.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  // 【关键修复】使用原子操作
+  void Ref() { refs_.fetch_add(1, std::memory_order_relaxed); }
+  
   void Unref() {
-      // fetch_sub 返回修改前的值。如果修改前是 1，减完就是 0。
       if (refs_.fetch_sub(1, std::memory_order_release) == 1) {
           std::atomic_thread_fence(std::memory_order_acquire);
           delete this;
       }
   }
 
-  const std::vector<FileMetaData*>& GetFiles() const { return files_; }
+  // GetFiles 现在需要 level 参数
+  const std::vector<FileMetaData*>& GetFiles(int level) const {
+      return files_[level];
+  }
 
  private:
   friend class VersionSet;
-  
-  std::vector<FileMetaData*> files_;
-  
-  // 【关键修复】从 int 改为 std::atomic<int>
-  std::atomic<int> refs_; 
+  VersionSet* vset_; 
+  std::vector<FileMetaData*> files_[kNumLevels];
+  std::atomic<int> refs_;
 };
+
 class VersionSet {
- public:
-  VersionSet(const std::string& dbname, const Options& options);
-  ~VersionSet();
+public:
+    VersionSet(const std::string& dbname, const Options& options);
+    ~VersionSet();
 
-  // 这里的 LogAndApply 是核心
-  // 将 edit 应用到当前版本，生成新版本，并写入 MANIFEST
-  Status LogAndApply(VersionEdit* edit, std::mutex* mu);
+    Status LogAndApply(VersionEdit* edit, std::mutex* mu);
+    Status Recover(bool* save_manifest);
 
-  // 恢复
-  Status Recover(bool* save_manifest);
+    Version* current() const { return current_; }
+    uint64_t ManifestFileNumber() const { return manifest_file_number_; }
+    uint64_t NewFileNumber() { return next_file_number_++; }
+    uint64_t LogNumber() const { return log_number_; }
+    
+    const InternalKeyComparator* icmp() const { return &icmp_; }
 
-  Version* current() const { return current_; }
-  uint64_t ManifestFileNumber() const { return manifest_file_number_; }
-  uint64_t NewFileNumber() { return next_file_number_++; }
-  uint64_t LogNumber() const { return log_number_; }
+private:
+    std::string dbname_;
+    const Options options_;
+    uint64_t next_file_number_;
+    uint64_t manifest_file_number_;
+    uint64_t log_number_;
+    
+    InternalKeyComparator icmp_; // 必须有这个
 
- private:
-  std::string dbname_;
-  const Options options_;
-  uint64_t next_file_number_;
-  uint64_t manifest_file_number_;
-  uint64_t log_number_;
+    Version* current_;
+    
+    std::unique_ptr<WritableFile> manifest_file_;
+    std::unique_ptr<log::Writer> manifest_log_;
 
-  Version* current_; // 当前版本 (Link List Head)
-  
-  // Manifest 写入器
-  std::unique_ptr<WritableFile> manifest_file_;
-  std::unique_ptr<log::Writer> manifest_log_;
-
-  // 辅助：将 edit 应用到 base 生成新 Version
-  class Builder; // 前置声明
-  void AppendVersion(Version* v);
+    class Builder;
+    void AppendVersion(Version* v);
 };
 
 } // namespace titankv

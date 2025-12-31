@@ -8,7 +8,7 @@
 #include <condition_variable>
 #include "titankv/db.h"
 #include "lsm/memtable.h"
-#include "lsm/version_set.h" 
+#include "lsm/version_set.h"
 #include "lsm/table_cache.h"
 #include "blob/blob_store.h"
 #include "wal/log_writer.h"
@@ -81,7 +81,8 @@ class DBImpl : public DB {
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
 
-  // 【新增】辅助：只读取 LSM 中的 Raw Value (即 BlobIndex)
+  // 【新增】辅助函数声明
+  Status ResolveBlobIndex(std::string* value);
   Status GetLSMValue(const Slice& key, std::string* blob_index_str);
     
   // 【新增】辅助：完成 GC 回填
