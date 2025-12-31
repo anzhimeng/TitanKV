@@ -73,4 +73,18 @@ void TableCache::Evict(uint64_t file_number) {
   cache_.erase(file_number);
 }
 
+Iterator* TableCache::NewIterator(const ReadOptions& options, uint64_t file_number, uint64_t file_size) {
+  std::shared_ptr<Table> table;
+  Status s = FindTable(file_number, file_size, &table);
+  if (!s.ok()) {
+    // 如果打开失败，返回一个新建的 ErrorIterator (需要自己实现一个简单的)
+    // 或者返回 nullptr (简单处理，但在生产代码中会导致 crash)
+    // 这里我们可以返回一个空的迭代器并标记 Error。
+    // 为了简化 Week 2，我们这里由 NewTwoLevelIterator 处理 nullptr。
+    return nullptr; // 生产环境应返回 NewErrorIterator(s)
+  }
+
+  return table->NewIterator(options);
+}
+
 } // namespace titankv

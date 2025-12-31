@@ -10,6 +10,7 @@
 #include "titankv/options.h"
 #include "lsm/dbformat.h" 
 #include "lsm/version_edit.h"
+#include "lsm/two_level_iterator.h"
 #include "util/env.h"   
 #include "wal/log_writer.h"
 
@@ -86,5 +87,10 @@ private:
     class Builder;
     void AppendVersion(Version* v);
 };
+
+	Iterator* NewLevelIterator(const InternalKeyComparator& icmp,
+	                      TableCache* table_cache,
+	                      const std::vector<FileMetaData*>& files,
+	                      const ReadOptions& options);
 
 } // namespace titankv

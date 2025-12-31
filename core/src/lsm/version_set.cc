@@ -2,6 +2,7 @@
 #include "lsm/version_edit.h"
 #include "lsm/table_cache.h"
 #include "util/filename.h"
+#include "lsm/two_level_iterator.h"
 #include "util/coding.h"
 #include "blob/blob_format.h"
 #include <algorithm>
@@ -210,5 +211,103 @@ Status VersionSet::Recover(bool* save_manifest) {
     (void)save_manifest;
     return Status::OK();
 }
+
+class LevelFileNumIterator : public Iterator {
+ public:
+  LevelFileNumIterator(const InternalKeyComparator& icmp,
+                       const std::vector<FileMetaData*>* flist)
+      : icmp_(icmp), flist_(flist), index_(flist->size()) {}
+
+  bool Valid() const override {
+    return index_ < flist_->size();
+  }
+
+  void Seek(const Slice& target) override {
+    // 二分查找第一个 largest >= target 的文件
+    // 这与 Version::Get 里的逻辑类似
+    // std::lower_bound 使用 < 比较，找到第一个不满足 (a < b) 的元素，即 a >= b
+    // 我们的比较规则是：如果 file->largest < target，则 file 小于 target
+    
+    // 自定义比较器
+    auto comp = [&](FileMetaData* f, const Slice& k) {
+        return icmp_.Compare(f->largest, k) < 0;
+    };
+    
+    auto it = std::lower_bound(flist_->begin(), flist_->end(), target, comp);
+    index_ = std::distance(flist_->begin(), it);
+  }
+
+  void SeekToFirst() override { index_ = 0; }
+  
+  void SeekToLast() override {
+    if (flist_->empty()) {
+      index_ = 0;
+    } else {
+      index_ = flist_->size() - 1;
+    }
+  }
+
+  void Next() override {
+    assert(Valid());
+    index_++;
+  }
+
+  void Prev() override {
+    if (index_ == 0) {
+      index_ = flist_->size(); // Invalid
+    } else {
+      index_--;
+    }
+  }
+
+  Slice key() const override {
+    assert(Valid());
+    return (*flist_)[index_]->largest; // Index Iterator 的 Key 必须是边界 Key
+  }
+
+  Slice value() const override {
+    assert(Valid());
+    // 编码 file_number 和 file_size
+    // 我们使用 16 字节的 buffer
+    EncodeFixed64(value_buf_, (*flist_)[index_]->file_number);
+    EncodeFixed64(value_buf_ + 8, (*flist_)[index_]->file_size);
+    return Slice(value_buf_, sizeof(value_buf_));
+  }
+
+  Status status() const override { return Status::OK(); }
+
+ private:
+  const InternalKeyComparator icmp_;
+  const std::vector<FileMetaData*>* flist_;
+  uint32_t index_;
+  mutable char value_buf_[16]; // 用于存储编码后的 value
+};
+
+// 回调函数：根据 handle_value 打开 SSTable
+static Iterator* GetFileIterator(void* arg, const ReadOptions& options, const Slice& handle_value) {
+  TableCache* cache = reinterpret_cast<TableCache*>(arg);
+  
+  if (handle_value.size() != 16) {
+      return nullptr; // Error
+  }
+  
+  uint64_t file_number = DecodeFixed64(handle_value.data());
+  uint64_t file_size = DecodeFixed64(handle_value.data() + 8);
+  
+  return cache->NewIterator(options, file_number, file_size);
+}
+
+// 暴露给外部的工厂方法
+Iterator* NewLevelIterator(const InternalKeyComparator& icmp,
+                           TableCache* table_cache,
+                           const std::vector<FileMetaData*>& files,
+                           const ReadOptions& options) {
+  return NewTwoLevelIterator(
+      new LevelFileNumIterator(icmp, &files), // Index Iterator
+      &GetFileIterator,                       // Block Function
+      table_cache,                            // arg
+      options);
+}
+
 
 } // namespace titankv
