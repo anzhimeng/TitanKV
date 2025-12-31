@@ -24,6 +24,8 @@ class Table {
   // 3. 在 Data Block 里查 Key
   Status InternalGet(const ReadOptions& options, const Slice& key, void* arg,
                      void (*handle_result)(void* arg, const Slice& k, const Slice& v));
+  // 【新增】返回遍历整个 Table 的迭代器
+  Iterator* NewIterator(const ReadOptions& options);
 
  private:
   struct Rep;
@@ -34,6 +36,8 @@ class Table {
   // 辅助：读取 Block
   static Status ReadBlock(RandomAccessFile* file, const ReadOptions& options, 
                           const BlockHandle& handle, BlockContents* contents);
+  // 回调函数，符合 BlockFunction 签名
+  static Iterator* BlockReader(void* arg, const ReadOptions& options, const Slice& handle_value);
 };
 
 } // namespace titankv

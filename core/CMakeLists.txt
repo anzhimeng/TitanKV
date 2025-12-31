@@ -20,6 +20,7 @@ set(CORE_SOURCES
     src/lsm/version_set.cc
     src/lsm/filter_block.cc
     src/lsm/merging_iterator.cc
+    src/lsm/two_level_iterator.cc
     
     # 工具组件
     src/util/arena.cc
