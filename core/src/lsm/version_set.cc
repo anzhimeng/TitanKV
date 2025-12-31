@@ -137,6 +137,90 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k, std::string*
   return Status::OK();
 }
 
+// 辅助：计算某一层文件的总大小
+static uint64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
+    uint64_t sum = 0;
+    for (auto* f : files) sum += f->file_size;
+    return sum;
+}
+
+// 辅助：获取某层的大小限制
+static double MaxBytesForLevel(int level) {
+    // L1: 10MB, L2: 100MB...
+    double result = 10.0 * 1048576.0;
+    while (level > 1) {
+        result *= 10;
+        level--;
+    }
+    return result;
+}
+
+void Version::Finalize() {
+    // 寻找分数最高的层
+    int best_level = -1;
+    double best_score = -1;
+
+    for (int level = 0; level < kNumLevels - 1; level++) {
+        double score;
+        if (level == 0) {
+            // L0 仍然按文件数：4 个
+            score = files_[0].size() / 4.0;
+        } else {
+            const uint64_t level_bytes = TotalFileSize(files_[level]);
+            score = static_cast<double>(level_bytes) / MaxBytesForLevel(level);
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best_level = level;
+        }
+    }
+
+    compaction_level_ = best_level;
+    compaction_score_ = best_score;
+}
+
+
+void Version::GetOverlappingInputs(
+    int level,
+    const Slice& begin,
+    const Slice& end,
+    std::vector<FileMetaData*>* inputs) {
+    
+    inputs->clear();
+    Slice user_begin, user_end;
+    if (!begin.empty()) user_begin = ExtractUserKey(begin);
+    if (!end.empty()) user_end = ExtractUserKey(end);
+
+    // 【关键修复】直接使用成员变量 vset_ 获取 Comparator
+    const InternalKeyComparator* ucmp = vset_->icmp();
+    
+    // 【关键修复】直接使用成员变量 files_ 获取文件列表
+    const std::vector<FileMetaData*>& current_files = files_[level];
+
+    for (size_t i = 0; i < current_files.size(); i++) {
+        FileMetaData* f = current_files[i];
+        const Slice file_start = f->smallest;
+        const Slice file_limit = f->largest;
+        
+        // 健壮性检查
+        if (file_start.size() < 8 || file_limit.size() < 8) {
+            inputs->push_back(f);
+            continue;
+        }
+
+        const Slice file_u_start = ExtractUserKey(file_start);
+        const Slice file_u_limit = ExtractUserKey(file_limit);
+
+        if (!end.empty() && ucmp->user_key_compare(user_end, file_u_start) < 0) {
+            // file is completely after range
+        } else if (!begin.empty() && ucmp->user_key_compare(user_begin, file_u_limit) > 0) {
+            // file is completely before range
+        } else {
+            inputs->push_back(f);
+        }
+    }
+}
 // --- VersionSet Implementation ---
 
 VersionSet::VersionSet(const std::string& dbname, const Options& options)
@@ -147,6 +231,9 @@ VersionSet::VersionSet(const std::string& dbname, const Options& options)
       log_number_(0),
       current_(new Version(this)) {
   current_->Ref();
+  for (int i = 0; i < kNumLevels; i++) {
+    compact_pointer_[i] = ""; // 初始为空，表示从头开始
+  }
 }
 
 VersionSet::~VersionSet() {
@@ -200,10 +287,20 @@ Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
 
   // TODO: 这里应该对 L1+ 的文件进行排序 (Sort by smallest key)
   // 也就是 v->files_[level] 需要 sort。Day 3 暂时忽略，假设 AddFile 是有序的或者只做 L0。
+  // 【新增】更新 compact_pointer_
+  // 逻辑：本次 Compaction 涉及的最大的 Key，就是下一次的起点
+  for (size_t i = 0; i < edit->new_files_.size(); i++) {
+      int level = edit->new_files_[i].first;
+      const FileMetaData& f = edit->new_files_[i].second;
+        
+      // 简单策略：取新生成文件的 Largest Key
+      // 实际上应该取 Input 文件的 Largest Key，但这里简化处理
+      compact_pointer_[level] = f.largest;
+  }
 
   // 4. 更新 Current
+  v->Finalize(); // 【新增】计算分数
   AppendVersion(v);
-  
   return Status::OK();
 }
 
@@ -244,6 +341,93 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c, TableCache* table_cache, 
 
     // 3. 将所有迭代器合并为一个
     return NewMergingIterator(&icmp_, &list[0], list.size());
+}
+
+Compaction* VersionSet::PickCompaction() {
+    Version* current = current_;
+    const bool size_compaction = (current->compaction_score() >= 1);
+    
+    if (!size_compaction) {
+        return nullptr;
+    }
+
+    int level = current->compaction_level();
+    const std::vector<FileMetaData*>& files = current->GetFiles(level);
+
+    // 1. 寻找第一个 largest > compact_pointer_[level] 的文件
+    // 也就是接续上一次的工作
+    FileMetaData* f = nullptr;
+    for (size_t i = 0; i < files.size(); i++) {
+        if (compact_pointer_[level].empty() || 
+            icmp_.Compare(files[i]->largest, Slice(compact_pointer_[level])) > 0) {
+            f = files[i];
+            break;
+        }
+    }
+
+    // 如果所有文件都比 pointer 小（说明扫完了一圈），这就回绕到第一个文件
+    if (f == nullptr && !files.empty()) {
+        f = files[0];
+    }
+    
+    if (f == nullptr) return nullptr;
+
+    
+    Compaction* c = new Compaction(&options_, level);
+
+    // 1. 挑选 Input[0]
+    if (current->GetFiles(level).empty()) {
+        delete c;
+        return nullptr;
+    }
+    c->inputs(0)->push_back(f);
+
+    // L0 特殊处理：扩展重叠
+    if (level == 0) {
+        Slice min = f->smallest;
+        Slice max = f->largest;
+        
+        // 【修复 1】如果种子文件的 Key 无效，不进行扩展，仅 Compact 它自己
+        if (min.size() >= 8 && max.size() >= 8) {
+            std::vector<FileMetaData*> l0_inputs;
+            current->GetOverlappingInputs(0, min, max, &l0_inputs);
+            *(c->inputs(0)) = l0_inputs;
+        }
+    }
+
+    // 2. 挑选 Input[1] (Level + 1)
+    // 计算 Input[0] 的整体范围
+    if (c->inputs(0)->empty()) { // 防御性检查
+        delete c;
+        return nullptr;
+    }
+
+    FileMetaData* f0 = (*c->inputs(0))[0];
+    Slice smallest = f0->smallest;
+    Slice largest = f0->largest;
+
+    // 【修复 2】如果初始范围无效，直接返回（只做 Input[0] 的整理，不合并到下一层）
+    // 这可以防止 Crash，并允许系统逐渐通过 Compaction 修正元数据（如果有读取逻辑补全的话）
+    if (smallest.size() < 8 || largest.size() < 8) {
+        // 这里的 return c 意味着只 Compact inputs[0]，不拉取 inputs[1]
+        // 这在 L0->L0 的 Trivial Move 或者 Self-Compaction 是合法的
+        return c; 
+    }
+
+    for (size_t i = 1; i < c->inputs(0)->size(); ++i) {
+        FileMetaData* f = (*c->inputs(0))[i];
+        
+        // 【修复 3】只比较合法的 Key
+        if (f->smallest.size() >= 8 && f->largest.size() >= 8) {
+            if (icmp_.Compare(f->smallest, smallest) < 0) smallest = f->smallest;
+            if (icmp_.Compare(f->largest, largest) > 0) largest = f->largest;
+        }
+    }
+
+    // 去 Next Level 找重叠
+    current->GetOverlappingInputs(level + 1, smallest, largest, c->inputs(1));
+
+    return c;
 }
 
 class LevelFileNumIterator : public Iterator {

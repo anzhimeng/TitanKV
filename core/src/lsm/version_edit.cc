@@ -8,6 +8,7 @@ void VersionEdit::Clear() {
   log_number_ = 0;
   has_next_file_number_ = false;
   next_file_number_ = 0;
+  deleted_files_.clear();
   new_files_.clear();
 }
 
@@ -30,6 +31,12 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     PutVarint32(dst, kNextFileNumber);
     PutVarint64(dst, next_file_number_);
   }
+  for (const auto& del : deleted_files_) {
+    PutVarint32(dst, kDeletedFile);
+    PutVarint32(dst, del.first);  // Level
+    PutVarint64(dst, del.second); // FileNum
+  }
+
   
   for (const auto& nf : new_files_) {
     PutVarint32(dst, kNewFile);
@@ -71,6 +78,17 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           msg = "next file number";
         }
         break;
+      // 【新增】反序列化删除记录
+      case kDeletedFile: {
+          uint32_t level;
+          uint64_t file_num;
+          if (GetVarint32(&input, &level) && GetVarint64(&input, &file_num)) {
+              DeleteFile(level, file_num);
+          } else {
+              msg = "deleted file";
+          }
+          break;
+      }
       case kNewFile: {
         uint32_t level;
         FileMetaData f;

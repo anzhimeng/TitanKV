@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <utility>
 #include "lsm/dbformat.h"
 #include "titankv/status.h"
 
@@ -27,6 +28,10 @@ class VersionEdit {
   // 添加新文件 (Level, FileNum, FileSize, Smallest, Largest)
   void AddFile(int level, uint64_t file, uint64_t file_size,
                const Slice& smallest, const Slice& largest);
+               
+  void DeleteFile(int level, uint64_t file) {
+    deleted_files_.insert(std::make_pair(level, file));
+  }
 
   void EncodeTo(std::string* dst) const;
   Status DecodeFrom(const Slice& src);
@@ -41,6 +46,7 @@ class VersionEdit {
     kNextFileNumber = 2,
     kLastSequence = 3,
     kNewFile = 4,
+    kDeletedFile = 5,
   };
 
   bool has_log_number_;
@@ -48,7 +54,8 @@ class VersionEdit {
 
   bool has_next_file_number_;
   uint64_t next_file_number_;
-
+  // 【新增】记录被删除的文件 <level, file_number>
+  std::set<std::pair<int, uint64_t>> deleted_files_;
   // <level, file_meta>
   std::vector<std::pair<int, FileMetaData>> new_files_;
 };

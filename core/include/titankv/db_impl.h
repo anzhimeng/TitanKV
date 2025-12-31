@@ -81,6 +81,8 @@ class DBImpl : public DB {
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
 
+  Status DoCompactionWork(Compaction* c);
+
   // 【新增】辅助函数声明
   Status ResolveBlobIndex(std::string* value);
   Status GetLSMValue(const Slice& key, std::string* blob_index_str);

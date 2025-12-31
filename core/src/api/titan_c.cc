@@ -3,6 +3,7 @@
 #include "titankv/db_impl.h"
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 
 using namespace titankv;
 
@@ -36,6 +37,7 @@ titan_db_t* titan_open(const char* name, const titan_options_t* c_opt, char** er
 
     // 保留测试能力，可以在 titan_options_t 里加个字段传进来
     // 这里简单处理：默认 false，高性能模式
+    
     options.simulate_garbage_generation = false; 
     
     DB* db;

@@ -45,6 +45,10 @@ struct Options {
     // Blob 文件的大小阈值 (默认 64MB)
     size_t max_blob_file_size = 64 * 1024 * 1024;
 
+    // 【新增】LSM SSTable 文件大小上限 (默认 2MB)
+    // Compaction 过程中，当 Builder 超过此大小时，会切分出新的 .sst 文件
+    size_t max_file_size = 2 * 1024 * 1024;
+
     // SSTable Block 重启点间隔 (默认 16)
     // 每 16 个 Key 存一个完整的 Key，用于二分查找
     int block_restart_interval = 16;
@@ -53,6 +57,8 @@ struct Options {
     size_t block_size = 4 * 1024;
     
     bool use_direct_io = false; // 【新增】开关
+
+    int max_open_files = 500; 
     
     // 【新增】是否开启写前读来模拟垃圾 (默认关闭，仅用于测试)
     bool simulate_garbage_generation = false; 

@@ -48,12 +48,26 @@ class Version {
   const std::vector<FileMetaData*>& GetFiles(int level) const {
       return files_[level];
   }
+  // 计算每一层的 Score
+  void Finalize();
+
+  // 访问器
+  double compaction_score() const { return compaction_score_; }
+  int compaction_level() const { return compaction_level_; }
+
+  void GetOverlappingInputs(
+  	 int level,
+      const Slice& begin,
+      const Slice& end,
+      std::vector<FileMetaData*>* inputs);
 
  private:
   friend class VersionSet;
   VersionSet* vset_; 
   std::vector<FileMetaData*> files_[kNumLevels];
   std::atomic<int> refs_;
+  double compaction_score_ = -1;
+  int compaction_level_ = -1;
 };
 
 class VersionSet {
@@ -72,6 +86,8 @@ public:
     const InternalKeyComparator* icmp() const { return &icmp_; }
     Iterator* MakeInputIterator(Compaction* c, TableCache* table_cache, const ReadOptions& options);
 
+    Compaction* PickCompaction();
+
 private:
     std::string dbname_;
     const Options options_;
@@ -85,6 +101,9 @@ private:
     
     std::unique_ptr<WritableFile> manifest_file_;
     std::unique_ptr<log::Writer> manifest_log_;
+
+    // 记录每一层上一次合并结束的 Key (Largest Key)
+    std::string compact_pointer_[kNumLevels];  
 
     class Builder;
     void AppendVersion(Version* v);

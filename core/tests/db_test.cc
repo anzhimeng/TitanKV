@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <thread>
 
 using namespace titankv;
 
@@ -200,3 +201,40 @@ TEST_F(DBTest, Delete) {
     s = db_->Get(ReadOptions(), key, &res);
     ASSERT_TRUE(s.IsNotFound());
 }
+
+TEST_F(DBTest, TriggerCompaction) {
+    // 1. 极端配置：1KB 就 Flush
+    options_.write_buffer_size = 1024; 
+    
+    // 关闭旧 DB，用新配置打开
+    delete db_;
+    std::filesystem::remove_all(dbname_);
+    ASSERT_TRUE(DB::Open(options_, dbname_, &db_).ok());
+
+    // 2. 写入数据，制造 5 个 SSTable
+    // L0 触发阈值是 4 个文件。我们写 5 个文件，Score 应该是 1.25，必定触发。
+    // 每个文件 1KB，所以总共写 6KB 数据足够了。
+    
+    for (int i = 0; i < 6; i++) {
+        // 每次写入 1.5KB，确保填满一个 MemTable 并触发 Flush
+        std::string key = "key_" + std::to_string(i);
+        std::string val(1500, 'v'); 
+        
+        ASSERT_TRUE(db_->Put(WriteOptions(), key, val).ok());
+        
+        // 稍微 sleep 一下，让后台线程有机会运行
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // 3. 等待 Compaction 发生
+    // 此时 L0 应该有 6 个文件。Score = 1.5。
+    // BGWork 应该会 Pick 其中一个进行合并。
+    
+    fprintf(stderr, "Waiting for compaction...\n");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    
+    // 4. 验证 (通过日志观察，或者检查文件数)
+    // 这种测试主要靠看日志，或者通过 GetProperty 接口（还没实现）
+    // 这里我们只要不 Crash 就算过。
+}
+

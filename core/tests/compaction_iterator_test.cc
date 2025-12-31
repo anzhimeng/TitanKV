@@ -59,7 +59,8 @@ protected:
 TEST_F(CompactionIterTest, MergeL0AndL1) {
     // 构造 Compaction 对象
     // Level 0 -> Level 1
-    Compaction c(0);
+    Options *opt;
+    Compaction c(opt, 0);
 
     // L0: 两个重叠文件
     // File 1: "a" ... "c"
