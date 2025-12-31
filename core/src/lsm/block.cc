@@ -46,6 +46,46 @@ Block::~Block() {
   }
 }
 
+// --- Iterator Base Implementation ---
+
+Iterator::Iterator() {
+  cleanup_head_.function = nullptr;
+  cleanup_head_.next = nullptr;
+}
+
+Iterator::~Iterator() {
+  if (cleanup_head_.function != nullptr) {
+    // 1. 执行头节点清理
+    (*cleanup_head_.function)(cleanup_head_.arg1, cleanup_head_.arg2);
+    
+    // 2. 执行后续节点清理
+    CleanupNode* node = cleanup_head_.next;
+    while (node != nullptr) {
+      (*node->function)(node->arg1, node->arg2);
+      CleanupNode* next = node->next;
+      delete node;
+      node = next;
+    }
+  }
+}
+
+void Iterator::RegisterCleanup(CleanupFunction func, void* arg1, void* arg2) {
+  assert(func != nullptr);
+  if (cleanup_head_.function == nullptr) {
+    cleanup_head_.function = func;
+    cleanup_head_.arg1 = arg1;
+    cleanup_head_.arg2 = arg2;
+    cleanup_head_.next = nullptr; // 确保 next 为空
+  } else {
+    CleanupNode* new_node = new CleanupNode;
+    new_node->function = func;
+    new_node->arg1 = arg1;
+    new_node->arg2 = arg2;
+    new_node->next = cleanup_head_.next;
+    cleanup_head_.next = new_node;
+  }
+}
+
 // --- Block Iterator ---
 
 class BlockIterator : public Iterator {

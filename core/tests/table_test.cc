@@ -88,12 +88,17 @@ TEST_F(TableBuilderTest, BuildAndRead) {
     // 2. Read
     std::unique_ptr<RandomAccessFile> raf;
     ASSERT_TRUE(NewRandomAccessFile(fname_, &raf).ok());
+
+    // 【新增】确保指针真的被赋值了
+    ASSERT_NE(raf, nullptr) << "NewRandomAccessFile returned OK but pointer is null!";
     
     uint64_t file_size = std::filesystem::file_size(fname_);
     Table* table;
     
-    // 【关键修复】传入 file_number = 1
-    ASSERT_TRUE(Table::Open(options_, raf.get(), 1, file_size, &table).ok());
+
+    // ✅ 正确：移交所有权，并打印错误日志
+    Status s = Table::Open(options_, raf.release(), 1, file_size, &table);
+    ASSERT_TRUE(s.ok()) << "Table::Open failed: " << s.ToString();
 
     struct Context {
         bool found;

@@ -15,6 +15,19 @@ static void DeleteCachedBlock(const Slice& key, void* value) {
   delete block;
 }
 
+// 1. 定义清理回调函数 (放在匿名空间或 static)
+
+static void DeleteBlock(void* arg, void* ignored) {
+  (void)ignored;
+  delete reinterpret_cast<Block*>(arg);
+}
+
+static void ReleaseCacheHandle(void* cache_arg, void* handle_arg) {
+  Cache* cache = reinterpret_cast<Cache*>(cache_arg);
+  Cache::Handle* handle = reinterpret_cast<Cache::Handle*>(handle_arg);
+  cache->Release(handle);
+}
+
 struct Table::Rep {
   Options options;
   Status status;
@@ -42,6 +55,10 @@ struct Table::Rep {
 Status Table::Open(const Options& options, RandomAccessFile* file,
                    uint64_t file_number, uint64_t file_size, Table** table) {
   *table = nullptr;
+  // 【新增】空指针检查
+  if (file == nullptr) {
+      return Status::InvalidArgument("Table::Open called with null file pointer");
+  }
   std::unique_ptr<RandomAccessFile> file_guard(file);
 
   if (file_size < Footer::kEncodedLength) {
@@ -190,19 +207,13 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options, const Slice&
       // 而我们的 Iterator 目前还不支持 RegisterCleanup。
       // 这是一个已知缺陷，Compaction Week Day 2 暂且忽略内存泄漏，或者 BlockReader 返回的 Iterator 析构时负责 delete block。
       
-      if (cache_handle == nullptr) {
-           // 如果没有缓存句柄，说明 block 是 new 出来的，需要释放
-           // TODO: 给 Iterator 增加 RegisterCleanup 机制
-           // 暂时：为了不泄露，我们可以把 block 绑定到 Iterator 上？
-           // 现在的 BlockIterator 并不持有 Block 的所有权。
-           // 这是一个 Todo，但为了编译通过，先返回 iter。
-           // 实际上在 Compaction 时，如果不做 Cache，内存会泄露。
-           // 建议：Compaction 时 fill_cache=false，这里会有 leak。
-           // 临时修复：如果是 Uncached Block，我们这里不做 delete，让它泄露一点点，
-           // 或者你可以给 Iterator 加个 flag 让它析构时 delete data。
+      // 【关键修改】注册清理函数
+      if (cache_handle != nullptr) {
+          // 情况 A: Block 来自 Cache，迭代器销毁时释放 Cache Handle
+          iter->RegisterCleanup(&ReleaseCacheHandle, block_cache, cache_handle);
       } else {
-           // 如果有缓存，释放 Handle
-           block_cache->Release(cache_handle);
+          // 情况 B: Block 是 new 出来的（未走 Cache），迭代器销毁时 delete block
+          iter->RegisterCleanup(&DeleteBlock, block, nullptr);
       }
       return iter;
   }
@@ -221,7 +232,9 @@ Iterator* Table::NewIterator(const ReadOptions& options) {
 Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
                           void (*handle_result)(void*, const Slice&, const Slice&)) {
   Iterator* iiter = rep_->index_block->NewIterator(&rep_->user_cmp);
-  
+  if (iiter == nullptr) {
+    return Status::Corruption("Index block is invalid");
+  }
   assert(k.size() >= 8);
   Slice target_user_key(k.data(), k.size() - 8);
 

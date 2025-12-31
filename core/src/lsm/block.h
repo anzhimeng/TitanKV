@@ -8,8 +8,9 @@
 namespace titankv {
 
 class Iterator {
- public:
-  virtual ~Iterator() = default;
+public:
+  Iterator(); // 【新增】构造函数初始化清理链表
+  virtual ~Iterator(); // 【修改】析构函数执行清理
   virtual bool Valid() const = 0;
   virtual void SeekToFirst() = 0;
   virtual void SeekToLast() = 0;
@@ -19,6 +20,23 @@ class Iterator {
   virtual Slice key() const = 0;
   virtual Slice value() const = 0;
   virtual Status status() const { return Status::OK(); }
+
+  // 定义清理函数的签名
+  typedef void (*CleanupFunction)(void* arg1, void* arg2);
+
+  // 【新增】注册清理函数
+  // 当 Iterator 析构时，会调用 func(arg1, arg2)
+  void RegisterCleanup(CleanupFunction func, void* arg1, void* arg2);
+private:
+  // 清理节点
+  struct CleanupNode {
+    CleanupFunction function = nullptr;
+    void* arg1 = nullptr;
+    void* arg2 = nullptr;
+    CleanupNode* next = nullptr;
+  };
+
+  CleanupNode cleanup_head_; // 内联存储第一个节点，避免 malloc
 };
 
 

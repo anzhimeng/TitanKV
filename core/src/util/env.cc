@@ -2,6 +2,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
+#include <sys/stat.h>
+#include <cerrno>
+#include <cstring>
 #include "util/env.h"
 
 
@@ -106,7 +109,6 @@ public:
     ~PosixRandomAccessFile() override { close(fd_); }
 
     Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const override {
-        // pread 是原子操作，不改变文件指针，适合多线程并发读
         ssize_t r = pread(fd_, scratch, n, static_cast<off_t>(offset));
         if (r < 0) {
             return Status::IOError("pread failed", strerror(errno));
@@ -114,7 +116,7 @@ public:
         *result = Slice(scratch, r);
         return Status::OK();
     }
-    // 【新增】实现接口
+    
     int UnsafeGetFD() const override { return fd_; }
 };
 
