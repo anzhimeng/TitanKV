@@ -1,8 +1,8 @@
 #include "lsm/version_set.h"
 #include "lsm/version_edit.h"
 #include "lsm/table_cache.h"
+#include "lsm/merging_iterator.h"
 #include "util/filename.h"
-#include "lsm/two_level_iterator.h"
 #include "util/coding.h"
 #include "blob/blob_format.h"
 #include <algorithm>
@@ -210,6 +210,40 @@ Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
 Status VersionSet::Recover(bool* save_manifest) {
     (void)save_manifest;
     return Status::OK();
+}
+
+Iterator* VersionSet::MakeInputIterator(Compaction* c, TableCache* table_cache, const ReadOptions& options) {
+    // 0. 准备迭代器列表
+    std::vector<Iterator*> list;
+    
+    // 1. 处理 inputs_[0] (源层)
+    int level = c->level();
+    const std::vector<FileMetaData*>& files_0 = *c->inputs(0);
+    
+    if (level == 0) {
+        // L0 文件之间可能有重叠，必须为每个文件创建一个独立的 Iterator
+        for (size_t i = 0; i < files_0.size(); i++) {
+            Iterator* iter = table_cache->NewIterator(options, 
+                                                      files_0[i]->file_number, 
+                                                      files_0[i]->file_size);
+            list.push_back(iter);
+        }
+    } else {
+        // L1+ 文件不重叠，创建一个 LevelIterator 即可
+        // CreateTwoLevelIterator 是我们在 Day 4 实现的 NewLevelIterator
+        // 请确认你的 Day 4 代码里叫什么名字，这里假设叫 NewLevelIterator
+        list.push_back(NewLevelIterator(icmp_, table_cache, files_0, options));
+    }
+
+    // 2. 处理 inputs_[1] (目标层，Level + 1)
+    const std::vector<FileMetaData*>& files_1 = *c->inputs(1);
+    if (!files_1.empty()) {
+        // 目标层一定是不重叠的 (L1+)，所以直接用 LevelIterator
+        list.push_back(NewLevelIterator(icmp_, table_cache, files_1, options));
+    }
+
+    // 3. 将所有迭代器合并为一个
+    return NewMergingIterator(&icmp_, &list[0], list.size());
 }
 
 class LevelFileNumIterator : public Iterator {

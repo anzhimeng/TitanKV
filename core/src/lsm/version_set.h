@@ -9,6 +9,7 @@
 #include "titankv/status.h"
 #include "titankv/options.h"
 #include "lsm/dbformat.h" 
+#include "lsm/compaction.h"
 #include "lsm/version_edit.h"
 #include "lsm/two_level_iterator.h"
 #include "util/env.h"   
@@ -69,6 +70,7 @@ public:
     uint64_t LogNumber() const { return log_number_; }
     
     const InternalKeyComparator* icmp() const { return &icmp_; }
+    Iterator* MakeInputIterator(Compaction* c, TableCache* table_cache, const ReadOptions& options);
 
 private:
     std::string dbname_;
@@ -88,7 +90,7 @@ private:
     void AppendVersion(Version* v);
 };
 
-	Iterator* NewLevelIterator(const InternalKeyComparator& icmp,
+    Iterator* NewLevelIterator(const InternalKeyComparator& icmp,
 	                      TableCache* table_cache,
 	                      const std::vector<FileMetaData*>& files,
 	                      const ReadOptions& options);
