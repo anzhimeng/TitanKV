@@ -221,6 +221,27 @@ void Version::GetOverlappingInputs(
         }
     }
 }
+
+bool Version::OverlapInLevel(int level, const Slice& user_key, const Slice& internal_key) const {
+  const InternalKeyComparator* ucmp = vset_->icmp();
+  
+  // 遍历 level 及更下层
+  for (; level < kNumLevels; level++) {
+    const std::vector<FileMetaData*>& files = files_[level];
+    
+    // 因为 L1+ 是有序不重叠的，我们可以用二分查找加速
+    // 这里为了逻辑简单，先写通用检查（L0和L1+都适用）
+    // 检查是否有文件范围覆盖了 user_key
+    for (const auto* f : files) {
+      if (ucmp->user_key_compare(user_key, ExtractUserKey(f->smallest)) >= 0 &&
+          ucmp->user_key_compare(user_key, ExtractUserKey(f->largest)) <= 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // --- VersionSet Implementation ---
 
 VersionSet::VersionSet(const std::string& dbname, const Options& options)

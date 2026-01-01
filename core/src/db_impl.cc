@@ -3,6 +3,7 @@
 #include "util/coding.h"
 #include "lsm/table_builder.h"
 #include "lsm/version_edit.h"
+#include "lsm/compaction.h"
 #include "util/filename.h"
 #include "util/cache.h"
 #include <filesystem>
@@ -648,121 +649,151 @@ Status DBImpl::GarbageCollect() {
 // core/src/db_impl.cc
 
 Status DBImpl::DoCompactionWork(Compaction* c) {
-    // 1. 构建输入迭代器
-    // 注意：Day 1 我们实现了 MakeInputIterator，这里直接用
-    Iterator* input = versions_->MakeInputIterator(c, table_cache_, ReadOptions());
-    
-    input->SeekToFirst();
-    
-    Status status;
-    std::string current_user_key;
-    bool has_current_user_key = false;
-    
-    // 构建器状态
-    TableBuilder* builder = nullptr;
-    std::unique_ptr<WritableFile> file;
-    uint64_t current_output_file_number = 0;
-    Compaction::OutputFile current_output;
+  // 1. 构建输入迭代器 (Week 1 产物)
+  Iterator* input = versions_->MakeInputIterator(c, table_cache_, ReadOptions());
+  input->SeekToFirst();
+  
+  Status status;
+  std::string current_user_key;
+  bool has_current_user_key = false;
+  
+  // 临时状态
+  TableBuilder* builder = nullptr;
+  std::unique_ptr<WritableFile> file;
+  uint64_t current_output_file_number = 0;
+  Compaction::OutputFile current_output;
 
-    // Helper: 完成并关闭当前文件
-    auto FinishOutputFile = [&]() -> Status {
-        if (builder == nullptr) return Status::OK();
-        
-        Status s = builder->Finish();
-        if (s.ok()) {
-            uint64_t fsize = builder->FileSize();
-            s = file->Close();
-            if (s.ok()) {
-                current_output.file_size = fsize;
-                c->AddOutputFile(current_output);
-                fprintf(stderr, "[Compaction] Generated table #%lu@L%d, entries: %lu\n", 
-                        current_output.number, c->level() + 1, builder->NumEntries());
-            }
-        }
-        delete builder;
-        builder = nullptr;
-        file.reset();
-        return s;
-    };
+  // --- Helper: 开启新文件 ---
+  auto OpenOutputFile = [&]() -> Status {
+      current_output_file_number = versions_->NewFileNumber();
+      std::string fname = TableFileName(dbname_, current_output_file_number);
+      Status s = NewWritableFile(fname, &file);
+      if (!s.ok()) return s;
+      
+      builder = new TableBuilder(GetOptions(), file.get());
+      
+      current_output.number = current_output_file_number;
+      current_output.smallest.clear();
+      current_output.largest.clear();
+      return Status::OK();
+  };
 
-    // Helper: 开启新文件
-    auto OpenOutputFile = [&]() -> Status {
-        current_output_file_number = versions_->NewFileNumber();
-        std::string fname = TableFileName(dbname_, current_output_file_number);
-        Status s = NewWritableFile(fname, &file);
-        if (!s.ok()) return s;
-        
-        builder = new TableBuilder(options_, file.get());
-        current_output.number = current_output_file_number;
-        current_output.smallest.clear(); 
-        current_output.largest.clear();
-        return Status::OK();
-    };
+  // --- Helper: 完成当前文件 ---
+  auto FinishOutputFile = [&]() -> Status {
+      if (builder == nullptr) return Status::OK();
+      
+      Status s = builder->Finish();
+      if (s.ok()) {
+          uint64_t fsize = builder->FileSize();
+          s = file->Close();
+          if (s.ok()) {
+              current_output.file_size = fsize;
+              c->AddOutputFile(current_output);
+              fprintf(stderr, "[Compaction] Generated table #%lu@L%d, entries: %lu\n", 
+                      current_output.number, c->level() + 1, builder->NumEntries());
+          }
+      }
+      delete builder;
+      builder = nullptr;
+      file.reset();
+      return s;
+  };
 
-    // 2. 遍历输入流
-    for (; input->Valid(); input->Next()) {
-        Slice key = input->key(); // Internal Key
-        Slice user_key = ExtractUserKey(key);
+  // 2. 遍历输入流
+  const InternalKeyComparator* icmp = versions_->icmp();
+  
+  for (; input->Valid(); input->Next()) {
+      Slice key = input->key();
+      Slice user_key = ExtractUserKey(key);
 
-        // --- Drop 规则 (GC 核心) ---
-        bool drop = false;
-        
-        // 规则 1: 如果是同一个 UserKey 的旧版本 -> 丢弃
-        if (has_current_user_key && user_key == current_user_key) {
-            drop = true;
-            
-            // 【Blob GC】如果丢弃的是旧版本，通知 BlobStore
-            // 这就是为什么我们要保留 WriteLocked 里的模拟逻辑直到这里被实现！
-            // 现在 Compaction 负责通知垃圾了。
-            BlobIndex blob_idx;
-            Slice val_input = input->value();
-            if (blob_idx.DecodeFrom(&val_input).ok()) {
-                 blob_store_->NotifyGarbage(blob_idx.file_id, blob_idx.size);
-            }
-        }
-        
-        current_user_key = user_key.ToString();
-        has_current_user_key = true;
+      // --- 核心丢弃规则 ---
+      bool drop = false;
+      
+      if (has_current_user_key && 
+          icmp->user_key_compare(user_key, Slice(current_user_key)) == 0) {
+          // 规则 1: 相同的 User Key，只保留第一个 (SeqNum 最大的)
+          // 既然遇到了相同的 Key，说明当前这个是旧版本，直接丢弃
+          drop = true;
+      } 
+      else {
+          // 遇到了新 Key
+          current_user_key = user_key.ToString();
+          has_current_user_key = true;
+          
+          // 解析 Tag 判断是否是删除标记
+          uint64_t tag = DecodeFixed64(key.data() + key.size() - 8);
+          ValueType type = static_cast<ValueType>(tag & 0xff);
 
-        if (!drop) {
-            // 写入新文件
-            if (builder == nullptr) {
-                status = OpenOutputFile();
-                if (!status.ok()) break;
-                current_output.smallest = key.ToString();
-            }
-            current_output.largest = key.ToString();
-            builder->Add(key, input->value());
+          if (type == kTypeDeletion) {
+              // 规则 2: 如果是 Tombstone，且 Base Level 没有该 Key，则丢弃
+              // "Base Level" 指的是 Compaction 目标层及以下
+              if (!versions_->current()->OverlapInLevel(c->level() + 2, user_key, key)) {
+                  drop = true;
+              }
+          }
+      }
 
-            // 切分文件
-            if (builder->FileSize() >= c->MaxOutputFileSize()) {
-                status = FinishOutputFile();
-                if (!status.ok()) break;
-            }
-        }
-    }
-    
-    if (status.ok()) {
-        status = input->status();
-    }
-    delete input;
-    
-    // 结束最后一个文件
-    if (status.ok() && builder != nullptr) {
-        status = FinishOutputFile();
-    }
-    
-    // 3. 提交变更 (需要锁)
-    if (status.ok()) {
-        VersionEdit edit;
-        c->AddToEdit(&edit); 
-        
-        // 【新增】获取锁，因为 LogAndApply 期望持有 mutex_
-        std::lock_guard<std::mutex> l(mutex_);
-        status = versions_->LogAndApply(&edit, &mutex_);
-    }
+      // --- Blob GC 联动 ---
+      if (drop) {
+          // 如果我们要丢弃这条记录，且它是一个有效的 BlobIndex，通知 BlobStore
+          Slice val = input->value();
+          BlobIndex blob_idx;
+          // 尝试解码，如果是 BlobIndex 则通知
+          Slice input_slice(val);
+          if (blob_idx.DecodeFrom(&input_slice).ok() && input_slice.empty()) {
+               blob_store_->NotifyGarbage(blob_idx.file_id, blob_idx.size);
+          }
+          continue; // 跳过写入
+      }
 
-    return status;
+      // --- 写入 Output ---
+      if (builder == nullptr) {
+          status = OpenOutputFile();
+          if (!status.ok()) break;
+          current_output.smallest = key.ToString();
+      }
+      current_output.largest = key.ToString();
+      builder->Add(key, input->value());
+
+      // 检查文件大小是否超限
+      if (builder->FileSize() >= c->MaxOutputFileSize()) {
+          status = FinishOutputFile();
+          if (!status.ok()) break;
+      }
+  }
+
+  if (status.ok()) {
+      status = input->status();
+  }
+  delete input;
+  input = nullptr;
+
+  // 结束最后一个文件
+  if (status.ok() && builder != nullptr) {
+      status = FinishOutputFile();
+  }
+  
+  if (builder != nullptr) delete builder; // 清理异常情况
+
+  // 3. 提交变更 (Install)
+  if (status.ok()) {
+      // 构造 VersionEdit
+      VersionEdit edit;
+      c->AddToEdit(&edit); // 记录 Delete Inputs, Add Outputs
+      
+      // 原子更新 Version
+      // 注意：DoCompactionWork 是在锁外执行的，但 LogAndApply 需要锁
+      std::lock_guard<std::mutex> l(mutex_);
+      status = versions_->LogAndApply(&edit, &mutex_);
+      
+      // 更新完 Version 后，我们需要手动清理 obsolete files (旧文件)
+      // 在工业级实现中，通常由 DeleteObsoleteFiles() 统一处理
+      // 这里简化：VersionEdit 会导致旧 Version 引用计数下降，
+      // 但物理文件删除目前只能靠下一次重启或者专门的清理线程。
+      // Day 2 暂不实现物理删除 SST，只做逻辑删除。
+  }
+
+  return status;
 }
 
 // 后台循环

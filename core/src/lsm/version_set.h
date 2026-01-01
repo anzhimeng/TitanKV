@@ -60,6 +60,8 @@ class Version {
       const Slice& begin,
       const Slice& end,
       std::vector<FileMetaData*>* inputs);
+  // 检查 level+1 层及以下是否包含 user_key
+  bool OverlapInLevel(int level, const Slice& user_key, const Slice& internal_key) const;
 
  private:
   friend class VersionSet;
