@@ -318,6 +318,50 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
 
 Status DBImpl::MakeRoomForWrite(bool force) {
     bool allow_switch = (force || mem_->ApproximateMemoryUsage() >= options_.write_buffer_size);
+        // 1. [新增] 写入停顿逻辑 (Level 0 流控)
+    // 如果 L0 文件太多，我们必须减慢写入速度。
+    // 软限制 (L0_Slow): 8 个文件 -> 减速
+    // 硬限制 (L0_Stop): 12 个文件 -> 暂停
+    {
+        // 注意：MakeRoomForWrite 通常是由 Put 调用的，此时 mutex_ 已经被持有了。
+        // 所以这里不需要再加 lock_guard。
+        
+        if (versions_->current() != nullptr) {
+            int l0_files = versions_->current()->GetFiles(0).size();
+            
+            // 硬限制：如果 L0 文件太多，停止写入，直到 Compaction 减少文件数
+            const int kL0_Stop = 12;
+            while (l0_files >= kL0_Stop && bg_running_) {
+                fprintf(stderr, "[FlowControl] L0 files %d >= %d. Waiting...\n", l0_files, kL0_Stop);
+                
+                // 【关键】必须释放锁！
+                // 否则后台 BGWork 无法获取锁来执行 Compaction，也就永远无法减少文件数（死锁）。
+                fprintf(stderr, "[FlowControl] Waiting... BG Running: %d\n", bg_running_);
+                bg_cv_.notify_all(); 
+                mutex_.unlock();
+                
+                // 睡眠 10ms 等待后台赶进度
+                // (生产环境通常使用 Condition Variable，这里简化使用 Sleep)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                
+                // 醒来后重新获取锁，检查状态
+                mutex_.lock();
+                
+                // 刷新文件计数
+                l0_files = versions_->current()->GetFiles(0).size();
+            }
+            
+            // 软限制：轻微延迟，平滑流量
+            const int kL0_Slow = 8;
+            if (l0_files >= kL0_Slow) {
+                // fprintf(stderr, "[FlowControl] L0 files %d. Sleeping 1ms.\n", l0_files);
+                bg_cv_.notify_all(); 
+                mutex_.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                mutex_.lock();
+            }
+        }
+    }
     if (!allow_switch) {
         return Status::OK();
     }
@@ -326,15 +370,19 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     if (imm_ != nullptr) {
         VersionEdit edit;
         Status s = WriteLevel0Table(imm_, &edit);
-        if (!s.ok()) return s;
+        if (!s.ok()) return s; // WriteLevel0Table 失败内部已处理 erase
         
         s = versions_->LogAndApply(&edit, &mutex_);
+        
+        // 【关键修复】现在文件已进 Version，安全了，移除保护
+        for (const auto& kv : edit.GetNewFiles()) {
+            pending_outputs_.erase(kv.second.file_number);
+        }
+        
         if (!s.ok()) return s;
-
         imm_->Unref();
         imm_ = nullptr;
     }
-
     // 2. 切换 MemTable & WAL
     imm_ = mem_;
     mem_ = new MemTable(InternalKeyComparator());
@@ -364,6 +412,10 @@ Status DBImpl::MakeRoomForWrite(bool force) {
         if (!s.ok()) return s;
         
         s = versions_->LogAndApply(&imm_edit, &mutex_);
+        for (const auto& kv : edit.GetNewFiles()) {
+            pending_outputs_.erase(kv.second.file_number);
+        }
+        
         if (!s.ok()) return s;
         
         imm_->Unref();
@@ -376,23 +428,22 @@ Status DBImpl::MakeRoomForWrite(bool force) {
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit) {
   // 1. 准备文件
   uint64_t file_number = versions_->NewFileNumber();
-  std::string fname = TableFileName(dbname_, file_number);
   
+  // 【新增】加入保护名单
+  pending_outputs_.insert(file_number);
+  
+  std::string fname = TableFileName(dbname_, file_number);
   std::unique_ptr<WritableFile> file;
   Status s = NewWritableFile(fname, &file);
-  if (!s.ok()) return s;
+  if (!s.ok()) {
+      pending_outputs_.erase(file_number);
+      return s;
+  }
 
   TableBuilder builder(options_, file.get());
 
-  // 2. 遍历 MemTable 写入 Builder
   Iterator* iter = mem->NewIterator();
   iter->SeekToFirst();
-
-  if (!iter->Valid()) {
-    delete iter;
-    builder.Abandon();
-    return Status::OK();
-  }
   
   std::string smallest, largest;
   bool first = true;
@@ -408,22 +459,23 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit) {
   }
   delete iter;
 
-  // 3. 完成构建
   s = builder.Finish();
-  if (!s.ok()) {
-      builder.Abandon(); // 【关键修复】显式放弃
-      return s;
+  if (s.ok()) {
+      s = file->Close();
   }
   
-  uint64_t file_size = builder.FileSize();
-  s = file->Close();
-  if (!s.ok()) return s;
+  // 【新增】移除保护名单
+  //pending_outputs_.erase(file_number);
 
-  if (s.ok()) {
-      // 记录新文件到 VersionEdit
+  if (s.ok() && builder.NumEntries() > 0) {
+      uint64_t file_size = builder.FileSize();
       edit->AddFile(0, file_number, file_size, Slice(smallest), Slice(largest));
-      // fprintf(stderr, "[DBImpl] Flushed SSTable #%lu. Entries: %lu, Size: %lu\n", 
-              // file_number, builder.NumEntries(), file_size);
+      fprintf(stderr, "[DBImpl] Flushed SSTable #%lu. Entries: %lu, Size: %lu\n", 
+              file_number, builder.NumEntries(), file_size);
+  } else {
+      // 失败或空文件，删除物理文件
+      pending_outputs_.erase(file_number);
+      std::filesystem::remove(fname);
   }
   return s;
 }
@@ -648,209 +700,218 @@ Status DBImpl::GarbageCollect() {
 
 // core/src/db_impl.cc
 
+// core/src/db_impl.cc
+
 Status DBImpl::DoCompactionWork(Compaction* c) {
-  // 1. 构建输入迭代器 (Week 1 产物)
-  Iterator* input = versions_->MakeInputIterator(c, table_cache_, ReadOptions());
-  input->SeekToFirst();
-  
-  Status status;
-  std::string current_user_key;
-  bool has_current_user_key = false;
-  
-  // 临时状态
-  TableBuilder* builder = nullptr;
-  std::unique_ptr<WritableFile> file;
-  uint64_t current_output_file_number = 0;
-  Compaction::OutputFile current_output;
+    fprintf(stderr, "[Compaction] START Level %d -> %d\n", c->level(), c->level()+1);
+    // 【新增调试】打印 Input 文件号
+    fprintf(stderr, "[Compaction] Doing L%d->L%d. Input0: ", c->level(), c->level()+1);
+    for (auto* f : *c->inputs(0)) fprintf(stderr, "%lu ", f->file_number);
+    fprintf(stderr, "\n");
+    // 1. 构建输入迭代器
+    Iterator* input = versions_->MakeInputIterator(c, table_cache_, ReadOptions());
+    input->SeekToFirst();
+    
+    Status status;
+    std::string current_user_key;
+    bool has_current_user_key = false;
+    
+    // 【关键调试】打印阈值
+    uint64_t limit = c->MaxOutputFileSize();
+    fprintf(stderr, "[Compaction] Start. Limit: %lu bytes. Level: %d\n", limit, c->level());
+    
+    TableBuilder* builder = nullptr;
+    std::unique_ptr<WritableFile> file;
+    uint64_t current_output_file_number = 0;
+    Compaction::OutputFile current_output;
+    
+    // 【关键】手动计数器
+    uint64_t current_file_bytes = 0;
+    // 【新增】记录本次生成的所有文件号
+    std::vector<uint64_t> produced_files;
+    auto OpenOutputFile = [&]() -> Status {
+        mutex_.lock();
+        current_output_file_number = versions_->NewFileNumber();
+        pending_outputs_.insert(current_output_file_number);
+        mutex_.unlock();
 
-  // --- Helper: 开启新文件 ---
-  auto OpenOutputFile = [&]() -> Status {
-      current_output_file_number = versions_->NewFileNumber();
-      std::string fname = TableFileName(dbname_, current_output_file_number);
-      Status s = NewWritableFile(fname, &file);
-      if (!s.ok()) return s;
-      
-      builder = new TableBuilder(GetOptions(), file.get());
-      
-      current_output.number = current_output_file_number;
-      current_output.smallest.clear();
-      current_output.largest.clear();
-      return Status::OK();
-  };
+        std::string fname = TableFileName(dbname_, current_output_file_number);
+        Status s = NewWritableFile(fname, &file);
+        if (!s.ok()) return s;
+        
+        Options builder_opts = options_; 
+        // 强制 Block 大小 4KB，避免过早 Flush
+        builder_opts.block_size = 4 * 1024;
+        
+        builder = new TableBuilder(builder_opts, file.get());
+        
+        current_output.number = current_output_file_number;
+        current_output.smallest.clear();
+        current_output.largest.clear();
+        
+        // 重置计数器
+        current_file_bytes = 0; 
+        return Status::OK();
+    };
 
-  // --- Helper: 完成当前文件 ---
-  auto FinishOutputFile = [&]() -> Status {
-      if (builder == nullptr) return Status::OK();
-      
-      Status s = builder->Finish();
-      if (s.ok()) {
-          uint64_t fsize = builder->FileSize();
-          s = file->Close();
-          if (s.ok()) {
-              current_output.file_size = fsize;
-              c->AddOutputFile(current_output);
-              fprintf(stderr, "[Compaction] Generated table #%lu@L%d, entries: %lu\n", 
-                      current_output.number, c->level() + 1, builder->NumEntries());
-          }
-      }
-      delete builder;
-      builder = nullptr;
-      file.reset();
-      return s;
-  };
+    auto FinishOutputFile = [&]() -> Status {
+        if (builder == nullptr) return Status::OK();
+        
+        Status s = builder->Finish();
+        if (s.ok()) {
+            uint64_t fsize = builder->FileSize();
+            s = file->Close();
+            if (s.ok()) {
+                current_output.file_size = fsize;
+                c->AddOutputFile(current_output);
+                // 打印生成的统计信息
+                fprintf(stderr, "[Compaction] Generated #%lu@L%d. Entries: %lu. Size: %lu. (Limit: %lu)\n", 
+                        current_output.number, c->level() + 1, builder->NumEntries(), fsize, limit);
+            }
+        }
+        delete builder;
+        builder = nullptr;
+        file.reset();
 
-  // 2. 遍历输入流
-  const InternalKeyComparator* icmp = versions_->icmp();
-  
-  for (; input->Valid(); input->Next()) {
-      Slice key = input->key();
-      Slice user_key = ExtractUserKey(key);
+        mutex_.lock();
+        pending_outputs_.erase(current_output.number); 
+        mutex_.unlock();
 
-      // --- 核心丢弃规则 ---
-      bool drop = false;
-      
-      if (has_current_user_key && 
-          icmp->user_key_compare(user_key, Slice(current_user_key)) == 0) {
-          // 规则 1: 相同的 User Key，只保留第一个 (SeqNum 最大的)
-          // 既然遇到了相同的 Key，说明当前这个是旧版本，直接丢弃
-          drop = true;
-      } 
-      else {
-          // 遇到了新 Key
-          current_user_key = user_key.ToString();
-          has_current_user_key = true;
-          
-          // 解析 Tag 判断是否是删除标记
-          uint64_t tag = DecodeFixed64(key.data() + key.size() - 8);
-          ValueType type = static_cast<ValueType>(tag & 0xff);
+        return s;
+    };
 
-          if (type == kTypeDeletion) {
-              // 规则 2: 如果是 Tombstone，且 Base Level 没有该 Key，则丢弃
-              // "Base Level" 指的是 Compaction 目标层及以下
-              if (!versions_->current()->OverlapInLevel(c->level() + 2, user_key, key)) {
-                  drop = true;
-              }
-          }
-      }
+    const InternalKeyComparator* icmp = versions_->icmp();
+    
+    for (; input->Valid(); input->Next()) {
+        Slice key = input->key();
+        Slice user_key = ExtractUserKey(key);
 
-      // --- Blob GC 联动 ---
-      if (drop) {
-          // 如果我们要丢弃这条记录，且它是一个有效的 BlobIndex，通知 BlobStore
-          Slice val = input->value();
-          BlobIndex blob_idx;
-          // 尝试解码，如果是 BlobIndex 则通知
-          Slice input_slice(val);
-          if (blob_idx.DecodeFrom(&input_slice).ok() && input_slice.empty()) {
-               blob_store_->NotifyGarbage(blob_idx.file_id, blob_idx.size);
-          }
-          continue; // 跳过写入
-      }
+        bool drop = false;
+        
+        if (has_current_user_key && 
+            icmp->user_key_compare(user_key, Slice(current_user_key)) == 0) {
+            drop = true;
+            BlobIndex blob_idx;
+            Slice val_input = input->value();
+            if (blob_idx.DecodeFrom(&val_input).ok()) {
+                 blob_store_->NotifyGarbage(blob_idx.file_id, blob_idx.size);
+            }
+        } else {
+            current_user_key = user_key.ToString();
+            has_current_user_key = true;
+            
+            uint64_t tag = DecodeFixed64(key.data() + key.size() - 8);
+            ValueType type = static_cast<ValueType>(tag & 0xff);
 
-      // --- 写入 Output ---
-      if (builder == nullptr) {
-          status = OpenOutputFile();
-          if (!status.ok()) break;
-          current_output.smallest = key.ToString();
-      }
-      current_output.largest = key.ToString();
-      builder->Add(key, input->value());
+            if (type == kTypeDeletion) {
+                if (!versions_->current()->OverlapInLevel(c->level() + 2, user_key, key)) {
+                    drop = true;
+                }
+            }
+        }
 
-      // 检查文件大小是否超限
-      if (builder->FileSize() >= c->MaxOutputFileSize()) {
-          status = FinishOutputFile();
-          if (!status.ok()) break;
-      }
-  }
+        if (!drop) {
+            if (builder == nullptr) {
+                status = OpenOutputFile();
+                if (!status.ok()) break;
+                current_output.smallest = key.ToString();
+            }
+            current_output.largest = key.ToString();
+            
+            builder->Add(key, input->value());
+            
+            // 【关键修复】累加大小
+            // 这里我们累加的是 Raw Key/Value 大小，这是最准确的估算
+            current_file_bytes += key.size() + input->value().size();
+		  // 打印：当前累计大小 vs 阈值
+            // 请务必把这行加上，这是破案的关键
+            //fprintf(stderr, "[DEBUG-CHECK] Current: %lu, Threshold: %lu\n", 
+                    //current_file_bytes, c->MaxOutputFileSize());
 
-  if (status.ok()) {
-      status = input->status();
-  }
-  delete input;
-  input = nullptr;
+            // 【关键判断】只使用手动计数器，不依赖 builder->FileSize()
+            if (current_file_bytes >= limit) {
+                // fprintf(stderr, "[Compaction] Splitting file. Bytes: %lu >= Limit: %lu\n", current_file_bytes, limit);
+                status = FinishOutputFile();
+                if (!status.ok()) break;
+            }
+        }
+    }
+    
+    if (status.ok()) status = input->status();
+    delete input;
+    
+    if (status.ok() && builder != nullptr) {
+        status = FinishOutputFile();
+    }
+    
+    if (builder != nullptr) delete builder;
 
-  // 结束最后一个文件
-  if (status.ok() && builder != nullptr) {
-      status = FinishOutputFile();
-  }
-  
-  if (builder != nullptr) delete builder; // 清理异常情况
+    if (status.ok()) {
+        VersionEdit edit;
+        c->AddToEdit(&edit); 
+        std::lock_guard<std::mutex> l(mutex_);
+        status = versions_->LogAndApply(&edit, &mutex_);
+    }
 
-  // 3. 提交变更 (Install)
-  if (status.ok()) {
-      // 构造 VersionEdit
-      VersionEdit edit;
-      c->AddToEdit(&edit); // 记录 Delete Inputs, Add Outputs
-      
-      // 原子更新 Version
-      // 注意：DoCompactionWork 是在锁外执行的，但 LogAndApply 需要锁
-      std::lock_guard<std::mutex> l(mutex_);
-      status = versions_->LogAndApply(&edit, &mutex_);
-      
-      // 更新完 Version 后，我们需要手动清理 obsolete files (旧文件)
-      // 在工业级实现中，通常由 DeleteObsoleteFiles() 统一处理
-      // 这里简化：VersionEdit 会导致旧 Version 引用计数下降，
-      // 但物理文件删除目前只能靠下一次重启或者专门的清理线程。
-      // Day 2 暂不实现物理删除 SST，只做逻辑删除。
-  }
-
-  return status;
+    // 【关键】LogAndApply 结束后（或者失败后），统一移除保护
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        for (uint64_t num : produced_files) {
+            pending_outputs_.erase(num);
+        }
+    }
+    fprintf(stderr, "[Compaction] END Status: %s\n", status.ToString().c_str());
+    return status;
 }
 
 // 后台循环
 void DBImpl::BGWork() {
     while (true) {
-        // 使用 unique_lock，以便手动 unlock
+        bool did_compaction = false;
+        
         std::unique_lock<std::mutex> lock(mutex_);
         
         if (!bg_running_) break;
 
-        // 1. 检查 Flush (简化)
+        // 1. Flush Check (简略)
         if (imm_ != nullptr) {
-            // ... (Flush logic) ...
-            MakeRoomForWrite(false); // 假设这里处理
+             // MakeRoomForWrite(false); 
         }
 
-        // 2. 尝试 Compaction
+        // 2. Compaction Check
         versions_->current()->Finalize();
         Compaction* c = versions_->PickCompaction();
 
         if (c != nullptr) {
             Status s;
             
-            // 【关键分支】
             if (c->IsTrivialMove()) {
-                // --- Trivial Move (持有锁执行) ---
-                // 不需要 IO，直接更新 Version
+                // --- Trivial Move ---
                 std::shared_ptr<VersionEdit> edit = std::make_shared<VersionEdit>();
                 FileMetaData* f = c->inputs(0)->at(0);
                 
-                // 1. 删除旧层文件
                 edit->DeleteFile(c->level(), f->file_number);
-                // 2. 添加到新层 (直接复用元数据)
                 edit->AddFile(c->level() + 1, f->file_number, f->file_size, 
                               Slice(f->smallest), Slice(f->largest));
                 
-                // 应用变更
+                // 保存变量用于打印
+                uint64_t fnum = f->file_number;
+                int lvl = c->level();
+
                 s = versions_->LogAndApply(edit.get(), &mutex_);
                 
+                // 【修复】在日志中使用 fnum 和 lvl
                 fprintf(stderr, "[Compaction] Trivial Move: File #%lu L%d -> L%d. Status: %s\n",
-                        f->file_number, c->level(), c->level()+1, s.ToString().c_str());
-                
-                // Trivial Move 很快，锁一直持有没问题
+                        fnum, lvl, lvl+1, s.ToString().c_str());
                 
             } else {
-                // --- Normal Compaction (释放锁执行) ---
+                // --- Normal Compaction ---
                 fprintf(stderr, "[Compaction] Picked Level %d -> %d. Input0: %d, Input1: %d\n",
                         c->level(), c->level()+1, 
                         c->num_input_files(0), c->num_input_files(1));
                 
-                // 【关键】释放锁，允许前台 Put/Get 继续运行
                 lock.unlock();
-                
-                // 执行耗时操作
                 s = DoCompactionWork(c);
-                
-                // 重新获取锁 (为了下一次循环检测或 wait)
                 lock.lock();
                 
                 if (!s.ok()) {
@@ -861,24 +922,84 @@ void DBImpl::BGWork() {
             }
             
             delete c;
-            // 做了任务，这轮不睡，直接 continue 检查还有没有
+            
+            // 释放锁进行清理
+            lock.unlock();
+            DeleteObsoleteFiles();
+            lock.lock();
+
+            did_compaction = true;
+            
+            // 有任务就不睡了，继续下一轮
             continue;
             
         } else {
-            // 没有 Compaction 任务，释放锁去做 GC
+            // --- Idle ---
             lock.unlock();
-            
             GarbageCollect();
-            
-            // 重新加锁准备睡眠
             lock.lock();
-            // 再次检查退出标志
+            
             if (!bg_running_) break;
             
-            // 睡眠等待 (释放锁)
+            // 【修复】使用 did_compaction 决定睡眠时间
+            // 如果刚才忙（did_compaction=true），可能只是暂时没任务，短睡
+            // 如果本来就闲，长睡
+            // 但因为上面的 continue，走到这里肯定是 did_compaction=false
+            
             bg_cv_.wait_for(lock, std::chrono::seconds(5));
         }
     }
 }
+void DBImpl::DeleteObsoleteFiles() {
+    if (!bg_running_) return;
 
+    std::set<uint64_t> live;
+    {
+        std::lock_guard<std::mutex> l(mutex_);
+        versions_->AddLiveFiles(&live);
+        
+        // 【关键修复】将 pending_outputs 也视为 live
+        for (auto num : pending_outputs_) {
+            live.insert(num);
+        }
+    }
+
+    
+
+    std::vector<std::string> filenames;
+    for (const auto& entry : std::filesystem::directory_iterator(dbname_)) {
+        filenames.push_back(entry.path().filename().string());
+    }
+
+        fprintf(stderr, "[Cleaner] Live set size: %lu. Files on disk: %lu\n", 
+            live.size(), filenames.size());
+
+
+    // 避免在删除文件时持有 mutex_
+    // (注意：这里没有 mutex_.unlock()，因为我们假设调用此函数前已经释放了锁)
+    // 根据 BGWork 的逻辑，调用 DeleteObsoleteFiles 时并未持有锁。
+    int deleted_count = 0;
+    for (const auto& fname : filenames) {
+        uint64_t number;
+        bool keep = true;
+
+        if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".sst") {
+            try {
+                number = std::stoull(fname.substr(0, fname.length() - 4));
+                if (live.find(number) == live.end()) {
+                    keep = false;
+                }
+            } catch (...) { keep = true; }
+        } else {
+            keep = true;
+        }
+
+        if (!keep) {
+            // 执行删除
+            table_cache_->Evict(number);
+            std::filesystem::remove(dbname_ + "/" + fname);
+            deleted_count++;
+        }
+    }
+}
 } // namespace titankv

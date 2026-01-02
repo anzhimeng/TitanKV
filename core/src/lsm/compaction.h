@@ -1,19 +1,26 @@
 #pragma once
 #include "lsm/version_set.h"
 #include "lsm/version_edit.h"
+#include "titankv/options.h"
 #include <vector>
 
 namespace titankv {
 
 class Compaction {
  public:
-  Compaction(const Options* options, int level)
-      : level_(level), 
-      max_output_file_size_(options->max_file_size) {
-
+  // [修改] 构造函数接收 Version* 参数
+  Compaction(const Options* options, int level, Version* input_version)
+      : level_(level),
+        max_output_file_size_(options->max_file_size),
+        input_version_(input_version) {
+      if (input_version_) {
+          input_version_->Ref(); // [关键] 增加引用计数，防止 Version 被删除
+      }
   }
   ~Compaction() {
-       // inputs 里的 FileMetaData* 是 Version 管理的，这里不需要 delete
+      if (input_version_) {
+          input_version_->Unref(); // [关键] 释放引用计数
+      }
   }
 
   // 【关键修复】定义 OutputFile 结构体
@@ -69,6 +76,8 @@ class Compaction {
   std::vector<FileMetaData*> inputs_[2];
   // 【关键修复】存储输出文件列表
   std::vector<OutputFile> outputs_;
+  // [新增] 保持源 Version 存活
+  Version* input_version_;
 };
 
 } // namespace titankv

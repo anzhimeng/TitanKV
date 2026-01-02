@@ -9,7 +9,6 @@
 #include "titankv/status.h"
 #include "titankv/options.h"
 #include "lsm/dbformat.h" 
-#include "lsm/compaction.h"
 #include "lsm/version_edit.h"
 #include "lsm/two_level_iterator.h"
 #include "util/env.h"   
@@ -19,6 +18,7 @@ namespace titankv {
 
 class TableCache;
 class VersionSet;
+class Compaction;
 
 class Version {
  public:
@@ -89,6 +89,7 @@ public:
     Iterator* MakeInputIterator(Compaction* c, TableCache* table_cache, const ReadOptions& options);
 
     Compaction* PickCompaction();
+    void AddLiveFiles(std::set<uint64_t>* live);
 
 private:
     std::string dbname_;

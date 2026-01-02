@@ -59,6 +59,14 @@ class DBImpl : public DB {
   VersionSet* versions_; 
 
   std::unique_ptr<IoUringExecutor> uring_executor_; // 新增成员
+  // 【新增】受保护的文件集合 (正在 Flush 或 Compaction 生成的文件)
+
+  // 【Day 3 新增】清理不再使用的文件
+  void DeleteObsoleteFiles();
+
+  // 【Day 3 新增】保护正在生成的文件不被误删
+  // 必须在持有 mutex_ 时访问
+  std::set<uint64_t> pending_outputs_; 
 
   // 后台任务控制
   std::thread bg_thread_;

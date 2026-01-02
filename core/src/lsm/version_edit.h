@@ -32,6 +32,15 @@ class VersionEdit {
   void DeleteFile(int level, uint64_t file) {
     deleted_files_.insert(std::make_pair(level, file));
   }
+  // 【新增】检查文件是否被标记删除
+  bool IsDeleted(int level, uint64_t file_number) const {
+      return deleted_files_.count(std::make_pair(level, file_number)) > 0;
+  }
+
+  // 【新增】暴露新文件列表供 DBImpl 清理 pending_outputs_
+  const std::vector<std::pair<int, FileMetaData>>& GetNewFiles() const {
+      return new_files_;
+  }
 
   void EncodeTo(std::string* dst) const;
   Status DecodeFrom(const Slice& src);

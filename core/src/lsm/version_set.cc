@@ -1,6 +1,7 @@
 #include "lsm/version_set.h"
 #include "lsm/version_edit.h"
 #include "lsm/table_cache.h"
+#include "lsm/compaction.h"
 #include "lsm/merging_iterator.h"
 #include "util/filename.h"
 #include "util/coding.h"
@@ -269,7 +270,7 @@ void VersionSet::AppendVersion(Version* v) {
 }
 
 Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
-  (void)mu; // 消除 unused parameter 警告
+  (void)mu;
 
   if (edit->has_log_number_) {
       log_number_ = edit->log_number_;
@@ -280,54 +281,61 @@ Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
       next_file_number_ = edit->next_file_number_;
   }
 
-  // 1. 创建新 Version
   Version* v = new Version(this);
   
-  // 2. 复制旧 Version 的文件 (所有 Level)
-  // 【关键修复】现在需要遍历所有 Level
+  // 1. 复制旧 Version 的文件 (应用删除逻辑)
   for (int level = 0; level < kNumLevels; level++) {
       const auto& files = current_->GetFiles(level);
       for (size_t i = 0; i < files.size(); i++) {
           FileMetaData* f = files[i];
-          // 增加引用计数或深拷贝？这里做深拷贝简化管理
+          
+          // 【关键修复】如果文件被标记删除了，就跳过，不要加到新版本里！
+          if (edit->IsDeleted(level, f->file_number)) {
+              continue; 
+          }
+
+          // 保留未删除的文件
           FileMetaData* new_f = new FileMetaData(*f);
           v->files_[level].push_back(new_f);
       }
   }
   
-  // 3. 应用变更 (AddFile)
-  // 【关键修复】VersionEdit 中的新文件带有 Level 信息，要加到对应 Level
+  // 2. 应用新文件 (AddFile)
   for (const auto& kv : edit->new_files_) {
-      int level = kv.first; // 获取 Level
+      int level = kv.first;
       const FileMetaData& meta = kv.second;
       
       FileMetaData* new_f = new FileMetaData(meta);
-      // 添加到对应层级
       v->files_[level].push_back(new_f);
   }
 
-  // TODO: 这里应该对 L1+ 的文件进行排序 (Sort by smallest key)
-  // 也就是 v->files_[level] 需要 sort。Day 3 暂时忽略，假设 AddFile 是有序的或者只做 L0。
-  // 【新增】更新 compact_pointer_
-  // 逻辑：本次 Compaction 涉及的最大的 Key，就是下一次的起点
+  // 3. 更新 compact_pointer_
   for (size_t i = 0; i < edit->new_files_.size(); i++) {
       int level = edit->new_files_[i].first;
       const FileMetaData& f = edit->new_files_[i].second;
-        
-      // 简单策略：取新生成文件的 Largest Key
-      // 实际上应该取 Input 文件的 Largest Key，但这里简化处理
       compact_pointer_[level] = f.largest;
   }
 
-  // 4. 更新 Current
-  v->Finalize(); // 【新增】计算分数
+  // 4. 计算分数并生效
+  v->Finalize();
   AppendVersion(v);
+  
   return Status::OK();
 }
 
 Status VersionSet::Recover(bool* save_manifest) {
     (void)save_manifest;
     return Status::OK();
+}
+
+void VersionSet::AddLiveFiles(std::set<uint64_t>* live) {
+    // 遍历当前 Version 的所有层级
+    for (int level = 0; level < kNumLevels; level++) {
+        const std::vector<FileMetaData*>& files = current_->GetFiles(level);
+        for (const auto* f : files) {
+            live->insert(f->file_number);
+        }
+    }
 }
 
 Iterator* VersionSet::MakeInputIterator(Compaction* c, TableCache* table_cache, const ReadOptions& options) {
@@ -364,90 +372,56 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c, TableCache* table_cache, 
     return NewMergingIterator(&icmp_, &list[0], list.size());
 }
 
+// core/src/lsm/version_set.cc
+
+// core/src/lsm/version_set.cc
+
 Compaction* VersionSet::PickCompaction() {
     Version* current = current_;
     const bool size_compaction = (current->compaction_score() >= 1);
     
-    if (!size_compaction) {
-        return nullptr;
-    }
+    if (!size_compaction) return nullptr;
 
     int level = current->compaction_level();
-    const std::vector<FileMetaData*>& files = current->GetFiles(level);
-
-    // 1. 寻找第一个 largest > compact_pointer_[level] 的文件
-    // 也就是接续上一次的工作
-    FileMetaData* f = nullptr;
-    for (size_t i = 0; i < files.size(); i++) {
-        if (compact_pointer_[level].empty() || 
-            icmp_.Compare(files[i]->largest, Slice(compact_pointer_[level])) > 0) {
-            f = files[i];
-            break;
-        }
-    }
-
-    // 如果所有文件都比 pointer 小（说明扫完了一圈），这就回绕到第一个文件
-    if (f == nullptr && !files.empty()) {
-        f = files[0];
-    }
     
-    if (f == nullptr) return nullptr;
+    // [修改] 将 'current' 传入构造函数
+    Compaction* c = new Compaction(&options_, level, current);
 
-    
-    Compaction* c = new Compaction(&options_, level);
-
-    // 1. 挑选 Input[0]
+    // 1. 初始选择
     if (current->GetFiles(level).empty()) {
         delete c;
         return nullptr;
     }
+    FileMetaData* f = current->GetFiles(level)[0];
     c->inputs(0)->push_back(f);
 
-    // L0 特殊处理：扩展重叠
+    // 2. L0 激进合并策略
     if (level == 0) {
-        Slice min = f->smallest;
-        Slice max = f->largest;
-        
-        // 【修复 1】如果种子文件的 Key 无效，不进行扩展，仅 Compact 它自己
-        if (min.size() >= 8 && max.size() >= 8) {
-            std::vector<FileMetaData*> l0_inputs;
-            current->GetOverlappingInputs(0, min, max, &l0_inputs);
-            *(c->inputs(0)) = l0_inputs;
+        c->inputs(0)->clear(); 
+        const auto& l0_files = current->GetFiles(0);
+        for (auto* f : l0_files) {
+            c->inputs(0)->push_back(f);
         }
+        fprintf(stderr, "[Pick] Aggressive L0: picked %lu files\n", c->inputs(0)->size());
     }
 
-    // 2. 挑选 Input[1] (Level + 1)
-    // 计算 Input[0] 的整体范围
-    if (c->inputs(0)->empty()) { // 防御性检查
+    // 3. 挑选 Input[1]
+    if (c->inputs(0)->empty()) {
         delete c;
         return nullptr;
     }
 
-    FileMetaData* f0 = (*c->inputs(0))[0];
-    Slice smallest = f0->smallest;
-    Slice largest = f0->largest;
-
-    // 【修复 2】如果初始范围无效，直接返回（只做 Input[0] 的整理，不合并到下一层）
-    // 这可以防止 Crash，并允许系统逐渐通过 Compaction 修正元数据（如果有读取逻辑补全的话）
-    if (smallest.size() < 8 || largest.size() < 8) {
-        // 这里的 return c 意味着只 Compact inputs[0]，不拉取 inputs[1]
-        // 这在 L0->L0 的 Trivial Move 或者 Self-Compaction 是合法的
-        return c; 
-    }
+    Slice smallest = (*c->inputs(0))[0]->smallest;
+    Slice largest = (*c->inputs(0))[0]->largest;
+    const InternalKeyComparator* icmp = &icmp_;
 
     for (size_t i = 1; i < c->inputs(0)->size(); ++i) {
         FileMetaData* f = (*c->inputs(0))[i];
-        
-        // 【修复 3】只比较合法的 Key
-        if (f->smallest.size() >= 8 && f->largest.size() >= 8) {
-            if (icmp_.Compare(f->smallest, smallest) < 0) smallest = f->smallest;
-            if (icmp_.Compare(f->largest, largest) > 0) largest = f->largest;
-        }
+        if (f->smallest.size() >= 8 && smallest.size() >= 8 && icmp->Compare(f->smallest, smallest) < 0) smallest = f->smallest;
+        if (f->largest.size() >= 8 && largest.size() >= 8 && icmp->Compare(f->largest, largest) > 0) largest = f->largest;
     }
 
-    // 去 Next Level 找重叠
     current->GetOverlappingInputs(level + 1, smallest, largest, c->inputs(1));
-
     return c;
 }
 
