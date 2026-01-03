@@ -136,4 +136,30 @@ Status NewRandomAccessFile(const std::string& fname,
     return Status::OK();
 }
 
+Status WriteStringToFile(const std::string& fname, const Slice& data) {
+    // 使用 C 标准 IO，方便处理 buffered write 和 sync
+    FILE* file = std::fopen(fname.c_str(), "w");
+    if (file == nullptr) {
+        return Status::IOError("Failed to open file for writing", fname);
+    }
+
+    size_t written = std::fwrite(data.data(), 1, data.size(), file);
+    if (written != data.size()) {
+        std::fclose(file);
+        return Status::IOError("Failed to write to file", fname);
+    }
+
+    // 强制刷盘，保证原子更新 CURRENT 文件的安全性
+    if (std::fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        std::fclose(file);
+        return Status::IOError("Failed to sync file", fname);
+    }
+
+    if (std::fclose(file) != 0) {
+        return Status::IOError("Failed to close file", fname);
+    }
+
+    return Status::OK();
+}
+
 }

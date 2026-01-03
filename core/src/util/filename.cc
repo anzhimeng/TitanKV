@@ -27,4 +27,8 @@ std::string CurrentFileName(const std::string& dbname) {
   return dbname + "/CURRENT";
 }
 
+std::string TempFileName(const std::string& dbname, uint64_t number) {
+  return MakeFileName(dbname, number, "dbtmp");
+}
+
 } // namespace titankv

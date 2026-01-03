@@ -90,6 +90,14 @@ public:
 
     Compaction* PickCompaction();
     void AddLiveFiles(std::set<uint64_t>* live);
+    // 【新增】确保下一次分配的文件号大于 number
+    void MarkFileNumberUsed(uint64_t number) {
+      if (next_file_number_ <= number) {
+        next_file_number_ = number + 1;
+      }
+    }
+
+    uint64_t LastSequence() { return last_sequence_;}
 
 private:
     std::string dbname_;
@@ -107,6 +115,8 @@ private:
 
     // 记录每一层上一次合并结束的 Key (Largest Key)
     std::string compact_pointer_[kNumLevels];  
+    // 【新增】持久化的 Sequence
+    uint64_t last_sequence_ = 0;
 
     class Builder;
     void AppendVersion(Version* v);

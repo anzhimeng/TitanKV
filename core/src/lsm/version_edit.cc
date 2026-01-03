@@ -8,6 +8,10 @@ void VersionEdit::Clear() {
   log_number_ = 0;
   has_next_file_number_ = false;
   next_file_number_ = 0;
+  // 【新增】清空
+  has_last_sequence_ = false;
+  last_sequence_ = 0;
+  
   deleted_files_.clear();
   new_files_.clear();
 }
@@ -30,6 +34,11 @@ void VersionEdit::EncodeTo(std::string* dst) const {
   if (has_next_file_number_) {
     PutVarint32(dst, kNextFileNumber);
     PutVarint64(dst, next_file_number_);
+  }
+  // 【新增】编码
+  if (has_last_sequence_) {
+    PutVarint32(dst, kLastSequence);
+    PutVarint64(dst, last_sequence_);
   }
   for (const auto& del : deleted_files_) {
     PutVarint32(dst, kDeletedFile);
@@ -78,6 +87,14 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           msg = "next file number";
         }
         break;
+      // 【新增】解码
+      case kLastSequence:
+        if (GetVarint64(&input, &last_sequence_)) {
+          has_last_sequence_ = true;
+        } else {
+          msg = "last sequence number";
+        }
+        break;
       // 【新增】反序列化删除记录
       case kDeletedFile: {
           uint32_t level;
@@ -101,11 +118,15 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
             GetLengthPrefixedSlice(&input, &smallest) && // 需实现
             GetLengthPrefixedSlice(&input, &largest)) {
             
-            f.file_number = number;
-            f.file_size = file_size;
-            f.smallest = smallest.ToString();
-            f.largest = largest.ToString();
-            new_files_.push_back(std::make_pair(level, f));
+            if (level >= kNumLevels) {
+                msg = "new-file level >= kNumLevels";
+            } else {
+                f.file_number = number;
+                f.file_size = file_size;
+                f.smallest = smallest.ToString();
+                f.largest = largest.ToString();
+                new_files_.push_back(std::make_pair(level, f));
+            }
         } else {
             msg = "new-file entry";
         }

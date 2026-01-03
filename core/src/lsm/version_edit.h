@@ -24,6 +24,11 @@ class VersionEdit {
     has_next_file_number_ = true;
     next_file_number_ = num;
   }
+  // 【新增】设置 LastSequence
+  void SetLastSequence(uint64_t seq) {
+    has_last_sequence_ = true;
+    last_sequence_ = seq;
+  }
 
   // 添加新文件 (Level, FileNum, FileSize, Smallest, Largest)
   void AddFile(int level, uint64_t file, uint64_t file_size,
@@ -63,6 +68,10 @@ class VersionEdit {
 
   bool has_next_file_number_;
   uint64_t next_file_number_;
+
+  // 【新增】LastSequence 成员
+  bool has_last_sequence_;
+  uint64_t last_sequence_;
   // 【新增】记录被删除的文件 <level, file_number>
   std::set<std::pair<int, uint64_t>> deleted_files_;
   // <level, file_meta>

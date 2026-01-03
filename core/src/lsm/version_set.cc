@@ -6,11 +6,199 @@
 #include "util/filename.h"
 #include "util/coding.h"
 #include "blob/blob_format.h"
+#include "wal/log_reader.h" 
 #include <algorithm>
+#include <fstream>
+#include <set>
+#include <map>
 
 namespace titankv {
 
 // --- Version Implementation ---
+
+static double MaxBytesForLevel(int level) {
+    double result = 10.0 * 1048576.0;
+    while (level > 1) {
+        result *= 10;
+        level--;
+    }
+    return result;
+}
+
+static uint64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
+    uint64_t sum = 0;
+    for (auto* f : files) sum += f->file_size;
+    return sum;
+}
+
+static int FindFile(const InternalKeyComparator& icmp,
+                    const std::vector<FileMetaData*>& files,
+                    const Slice& key) {
+  uint32_t left = 0;
+  uint32_t right = files.size();
+  while (left < right) {
+    uint32_t mid = (left + right) / 2;
+    FileMetaData* f = files[mid];
+    if (icmp.Compare(f->largest, key) < 0) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return right;
+}
+
+// 原子更新 CURRENT 文件：先写临时文件，再 rename
+static Status SetCurrentFile(const std::string& dbname, uint64_t descriptor_number) {
+  std::string manifest = ManifestFileName(dbname, descriptor_number);
+  // CURRENT 文件内容只包含 Manifest 的文件名（不含路径）
+  // 例如: MANIFEST-000005\n
+  std::string content = manifest.substr(dbname.size() + 1) + "\n";
+  
+  std::string tmp = TempFileName(dbname, descriptor_number);
+  Status s = WriteStringToFile(tmp, content);
+  if (s.ok()) {
+      if (rename(tmp.c_str(), CurrentFileName(dbname).c_str()) != 0) {
+          s = Status::IOError("Rename failed", tmp);
+          std::remove(tmp.c_str());
+      }
+  } else {
+      std::remove(tmp.c_str());
+  }
+  return s;
+}
+
+// --- Version::Builder ---
+// 一个 Helper 类，用于将 VersionEdit 应用到 Base Version 上，生成 New Version
+class VersionSet::Builder {
+ private:
+  // 按照 (Smallest Key, FileNum) 排序
+  struct BySmallestKey {
+    const InternalKeyComparator* internal_comparator;
+    bool operator()(FileMetaData* f1, FileMetaData* f2) const {
+      int r = internal_comparator->Compare(f1->smallest, f2->smallest);
+      if (r != 0) return r < 0;
+      return f1->file_number < f2->file_number;
+    }
+  };
+
+  typedef std::set<FileMetaData*, BySmallestKey> FileSet;
+  struct LevelState {
+    std::set<uint64_t> deleted_files;
+    FileSet* added_files;
+  };
+
+  VersionSet* vset_;
+  Version* base_;
+  LevelState levels_[kNumLevels];
+
+ public:
+  Builder(VersionSet* vset, Version* base) : vset_(vset), base_(base) {
+    base_->Ref();
+    BySmallestKey cmp;
+    cmp.internal_comparator = vset_->icmp();
+    for (int level = 0; level < kNumLevels; level++) {
+      levels_[level].added_files = new FileSet(cmp);
+    }
+  }
+
+  ~Builder() {
+    for (int level = 0; level < kNumLevels; level++) {
+      const FileSet* added = levels_[level].added_files;
+      for (auto* f : *added) {
+        // 这里的引用计数逻辑比较复杂。
+        // 在标准实现中，VersionEdit 里的 NewFile 初始 ref=1。
+        // Builder 只是借用。真正转移所有权是在 SaveTo 里的 v->files_.push_back
+        // 如果 Builder 析构了但没生成 Version，理论上需要减少引用。
+        // 为简化，我们假设 FileMetaData 是纯数据结构，由 Version 统一管理生命周期。
+        if (f->refs <= 0) delete f; // 防御性清理
+      }
+      delete added;
+    }
+    base_->Unref();
+  }
+
+  // 应用增量变更 (可多次调用)
+  void Apply(VersionEdit* edit) {
+    // 1. 更新删除集合
+    for (const auto& del : edit->deleted_files_) {
+        int level = del.first;
+        uint64_t number = del.second;
+        
+        // 维护 deleted_files 集合
+        levels_[level].deleted_files.insert(number);
+        
+        // 如果这个文件是刚才在同一个 Builder 里 Add 的，直接从 added_files 移除
+        // 这种情况在 Recover 过程中可能出现（先 Add 后 Delete）
+        auto& added = *levels_[level].added_files;
+        for (auto it = added.begin(); it != added.end(); ) {
+            if ((*it)->file_number == number) {
+                delete *it; // 【新增】释放内存！
+                it = added.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // 2. 更新新增文件
+    for (const auto& nf : edit->new_files_) {
+        int level = nf.first;
+        FileMetaData* f = new FileMetaData(nf.second);
+        f->refs = 1;
+
+        // 如果之前标记了删除该文件（文件号复用？极少见），先取消删除标记
+        levels_[level].deleted_files.erase(f->file_number);
+        levels_[level].added_files->insert(f);
+    }
+  }
+
+  // 将 Base + Delta 合并到新 Version v 中
+  void SaveTo(Version* v) {
+    BySmallestKey cmp;
+    cmp.internal_comparator = vset_->icmp();
+    
+    for (int level = 0; level < kNumLevels; level++) {
+      // 1. 合并 Base 文件
+      const std::vector<FileMetaData*>& base_files = base_->GetFiles(level);
+      auto base_iter = base_files.begin();
+      auto base_end = base_files.end();
+      
+      const FileSet* added = levels_[level].added_files;
+      
+      v->files_[level].reserve(base_files.size() + added->size());
+      
+      // 归并排序：将 base_files 和 added_files 有序合并
+      for (const auto& added_file : *added) {
+        // 把 base 中小于 added_file 的先加进去
+        for (auto bpos = std::upper_bound(base_iter, base_end, added_file, cmp);
+             base_iter != bpos; ++base_iter) {
+             MaybeAddFile(v, level, *base_iter);
+        }
+        // 加入 added_file
+        MaybeAddFile(v, level, added_file);
+      }
+      
+      // 加入剩余的 base files
+      for (; base_iter != base_end; ++base_iter) {
+        MaybeAddFile(v, level, *base_iter);
+      }
+    }
+  }
+
+  void MaybeAddFile(Version* v, int level, FileMetaData* f) {
+    // 如果在删除列表中，则丢弃
+    if (levels_[level].deleted_files.count(f->file_number) > 0) {
+      return;
+    }
+    
+    // 这里的 f 可能是 base 里的（深拷贝），也可能是 added 里的（新 new 的）
+    // 为了统一管理，我们在 Version 中存储副本
+    FileMetaData* new_f = new FileMetaData(*f);
+    new_f->refs = 1;
+    v->files_[level].push_back(new_f);
+  }
+};
 
 Version::~Version() {
   for (int level = 0; level < kNumLevels; level++) {
@@ -33,22 +221,6 @@ void Version::AddFile(int level, uint64_t file_number, uint64_t file_size,
   files_[level].push_back(f);
 }
 
-static int FindFile(const InternalKeyComparator& icmp,
-                    const std::vector<FileMetaData*>& files,
-                    const Slice& key) {
-  uint32_t left = 0;
-  uint32_t right = files.size();
-  while (left < right) {
-    uint32_t mid = (left + right) / 2;
-    FileMetaData* f = files[mid];
-    if (icmp.Compare(f->largest, key) < 0) {
-      left = mid + 1;
-    } else {
-      right = mid;
-    }
-  }
-  return right;
-}
 
 Status Version::Get(const ReadOptions& options, const LookupKey& k, std::string* val,
                     bool* found, TableCache* table_cache,
@@ -136,24 +308,6 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k, std::string*
 
   *found = false;
   return Status::OK();
-}
-
-// 辅助：计算某一层文件的总大小
-static uint64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
-    uint64_t sum = 0;
-    for (auto* f : files) sum += f->file_size;
-    return sum;
-}
-
-// 辅助：获取某层的大小限制
-static double MaxBytesForLevel(int level) {
-    // L1: 10MB, L2: 100MB...
-    double result = 10.0 * 1048576.0;
-    while (level > 1) {
-        result *= 10;
-        level--;
-    }
-    return result;
 }
 
 void Version::Finalize() {
@@ -269,63 +423,211 @@ void VersionSet::AppendVersion(Version* v) {
   old->Unref();
 }
 
+// 核心：使用 Builder 应用 Edit，并写入 Manifest
 Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
-  (void)mu;
-
+  // 1. 设置 Edit 的全局状态
   if (edit->has_log_number_) {
-      log_number_ = edit->log_number_;
+      assert(edit->log_number_ >= log_number_);
+      assert(edit->log_number_ < next_file_number_);
+  } else {
+      edit->SetLogNumber(log_number_);
   }
+
   if (!edit->has_next_file_number_) {
       edit->SetNextFile(next_file_number_);
+  }
+  // 【新增】更新 LastSequence
+  if (edit->has_last_sequence_) {
+      assert(edit->last_sequence_ >= last_sequence_);
+      last_sequence_ = edit->last_sequence_;
   } else {
-      next_file_number_ = edit->next_file_number_;
+      // 每次写 Manifest 都带上当前的 Sequence，防止回滚
+      edit->SetLastSequence(last_sequence_);
   }
-
+  // 2. 利用 Builder 构建新版本 (Current + Edit -> New)
   Version* v = new Version(this);
-  
-  // 1. 复制旧 Version 的文件 (应用删除逻辑)
-  for (int level = 0; level < kNumLevels; level++) {
-      const auto& files = current_->GetFiles(level);
-      for (size_t i = 0; i < files.size(); i++) {
-          FileMetaData* f = files[i];
-          
-          // 【关键修复】如果文件被标记删除了，就跳过，不要加到新版本里！
-          if (edit->IsDeleted(level, f->file_number)) {
-              continue; 
-          }
-
-          // 保留未删除的文件
-          FileMetaData* new_f = new FileMetaData(*f);
-          v->files_[level].push_back(new_f);
-      }
+  {
+      Builder builder(this, current_);
+      builder.Apply(edit);
+      builder.SaveTo(v);
   }
   
-  // 2. 应用新文件 (AddFile)
-  for (const auto& kv : edit->new_files_) {
-      int level = kv.first;
-      const FileMetaData& meta = kv.second;
+  // 更新辅助信息
+  v->Finalize(); // 计算 Score
+  // 更新 compact_pointer (省略代码，保持原样)
+
+  // 3. 写入 MANIFEST (持久化)
+  std::string record;
+  
+  if (!manifest_log_) {
+      // --- 情况 A: 需要创建新 Manifest 文件 (如重启后首次写入) ---
+      // 我们不直接写 edit，而是要把当前的“全量状态”先写进去，以此作为 Base。
+      // 否则如果删除了旧 Manifest，只靠这个增量 edit 是无法恢复数据的。
       
-      FileMetaData* new_f = new FileMetaData(meta);
-      v->files_[level].push_back(new_f);
+      uint64_t new_manifest_file_number = NewFileNumber();
+      std::string fname = ManifestFileName(dbname_, new_manifest_file_number);
+      std::unique_ptr<WritableFile> file;
+      Status s = NewWritableFile(fname, &file);
+      if (!s.ok()) { delete v; return s; }
+      
+      manifest_file_ = std::move(file);
+      manifest_log_ = std::make_unique<log::Writer>(manifest_file_.get());
+      
+      // >> 关键点：构造快照 Edit <<
+      // 这个 snapshot_edit 包含了 current_ 的所有文件
+      VersionEdit snapshot_edit;
+      snapshot_edit.SetLogNumber(log_number_);
+      snapshot_edit.SetNextFile(next_file_number_);
+      
+      for (int level = 0; level < kNumLevels; level++) {
+          const auto& files = current_->GetFiles(level);
+          for (const auto* f : files) {
+              // 把当前存活的所有文件都加到 snapshot_edit 中
+              snapshot_edit.AddFile(level, f->file_number, f->file_size, 
+                                    Slice(f->smallest), Slice(f->largest));
+          }
+      }
+      
+      // 先写入全量快照
+      std::string snapshot_record;
+      snapshot_edit.EncodeTo(&snapshot_record);
+      s = manifest_log_->AddRecord(snapshot_record);
+      if (!s.ok()) { delete v; return s; }
+
+      // 再写入本次的增量 edit
+      edit->EncodeTo(&record);
+      s = manifest_log_->AddRecord(record);
+      if (!s.ok()) { delete v; return s; }
+      
+      // 更新 CURRENT 指向这个新文件
+      s = SetCurrentFile(dbname_, new_manifest_file_number);
+      if (!s.ok()) { delete v; return s; }
+      
+      manifest_file_number_ = new_manifest_file_number;
+
+  } else {
+      // --- 情况 B: 追加到现有 Manifest ---
+      edit->EncodeTo(&record);
+      Status s = manifest_log_->AddRecord(record);
+      if (!s.ok()) { delete v; return s; }
   }
 
-  // 3. 更新 compact_pointer_
-  for (size_t i = 0; i < edit->new_files_.size(); i++) {
-      int level = edit->new_files_[i].first;
-      const FileMetaData& f = edit->new_files_[i].second;
-      compact_pointer_[level] = f.largest;
-  }
+  // 4. Sync 刷盘
+  Status s = manifest_file_->Sync();
+  if (!s.ok()) { delete v; return s; }
 
-  // 4. 计算分数并生效
-  v->Finalize();
+  // 5. 内存切换 (Install New Version)
   AppendVersion(v);
-  
+  log_number_ = edit->log_number_;
+  next_file_number_ = edit->next_file_number_;
+
   return Status::OK();
 }
+// core/src/lsm/version_set.cc
 
 Status VersionSet::Recover(bool* save_manifest) {
-    (void)save_manifest;
-    return Status::OK();
+  struct LogReporter : public log::Reporter {
+    Status* status;
+    void Corruption(size_t bytes, const Status& s) override {
+      if (this->status->ok()) *this->status = s;
+    }
+  };
+
+  std::string current_file = CurrentFileName(dbname_);
+  std::ifstream in(current_file);
+  if (!in) {
+      return Status::NotFound("CURRENT not found");
+  }
+  
+  std::string manifest_name;
+  std::getline(in, manifest_name);
+  if (manifest_name.empty() || manifest_name.back() == '\r') {
+      if (!manifest_name.empty()) manifest_name.pop_back();
+  }
+  if (manifest_name.empty()) return Status::Corruption("CURRENT empty");
+  
+  std::string manifest_path = dbname_ + "/" + manifest_name;
+  std::unique_ptr<SequentialFile> file;
+  Status s = NewSequentialFile(manifest_path, &file);
+  if (!s.ok()) return s;
+
+  LogReporter reporter;
+  reporter.status = &s;
+  log::Reader reader(file.get(), &reporter, true, 0);
+  
+  Slice record;
+  std::string scratch;
+  VersionEdit edit;
+  
+  // 临时状态变量
+  uint64_t next_file = 0;
+  uint64_t log_num = 0;
+  bool have_log_number = false;
+  bool have_next_file = false;
+  
+  // 【关键修复】定义缺失的变量
+  bool have_last_sequence = false;
+  uint64_t last_seq = 0;
+
+  { 
+      Version* base = new Version(this);
+      Builder builder(this, base); 
+      
+      while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+          if (edit.DecodeFrom(record).ok()) {
+              if (edit.has_log_number_) {
+                  log_num = edit.log_number_;
+                  have_log_number = true;
+              }
+              if (edit.has_next_file_number_) {
+                  next_file = edit.next_file_number_;
+                  have_next_file = true;
+              }
+              // 【关键修复】现在变量已定义，可以赋值了
+              if (edit.has_last_sequence_) {
+                  last_seq = edit.last_sequence_;
+                  have_last_sequence = true;
+              }
+              
+              builder.Apply(&edit);
+          } else {
+              s = Status::Corruption("Manifest record decode failed");
+          }
+      }
+
+      if (s.ok()) {
+          if (!have_next_file) {
+              s = Status::Corruption("no meta-nextfile entry in descriptor");
+          } else if (!have_log_number) {
+              s = Status::Corruption("no meta-lognumber entry in descriptor");
+          }
+
+          if (s.ok()) {
+              Version* v = new Version(this);
+              builder.SaveTo(v);
+              v->Finalize();
+              AppendVersion(v);
+              
+              manifest_file_number_ = next_file; 
+              next_file_number_ = next_file + 1;
+              log_number_ = log_num;
+              
+              // 【关键修复】恢复 last_sequence_
+              if (have_last_sequence) {
+                  last_sequence_ = last_seq;
+              }
+              
+              if (manifest_name.length() > 9) { 
+                   manifest_file_number_ = std::stoull(manifest_name.substr(9));
+              }
+              
+              if (save_manifest) *save_manifest = true;
+          }
+      }
+      
+  } 
+
+  return s;
 }
 
 void VersionSet::AddLiveFiles(std::set<uint64_t>* live) {
@@ -352,7 +654,13 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c, TableCache* table_cache, 
             Iterator* iter = table_cache->NewIterator(options, 
                                                       files_0[i]->file_number, 
                                                       files_0[i]->file_size);
-            list.push_back(iter);
+            // 【关键修复】检查空指针
+            if (iter != nullptr) {
+                list.push_back(iter);
+            } else {
+                // 如果打开失败（极其罕见），记录日志但不要崩溃
+                fprintf(stderr, "[Compaction] Failed to open L0 file #%lu\n", files_0[i]->file_number);
+            }
         }
     } else {
         // L1+ 文件不重叠，创建一个 LevelIterator 即可

@@ -78,7 +78,7 @@ class DBImpl : public DB {
   void BGWork();
 
   // 核心函数：将 MemTable 写入 SSTable
-  Status WriteLevel0Table(MemTable* mem,  VersionEdit* edit);
+  Status WriteLevel0Table(MemTable* mem, VersionEdit* edit, uint64_t* file_number);
   
   // 触发 Flush
   Status MaybeScheduleCompaction(); // Day 4 我们改为 MakeRoomForWrite 同步刷盘

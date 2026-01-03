@@ -108,119 +108,135 @@ DBImpl::~DBImpl() {
 // --- 核心恢复逻辑 (Crash Recovery) ---
 
 Status DBImpl::Recover() {
-  // 1. 扫描目录下的所有文件
+  // 1. 创建目录 (保持不变)
+  if (!std::filesystem::exists(dbname_)) {
+    if (options_.create_if_missing) {
+      std::filesystem::create_directories(dbname_);
+    } else {
+      return Status::InvalidArgument("DB directory does not exist");
+    }
+  }
+
+  // 2. 恢复 VersionSet (保持不变)
+  bool save_manifest = false;
+  Status s = versions_->Recover(&save_manifest);
+  if (!s.ok() && !s.IsNotFound()) return s;
+
+  // 3. 扫描 WAL 文件 (保持不变)
+  uint64_t min_log = versions_->LogNumber();
   std::vector<std::string> filenames;
   for (const auto& entry : std::filesystem::directory_iterator(dbname_)) {
       filenames.push_back(entry.path().filename().string());
   }
-
-  std::vector<uint64_t> sst_files;
-  uint64_t max_log_number = 0;
-  bool has_log = false;
-
+  
+  std::vector<uint64_t> logs;
   for (const auto& fname : filenames) {
       uint64_t number;
-      // 解析 SST 文件: 000001.sst
-      if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".sst") {
-          number = std::stoull(fname.substr(0, fname.length() - 4));
-          sst_files.push_back(number);
-      } 
-      // 解析 Log 文件: 000003.log
-      else if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".log") {
+      if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".log") {
           try {
-            number = std::stoull(fname.substr(0, fname.length() - 4));
-            if (number > max_log_number) {
-                max_log_number = number;
-                has_log = true;
-            }
+             number = std::stoull(fname.substr(0, fname.length() - 4));
+             if (number >= min_log) logs.push_back(number);
           } catch (...) { 
-              // 兼容旧逻辑：如果只有 wal.log，把它当作 log number 0
-              if (fname == "wal.log") {
-                  if (!has_log) max_log_number = 0; 
-                  has_log = true; 
-              }
+             if (fname == "wal.log" && min_log == 0) logs.push_back(0);
           }
       }
   }
+  std::sort(logs.begin(), logs.end());
 
-  // 2. 恢复 VersionSet (将磁盘上的 SSTable 加入内存元数据)
-  // 为了简单，我们手动构建一个 VersionEdit 把所有 SSTable 加进去
-  VersionEdit edit;
-  for (uint64_t num : sst_files) {
-      std::string fname = TableFileName(dbname_, num);
-      uint64_t fsize = std::filesystem::file_size(fname);
-      // Smallest/Largest 暂时留空，Get 时会全盘扫描这些文件（功能正确，性能稍差）
-      edit.AddFile(0, num, fsize, Slice(""), Slice(""));
+  // 4. 重放 WAL (保持不变)
+  for (uint64_t log_num : logs) {
+      std::string log_path = (log_num == 0 && std::filesystem::exists(dbname_ + "/wal.log")) ? 
+                             dbname_ + "/wal.log" : LogFileName(dbname_, log_num);
       
-      // 更新文件编号计数器，防止冲突
-      while (versions_->NewFileNumber() <= num); 
+      std::unique_ptr<SequentialFile> file;
+      s = NewSequentialFile(log_path, &file);
+      if (!s.ok()) continue;
+
+      log::Reader reader(file.get(), nullptr, true, 0);
+      Slice record;
+      std::string scratch;
+      
+      while (reader.ReadRecord(&record, &scratch)) {
+        Slice input = record;
+        if (input.size() < 1) continue;
+        char type_char = input[0];
+        input.remove_prefix(1);
+        ValueType type = static_cast<ValueType>(type_char);
+        uint32_t key_len;
+        if (!GetVarint32(&input, &key_len)) continue;
+        Slice key(input.data(), key_len);
+        input.remove_prefix(key_len);
+        uint32_t val_len;
+        if (!GetVarint32(&input, &val_len)) continue;
+        Slice value(input.data(), val_len);
+        
+        // 恢复 Sequence (取最大值)
+        if (versions_->LastSequence() > last_sequence_) {
+            last_sequence_ = versions_->LastSequence(); 
+        }
+        last_sequence_++; 
+        mem_->Add(last_sequence_, type, key, value);
+      }
   }
-  // 应用到 VersionSet
-  versions_->LogAndApply(&edit, &mutex_);
 
-  // 更新 next_file_number_ 超过 max_log_number
-  while (versions_->NewFileNumber() <= max_log_number);
-
-  // 3. 回放最新的 WAL
-  if (!has_log && !std::filesystem::exists(dbname_ + "/wal.log")) {
-      return Status::OK(); // 新库
-  }
-
-  std::string log_path;
-  if (max_log_number > 0) {
-      log_path = LogFileName(dbname_, max_log_number);
-  } else {
-      log_path = dbname_ + "/wal.log";
-  }
-
-  std::unique_ptr<SequentialFile> file;
-  Status s = NewSequentialFile(log_path, &file);
-  if (!s.ok()) return s; // 如果打开失败，可能是文件不存在，视为 OK
-
-  log::Reader reader(file.get(), nullptr, true, 0);
-  Slice record;
-  std::string scratch;
+  // =========================================================
+  // 【关键修复】5. 准备新环境：Flush 重放的数据 + 切换 Log
+  // =========================================================
   
-  while (reader.ReadRecord(&record, &scratch)) {
-    Slice input = record;
-    if (input.size() < 1) continue;
+  uint64_t new_log_number = versions_->NewFileNumber();
+  VersionEdit edit;
+  
+  // 如果 MemTable 里有重放的数据，必须先 Flush 到磁盘！
+  if (mem_->ApproximateMemoryUsage() > 0) {
+      uint64_t file_num = 0;
+      // 调用 WriteLevel0Table 生成 SSTable
+      // 注意：此时 BGWork 可能也在运行，需要加锁保护 pending_outputs_ (WriteLevel0Table 内部没加锁？)
+      // 但 WriteLevel0Table 会操作 pending_outputs_，它是非线程安全的集合？
+      // 在 DBImpl::Recover 运行时，理论上外部不会有并发 Put/Get，但 BGWork 线程已经启动了。
+      // 为了安全，我们加个锁调用 WriteLevel0Table
+      
+      {
+          std::lock_guard<std::mutex> l(mutex_);
+          s = WriteLevel0Table(mem_, &edit, &file_num);
+      }
+      
+      if (!s.ok()) return s;
 
-    char type_char = input[0];
-    input.remove_prefix(1);
-    ValueType type = static_cast<ValueType>(type_char);
-
-    uint32_t key_len;
-    if (!GetVarint32(&input, &key_len)) continue;
-    Slice key(input.data(), key_len);
-    input.remove_prefix(key_len);
-
-    uint32_t val_len;
-    if (!GetVarint32(&input, &val_len)) continue;
-    Slice value(input.data(), val_len);
-    
-    // 恢复 Sequence
-    last_sequence_++;
-    mem_->Add(last_sequence_, type, key, value);
+      // 移除保护 (因为 WriteLevel0Table 加了 insert，但没 erase)
+      if (file_num > 0) {
+          std::lock_guard<std::mutex> l(mutex_);
+          pending_outputs_.erase(file_num);
+      }
+      
+      // Flush 完后，旧 MemTable 的使命结束了，换个新的
+      mem_->Unref();
+      mem_ = new MemTable(InternalKeyComparator());
+      mem_->Ref();
   }
-
-  // 4. 准备新的写入环境
-  // 恢复完成后，开启一个新的 Log 文件用于后续写入
-  uint64_t new_log_num = versions_->NewFileNumber();
+  
+  // 创建新 Log 文件
   std::unique_ptr<WritableFile> lfile;
-  s = NewWritableFile(LogFileName(dbname_, new_log_num), &lfile);
+  s = NewWritableFile(LogFileName(dbname_, new_log_number), &lfile);
   if (!s.ok()) return s;
   
   logfile_ = std::move(lfile);
   log_ = std::make_unique<log::Writer>(logfile_.get());
   
-  // 记录 LogNumber 变更
-  VersionEdit log_edit;
-  log_edit.SetLogNumber(new_log_num);
-  versions_->LogAndApply(&log_edit, &mutex_);
+  // 更新 Manifest：
+  // 1. 设置新的 LogNumber (表示之前的 Log 都作废了)
+  // 2. 记录刚才 Flush 的新文件 (edit 里如果有的话)
+  // 3. 记录 LastSequence
+  edit.SetLogNumber(new_log_number);
+  edit.SetLastSequence(last_sequence_);
+  
+  // 原子应用
+  {
+      std::lock_guard<std::mutex> l(mutex_);
+      s = versions_->LogAndApply(&edit, &mutex_);
+  }
 
-  return Status::OK();
+  return s;
 }
-
 // --- 写入路径 ---
 
 Status DBImpl::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
@@ -318,136 +334,127 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
 
 Status DBImpl::MakeRoomForWrite(bool force) {
     bool allow_switch = (force || mem_->ApproximateMemoryUsage() >= options_.write_buffer_size);
-        // 1. [新增] 写入停顿逻辑 (Level 0 流控)
-    // 如果 L0 文件太多，我们必须减慢写入速度。
-    // 软限制 (L0_Slow): 8 个文件 -> 减速
-    // 硬限制 (L0_Stop): 12 个文件 -> 暂停
+    
+    // Flow Control 逻辑 (保持不变)
     {
-        // 注意：MakeRoomForWrite 通常是由 Put 调用的，此时 mutex_ 已经被持有了。
-        // 所以这里不需要再加 lock_guard。
-        
         if (versions_->current() != nullptr) {
-            int l0_files = versions_->current()->GetFiles(0).size();
-            
-            // 硬限制：如果 L0 文件太多，停止写入，直到 Compaction 减少文件数
-            const int kL0_Stop = 12;
-            while (l0_files >= kL0_Stop && bg_running_) {
-                fprintf(stderr, "[FlowControl] L0 files %d >= %d. Waiting...\n", l0_files, kL0_Stop);
-                
-                // 【关键】必须释放锁！
-                // 否则后台 BGWork 无法获取锁来执行 Compaction，也就永远无法减少文件数（死锁）。
-                fprintf(stderr, "[FlowControl] Waiting... BG Running: %d\n", bg_running_);
-                bg_cv_.notify_all(); 
-                mutex_.unlock();
-                
-                // 睡眠 10ms 等待后台赶进度
-                // (生产环境通常使用 Condition Variable，这里简化使用 Sleep)
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                
-                // 醒来后重新获取锁，检查状态
-                mutex_.lock();
-                
-                // 刷新文件计数
-                l0_files = versions_->current()->GetFiles(0).size();
-            }
-            
-            // 软限制：轻微延迟，平滑流量
-            const int kL0_Slow = 8;
-            if (l0_files >= kL0_Slow) {
-                // fprintf(stderr, "[FlowControl] L0 files %d. Sleeping 1ms.\n", l0_files);
-                bg_cv_.notify_all(); 
-                mutex_.unlock();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                mutex_.lock();
-            }
+             int l0_files = versions_->current()->GetFiles(0).size();
+             const int kL0_Stop = 12;
+             while (l0_files >= kL0_Stop && bg_running_) {
+                 bg_cv_.notify_all(); 
+                 mutex_.unlock();
+                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                 mutex_.lock();
+                 l0_files = versions_->current()->GetFiles(0).size();
+             }
+             const int kL0_Slow = 8;
+             if (l0_files >= kL0_Slow) {
+                 bg_cv_.notify_all(); 
+                 mutex_.unlock();
+                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                 mutex_.lock();
+             }
         }
     }
+
     if (!allow_switch) {
         return Status::OK();
     }
 
-    // 1. 处理旧的 Immutable (如果有)
+    // 1. 如果有残留的 imm_，先刷盘
     if (imm_ != nullptr) {
         VersionEdit edit;
-        Status s = WriteLevel0Table(imm_, &edit);
-        if (!s.ok()) return s; // WriteLevel0Table 失败内部已处理 erase
+        uint64_t file_num = 0;
+        Status s = WriteLevel0Table(imm_, &edit, &file_num);
+        if (!s.ok()) return s;
         
         s = versions_->LogAndApply(&edit, &mutex_);
-        
-        // 【关键修复】现在文件已进 Version，安全了，移除保护
-        for (const auto& kv : edit.GetNewFiles()) {
-            pending_outputs_.erase(kv.second.file_number);
-        }
-        
+        if (file_num > 0) pending_outputs_.erase(file_num);
         if (!s.ok()) return s;
+
         imm_->Unref();
         imm_ = nullptr;
     }
+
     // 2. 切换 MemTable & WAL
+    // ---------------------------------------------------------
     imm_ = mem_;
     mem_ = new MemTable(InternalKeyComparator());
     mem_->Ref();
 
-    // 切换 Log
-    logfile_.reset();
-    log_.reset();
-
+    // 切换 Log 文件
+    // 获取新编号，但暂时不写入 Manifest 的 LogNumber
     uint64_t new_log_number = versions_->NewFileNumber();
-    std::string log_fname = LogFileName(dbname_, new_log_number);
-    Status s = NewWritableFile(log_fname, &logfile_);
+    std::unique_ptr<WritableFile> lfile;
+    Status s = NewWritableFile(LogFileName(dbname_, new_log_number), &lfile);
     if (!s.ok()) return s;
     
+    logfile_ = std::move(lfile);
     log_ = std::make_unique<log::Writer>(logfile_.get());
 
-    // 应用 LogNumber 变更
-    VersionEdit edit;
-    edit.SetLogNumber(new_log_number);
-    s = versions_->LogAndApply(&edit, &mutex_);
-    if (!s.ok()) return s;
+    // 【关键修改】这里不再调用 LogAndApply 更新 LogNumber！
+    // 此时 Manifest 依然指向旧 Log。如果现在 Crash，Recover 会重放旧 Log (imm_) 和新 Log (mem_)，数据安全。
+    // ---------------------------------------------------------
 
-    // 3. Flush 刚刚切换出来的 imm_ (同步 Flush)
+    // 3. Flush 刚刚切换出来的 imm_
     {
         VersionEdit imm_edit;
-        s = WriteLevel0Table(imm_, &imm_edit);
+        
+        // 【关键修改】在 Flush 成功后的 Edit 中，顺便更新 LogNumber
+        // 这表示：imm_ 已经落盘为 SST 了，旧 Log 可以废弃了，Log 起点推进到 new_log_number
+        imm_edit.SetLogNumber(new_log_number); 
+
+        uint64_t file_num = 0;
+        s = WriteLevel0Table(imm_, &imm_edit, &file_num);
         if (!s.ok()) return s;
         
+        // 原子提交：增加新 SST 文件 + 推进 LogNumber
         s = versions_->LogAndApply(&imm_edit, &mutex_);
-        for (const auto& kv : edit.GetNewFiles()) {
-            pending_outputs_.erase(kv.second.file_number);
-        }
         
+        if (file_num > 0) pending_outputs_.erase(file_num);
         if (!s.ok()) return s;
         
         imm_->Unref();
         imm_ = nullptr;
     }
+    
     bg_cv_.notify_one(); 
     return Status::OK();
 }
 
-Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit) {
-  // 1. 准备文件
-  uint64_t file_number = versions_->NewFileNumber();
+// 【修改】增加 file_number 输出参数
+Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit, uint64_t* file_number) {
+  // 1. 分配文件号
+  *file_number = versions_->NewFileNumber();
   
-  // 【新增】加入保护名单
-  pending_outputs_.insert(file_number);
+  // 2. 加入保护 (开始保护)
+  pending_outputs_.insert(*file_number);
   
-  std::string fname = TableFileName(dbname_, file_number);
+  std::string fname = TableFileName(dbname_, *file_number);
   std::unique_ptr<WritableFile> file;
   Status s = NewWritableFile(fname, &file);
+  
+  // 注意：如果打开失败，需要立即移除保护，否则该 ID 永远泄露在 pending_outputs_ 中
   if (!s.ok()) {
-      pending_outputs_.erase(file_number);
+      pending_outputs_.erase(*file_number);
       return s;
   }
 
+  // 3. 构建 Table
   TableBuilder builder(options_, file.get());
-
   Iterator* iter = mem->NewIterator();
   iter->SeekToFirst();
   
+  if (!iter->Valid()) {
+      // 空表处理
+      delete iter;
+      builder.Abandon();
+      pending_outputs_.erase(*file_number); // 移除保护
+      return Status::OK();
+  }
+
   std::string smallest, largest;
   bool first = true;
-  
   for (; iter->Valid(); iter->Next()) {
       Slice key = iter->key();
       if (first) {
@@ -459,24 +466,31 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit) {
   }
   delete iter;
 
+  // 4. 完成写入
   s = builder.Finish();
   if (s.ok()) {
       s = file->Close();
   }
-  
-  // 【新增】移除保护名单
-  //pending_outputs_.erase(file_number);
 
   if (s.ok() && builder.NumEntries() > 0) {
       uint64_t file_size = builder.FileSize();
-      edit->AddFile(0, file_number, file_size, Slice(smallest), Slice(largest));
+      edit->AddFile(0, *file_number, file_size, Slice(smallest), Slice(largest));
       fprintf(stderr, "[DBImpl] Flushed SSTable #%lu. Entries: %lu, Size: %lu\n", 
-              file_number, builder.NumEntries(), file_size);
+              *file_number, builder.NumEntries(), file_size);
+      // 【关键修复】将当前 Sequence 写入 Edit
+      // 这样 Manifest 就会记录下“此时此刻系统已经写到了哪个 Sequence”
+      edit->SetLastSequence(last_sequence_);
+      
+      fprintf(stderr, "[DBImpl] Flushed SSTable #%lu. Entries: %lu, Seq: %lu\n", 
+              *file_number, builder.NumEntries(), last_sequence_.load());
+      // 【关键修复】这里绝对不要 erase pending_outputs_！
+      // 文件虽然写完了，但还没进 Version，必须继续保护！
   } else {
-      // 失败或空文件，删除物理文件
-      pending_outputs_.erase(file_number);
+      // 失败或空文件：清理
       std::filesystem::remove(fname);
+      pending_outputs_.erase(*file_number); // 移除保护
   }
+
   return s;
 }
 
@@ -995,7 +1009,7 @@ void DBImpl::DeleteObsoleteFiles() {
         }
 
         if (!keep) {
-            // 执行删除
+
             table_cache_->Evict(number);
             std::filesystem::remove(dbname_ + "/" + fname);
             deleted_count++;

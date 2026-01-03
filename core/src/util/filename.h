@@ -16,5 +16,6 @@ std::string ManifestFileName(const std::string& dbname, uint64_t number);
 // 生成 Current 文件名 (指向当前的 Manifest): dbname/CURRENT
 std::string CurrentFileName(const std::string& dbname);
 
+std::string TempFileName(const std::string& dbname, uint64_t number);
 
 } // namespace titankv

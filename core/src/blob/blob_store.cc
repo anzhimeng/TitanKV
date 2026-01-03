@@ -15,10 +15,33 @@ BlobStore::BlobStore(std::string db_path, const Options& options, IoUringExecuto
       options_(options), 
       next_file_id_(1),     
       executor_(executor) {
+    
+    // 1. 确保目录存在
     std::filesystem::create_directories(db_path_);
-    // 【新增调试日志】确认阈值到底是多少
-    fprintf(stderr, "[BlobStore] Init. MaxFileSize: %lu bytes. DirectIO: %d\n", 
-        options_.max_blob_file_size, options_.use_direct_io);
+
+    // 2. 【关键修复】扫描目录，恢复 next_file_id_
+    // 防止重启后覆盖旧的 Blob 文件
+    if (std::filesystem::exists(db_path_)) {
+        for (const auto& entry : std::filesystem::directory_iterator(db_path_)) {
+            if (!entry.is_regular_file()) continue;
+            
+            std::string fname = entry.path().filename().string();
+            // 文件名格式: 000001.blob
+            if (fname.length() > 5 && fname.substr(fname.length() - 5) == ".blob") {
+                try {
+                    // 提取数字部分
+                    uint32_t id = std::stoul(fname.substr(0, fname.length() - 5));
+                    if (id >= next_file_id_) {
+                        next_file_id_ = id + 1;
+                    }
+                } catch (...) {
+                    // 忽略格式不对的文件
+                }
+            }
+        }
+    }
+    
+    fprintf(stderr, "[BlobStore] Recovered. NextFileID: %u\n", next_file_id_);
 }
 
 Status BlobStore::CreateNewBlobFile() {

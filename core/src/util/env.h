@@ -50,5 +50,6 @@ public:
 Status NewRandomAccessFile(const std::string& fname, 
                            std::unique_ptr<RandomAccessFile>* result,
                            bool use_direct_io = false);
+Status WriteStringToFile(const std::string& fname, const Slice& data);
 
 }
