@@ -229,22 +229,29 @@ Iterator* Table::NewIterator(const ReadOptions& options) {
   return NewTwoLevelIterator(index_iter, &Table::BlockReader, const_cast<Table*>(this), options);
 }
 
+// 【关键修复】Table::InternalGet 函数
 Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
                           void (*handle_result)(void*, const Slice&, const Slice&)) {
-  Iterator* iiter = rep_->index_block->NewIterator(&rep_->user_cmp);
-  if (iiter == nullptr) {
-    return Status::Corruption("Index block is invalid");
-  }
+  // k 是 InternalKey
   assert(k.size() >= 8);
   Slice target_user_key(k.data(), k.size() - 8);
 
-  // Bloom Filter
+  // 1. Bloom Filter 过滤
+  // Bloom Filter 是基于 UserKey 构建的
   if (rep_->filter != nullptr && !rep_->filter->KeyMayMatch(target_user_key)) {
-      delete iiter;
-      return Status::OK();
+      // fprintf(stderr, "[InternalGet] Bloom Filter Miss for %s\n", target_user_key.ToString().c_str());
+      return Status::OK(); // Key 不存在，直接返回 OK (NotFound)
   }
+  // fprintf(stderr, "[InternalGet] Bloom Filter Hit for %s\n", target_user_key.ToString().c_str());
 
+  // 2. Index Block 查找
+  // Index Block 存的是 User Key，所以用 UserKeyComparator 查找
+  Iterator* iiter = rep_->index_block->NewIterator(&rep_->user_cmp);
+  if (iiter == nullptr) {
+      return Status::Corruption("Index block is invalid");
+  }
   iiter->Seek(target_user_key);
+
   if (iiter->Valid()) {
     Slice handle_value = iiter->value();
     BlockHandle handle;
@@ -252,10 +259,10 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
       
       Block* block = nullptr;
       Cache::Handle* cache_handle = nullptr;
-
       Cache* block_cache = rep_->options.block_cache.get();
       
-      if (block_cache != nullptr) {
+      // 3. Block Cache 查找 (Data Block)
+      if (block_cache != nullptr && options.fill_cache) {
           char cache_key_buffer[16];
           EncodeFixed64(cache_key_buffer, rep_->file_number);
           EncodeFixed64(cache_key_buffer + 8, handle.offset());
@@ -265,7 +272,9 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
           
           if (cache_handle != nullptr) {
               block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
+              // fprintf(stderr, "[Cache] Hit block at offset %lu\n", handle.offset());
           } else {
+              // fprintf(stderr, "[Cache] Miss block at offset %lu\n", handle.offset());
               BlockContents contents;
               if (ReadBlock(rep_->file, options, handle, &contents).ok()) {
                   block = new Block(contents);
@@ -273,6 +282,7 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
               }
           }
       } else {
+          // 无缓存模式，直接读磁盘
           BlockContents contents;
           if (ReadBlock(rep_->file, options, handle, &contents).ok()) {
               block = new Block(contents);
@@ -280,29 +290,47 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
       }
 
       if (block != nullptr) {
-        Iterator* diter = block->NewIterator(&rep_->user_cmp);
+        // 4. Data Block 内部查找
+        // 【关键修复】Data Block 存的是 Internal Key，必须使用 InternalKeyComparator
+        InternalKeyComparator icmp_local; // 临时构造一个，或者在 Table::Rep 里存一个
+        Iterator* diter = block->NewIterator(&icmp_local);
         
-        diter->Seek(target_user_key);
+        // Data Block 内部用 Internal Key 查找
+        diter->Seek(k); 
+        
         if (diter->Valid()) {
-            Slice found_key = diter->key();
+            Slice found_key = diter->key(); // 这是 Internal Key
+            
+            // 【关键修复】防御性检查：必须确保 Key 长度足够容纳 Tag (8字节)
             if (found_key.size() >= 8) { 
+                // 安全提取 User Key (不会越界)
                 Slice found_user_key(found_key.data(), found_key.size() - 8);
+                
+                // 比较 User Key 是否相等
                 if (rep_->user_cmp.Compare(found_user_key, target_user_key) == 0) {
+                     // 找到了！且 User Key 匹配。
+                     // 回调函数接收到的是 Internal Key 和 Value
                      handle_result(arg, found_key, diter->value());
                 }
+            } else {
+                // 如果读到了非法 Key (长度 < 8)，直接忽略，不做任何处理。
+                // 这有效地防止了后续逻辑因为坏数据而 Crash。
+                // 可选：打印一条错误日志
+                // fprintf(stderr, "[InternalGet] Ignored corrupted key with len=%lu\n", found_key.size());
             }
         }
-        delete diter;
+        delete diter; // 释放 Data Block 迭代器
         
+        // 5. 释放 Block 资源
         if (cache_handle != nullptr) {
-            block_cache->Release(cache_handle);
+            block_cache->Release(cache_handle); // 释放 Cache 句柄
         } else {
-            delete block;
+            delete block; // 没走 Cache，手动删除 Block
         }
       }
     }
   }
-  delete iiter;
+  delete iiter; // 释放 Index Block 迭代器
   return Status::OK();
 }
 

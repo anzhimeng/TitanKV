@@ -92,7 +92,7 @@ func main() {
 	// 注意：NewTitanRaft 内部现在会自动初始化 Batcher，不需要外部手动创建了
 	log.Printf("Starting Raft Node %d...", *nodeID)
 	raftNode := raft.NewTitanRaft(*nodeID, peers, db, *dbPath)
-	batcher := raft.NewBatcher(raftNode, 100, 10*time.Millisecond)
+	batcher := raft.NewBatcher(raftNode, 500, 10*time.Millisecond)
 	// 4. 监听端口
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

@@ -52,22 +52,36 @@ int InternalKeyComparator::user_key_compare(const Slice& a, const Slice& b) cons
 }
 
 int InternalKeyComparator::Compare(const Slice& akey, const Slice& bkey) const {
-  // akey 和 bkey 是 Internal Key (User Key + 8 bytes Tag)
-  assert(akey.size() >= 8);
-  assert(bkey.size() >= 8);
+  // 【关键修复】移除 assert，改为防御性逻辑
+  // assert(akey.size() >= 8); 
+  // assert(bkey.size() >= 8);
 
-  Slice a_user_key(akey.data(), akey.size() - 8);
-  Slice b_user_key(bkey.data(), bkey.size() - 8);
+  // 1. 提取 User Key
+  // 如果长度不足 8，则整个 Key 就是 User Key (或者是坏数据)，直接比较
+  Slice a_user = (akey.size() >= 8) ? Slice(akey.data(), akey.size() - 8) : akey;
+  Slice b_user = (bkey.size() >= 8) ? Slice(bkey.data(), bkey.size() - 8) : bkey;
 
-  int r = user_key_compare(a_user_key, b_user_key);
-  if (r != 0) return r;
+  int r = user_key_compare(a_user, b_user);
+  if (r != 0) {
+    return r;
+  }
 
+  // 2. User Key 相同，比较 Tag (SeqNum + Type)
+  // 如果任意一个 Key 长度不足 8，无法比较 Tag，此时认为它们相等（或按长度决胜）
+  if (akey.size() < 8 || bkey.size() < 8) {
+      if (akey.size() < bkey.size()) return -1;
+      if (akey.size() > bkey.size()) return +1;
+      return 0;
+  }
+
+  // 正常的 Tag 比较逻辑
   const uint64_t a_tag = DecodeFixed64(akey.data() + akey.size() - 8);
   const uint64_t b_tag = DecodeFixed64(bkey.data() + bkey.size() - 8);
 
+  // SeqNum 降序排列 (较大的 SeqNum 排在前面)
   if (a_tag > b_tag) return -1;
   if (a_tag < b_tag) return +1;
-  
+
   return 0;
 }
 

@@ -57,6 +57,7 @@ class Block {
   
   // 创建迭代器
   Iterator* NewIterator(const UserKeyComparator* comparator);
+  Iterator* NewIterator(const InternalKeyComparator* comparator);
 
  private:
   const char* data_;

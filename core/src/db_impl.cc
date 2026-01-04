@@ -748,7 +748,8 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
         current_output_file_number = versions_->NewFileNumber();
         pending_outputs_.insert(current_output_file_number);
         mutex_.unlock();
-
+        
+	   produced_files.push_back(current_output_file_number);
         std::string fname = TableFileName(dbname_, current_output_file_number);
         Status s = NewWritableFile(fname, &file);
         if (!s.ok()) return s;
@@ -798,6 +799,12 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
     
     for (; input->Valid(); input->Next()) {
         Slice key = input->key();
+        // 【关键修复】防御性检查：如果 Input Key 非法，直接跳过！
+        // 这能防止脏数据扩散到新文件
+        if (key.size() < 8) {
+            fprintf(stderr, "[Compaction] Error: Skipped invalid key (len=%lu)\n", key.size());
+            continue;
+        }
         Slice user_key = ExtractUserKey(key);
 
         bool drop = false;

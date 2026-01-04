@@ -415,7 +415,7 @@ func (tr *TitanRaft) handleSnapshot(snap raftpb.Snapshot) {
 }
 
 func (tr *TitanRaft) maybeTriggerSnapshot() {
-	const snapshotCount = 10
+	const snapshotCount = 5000
 	first, _ := tr.raftStorage.FirstIndex()
 	applied := tr.getApplied()
 

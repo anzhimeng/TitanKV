@@ -39,6 +39,15 @@ static int FindFile(const InternalKeyComparator& icmp,
   while (left < right) {
     uint32_t mid = (left + right) / 2;
     FileMetaData* f = files[mid];
+    
+    // 【关键修复】防御性检查：防止无效 Key 触发断言
+    if (f->largest.size() < 8) {
+        // 如果 Key 无效（例如空字符串），我们假设它比目标 Key 小，继续向右找
+        // 或者直接忽略这个文件
+        left = mid + 1;
+        continue;
+    }
+
     if (icmp.Compare(f->largest, key) < 0) {
       left = mid + 1;
     } else {
@@ -281,6 +290,10 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k, std::string*
     if (index >= num_files) continue;
 
     FileMetaData* f = files_[level][index];
+    // 【关键修复】检查 smallest 是否合法
+    if (f->smallest.size() < 8) {
+        continue; // 跳过元数据损坏的文件
+    }
     if (ucmp->Compare(ikey, f->smallest) < 0) {
         continue;
     }

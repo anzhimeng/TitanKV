@@ -87,10 +87,10 @@ void Iterator::RegisterCleanup(CleanupFunction func, void* arg1, void* arg2) {
 }
 
 // --- Block Iterator ---
-
+template <class Comparator>
 class BlockIterator : public Iterator {
  public:
-  BlockIterator(const UserKeyComparator* comparator, const char* data,
+  BlockIterator(const Comparator* comparator, const char* data,
                 uint32_t restart_offset, uint32_t num_restarts)
       : comparator_(comparator),
         data_(data),
@@ -190,7 +190,7 @@ class BlockIterator : public Iterator {
   }
 
  private:
-  const UserKeyComparator* comparator_;
+  const Comparator* comparator_;
   const char* data_;
   uint32_t restart_offset_;
   uint32_t num_restarts_;
@@ -249,6 +249,18 @@ class BlockIterator : public Iterator {
 };
 
 Iterator* Block::NewIterator(const UserKeyComparator* comparator) {
+  if (size_ < sizeof(uint32_t)) {
+    return nullptr;
+  }
+  uint32_t num_restarts = DecodeFixed32(data_ + size_ - sizeof(uint32_t));
+  if (num_restarts == 0) {
+    return nullptr;
+  }
+  
+  return new BlockIterator(comparator, data_, restart_offset_, num_restarts);
+}
+
+Iterator* Block::NewIterator(const InternalKeyComparator* comparator) {
   if (size_ < sizeof(uint32_t)) {
     return nullptr;
   }
