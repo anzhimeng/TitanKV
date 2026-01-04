@@ -6,8 +6,56 @@ service PD {
     // 获取时间戳
     rpc GetTS(GetTSRequest) returns (GetTSResponse);
     
-    // ... 后续还会添加心跳等接口 ...
+    rpc PutStore(PutStoreRequest) returns (PutStoreResponse);
+    rpc StoreHeartbeat(StoreHeartbeatRequest) returns (StoreHeartbeatResponse);
+    rpc AllocID(AllocIDRequest) returns (AllocIDResponse);
 }
+
+
+message AllocIDRequest {}
+
+message AllocIDResponse {
+    uint64 id = 1;
+}
+
+
+enum StoreState {
+    UP = 0;
+    OFFLINE = 1; // 手动下线
+    TOMBSTONE = 2; // 已删除
+}
+
+message MetaStore {
+    uint64 id = 1;
+    string address = 2;
+    StoreState state = 3;
+    repeated StoreLabel labels = 4; // 机房、机架信息，用于调度
+    string version = 5; // TitanKV 版本
+}
+
+message StoreLabel {
+    string key = 1;
+    string value = 2;
+}
+
+message StoreStats {
+    uint64 capacity = 1;
+    uint64 available = 2;
+    uint32 region_count = 3;
+    uint32 sending_snap_count = 4;
+    uint32 receiving_snap_count = 5;
+}
+
+message PutStoreRequest {
+    MetaStore store = 1;
+}
+message PutStoreResponse {} // 实际上可能返回 header
+
+message StoreHeartbeatRequest {
+    uint64 store_id = 1;
+    StoreStats stats = 2;
+}
+message StoreHeartbeatResponse {}
 
 message GetTSRequest {
     uint32 count = 1; // 一次申请多少个 TS (通常是 1 个，用于批处理优化)

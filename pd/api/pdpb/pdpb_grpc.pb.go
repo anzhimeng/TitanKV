@@ -19,7 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PD_GetTS_FullMethodName = "/pdpb.PD/GetTS"
+	PD_GetTS_FullMethodName          = "/pdpb.PD/GetTS"
+	PD_PutStore_FullMethodName       = "/pdpb.PD/PutStore"
+	PD_StoreHeartbeat_FullMethodName = "/pdpb.PD/StoreHeartbeat"
+	PD_AllocID_FullMethodName        = "/pdpb.PD/AllocID"
 )
 
 // PDClient is the client API for PD service.
@@ -28,6 +31,9 @@ const (
 type PDClient interface {
 	// 获取时间戳
 	GetTS(ctx context.Context, in *GetTSRequest, opts ...grpc.CallOption) (*GetTSResponse, error)
+	PutStore(ctx context.Context, in *PutStoreRequest, opts ...grpc.CallOption) (*PutStoreResponse, error)
+	StoreHeartbeat(ctx context.Context, in *StoreHeartbeatRequest, opts ...grpc.CallOption) (*StoreHeartbeatResponse, error)
+	AllocID(ctx context.Context, in *AllocIDRequest, opts ...grpc.CallOption) (*AllocIDResponse, error)
 }
 
 type pDClient struct {
@@ -48,12 +54,45 @@ func (c *pDClient) GetTS(ctx context.Context, in *GetTSRequest, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *pDClient) PutStore(ctx context.Context, in *PutStoreRequest, opts ...grpc.CallOption) (*PutStoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PutStoreResponse)
+	err := c.cc.Invoke(ctx, PD_PutStore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pDClient) StoreHeartbeat(ctx context.Context, in *StoreHeartbeatRequest, opts ...grpc.CallOption) (*StoreHeartbeatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StoreHeartbeatResponse)
+	err := c.cc.Invoke(ctx, PD_StoreHeartbeat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pDClient) AllocID(ctx context.Context, in *AllocIDRequest, opts ...grpc.CallOption) (*AllocIDResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AllocIDResponse)
+	err := c.cc.Invoke(ctx, PD_AllocID_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PDServer is the server API for PD service.
 // All implementations must embed UnimplementedPDServer
 // for forward compatibility.
 type PDServer interface {
 	// 获取时间戳
 	GetTS(context.Context, *GetTSRequest) (*GetTSResponse, error)
+	PutStore(context.Context, *PutStoreRequest) (*PutStoreResponse, error)
+	StoreHeartbeat(context.Context, *StoreHeartbeatRequest) (*StoreHeartbeatResponse, error)
+	AllocID(context.Context, *AllocIDRequest) (*AllocIDResponse, error)
 	mustEmbedUnimplementedPDServer()
 }
 
@@ -66,6 +105,15 @@ type UnimplementedPDServer struct{}
 
 func (UnimplementedPDServer) GetTS(context.Context, *GetTSRequest) (*GetTSResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTS not implemented")
+}
+func (UnimplementedPDServer) PutStore(context.Context, *PutStoreRequest) (*PutStoreResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PutStore not implemented")
+}
+func (UnimplementedPDServer) StoreHeartbeat(context.Context, *StoreHeartbeatRequest) (*StoreHeartbeatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StoreHeartbeat not implemented")
+}
+func (UnimplementedPDServer) AllocID(context.Context, *AllocIDRequest) (*AllocIDResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AllocID not implemented")
 }
 func (UnimplementedPDServer) mustEmbedUnimplementedPDServer() {}
 func (UnimplementedPDServer) testEmbeddedByValue()            {}
@@ -106,6 +154,60 @@ func _PD_GetTS_Handler(srv interface{}, ctx context.Context, dec func(interface{
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PD_PutStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PutStoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDServer).PutStore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PD_PutStore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDServer).PutStore(ctx, req.(*PutStoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PD_StoreHeartbeat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StoreHeartbeatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDServer).StoreHeartbeat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PD_StoreHeartbeat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDServer).StoreHeartbeat(ctx, req.(*StoreHeartbeatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PD_AllocID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AllocIDRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDServer).AllocID(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PD_AllocID_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDServer).AllocID(ctx, req.(*AllocIDRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PD_ServiceDesc is the grpc.ServiceDesc for PD service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -116,6 +218,18 @@ var PD_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTS",
 			Handler:    _PD_GetTS_Handler,
+		},
+		{
+			MethodName: "PutStore",
+			Handler:    _PD_PutStore_Handler,
+		},
+		{
+			MethodName: "StoreHeartbeat",
+			Handler:    _PD_StoreHeartbeat_Handler,
+		},
+		{
+			MethodName: "AllocID",
+			Handler:    _PD_AllocID_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

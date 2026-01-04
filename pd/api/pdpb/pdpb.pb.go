@@ -21,6 +21,507 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type StoreState int32
+
+const (
+	StoreState_UP        StoreState = 0
+	StoreState_OFFLINE   StoreState = 1 // 手动下线
+	StoreState_TOMBSTONE StoreState = 2 // 已删除
+)
+
+// Enum value maps for StoreState.
+var (
+	StoreState_name = map[int32]string{
+		0: "UP",
+		1: "OFFLINE",
+		2: "TOMBSTONE",
+	}
+	StoreState_value = map[string]int32{
+		"UP":        0,
+		"OFFLINE":   1,
+		"TOMBSTONE": 2,
+	}
+)
+
+func (x StoreState) Enum() *StoreState {
+	p := new(StoreState)
+	*p = x
+	return p
+}
+
+func (x StoreState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StoreState) Descriptor() protoreflect.EnumDescriptor {
+	return file_pdpb_proto_enumTypes[0].Descriptor()
+}
+
+func (StoreState) Type() protoreflect.EnumType {
+	return &file_pdpb_proto_enumTypes[0]
+}
+
+func (x StoreState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StoreState.Descriptor instead.
+func (StoreState) EnumDescriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{0}
+}
+
+type AllocIDRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AllocIDRequest) Reset() {
+	*x = AllocIDRequest{}
+	mi := &file_pdpb_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AllocIDRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AllocIDRequest) ProtoMessage() {}
+
+func (x *AllocIDRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AllocIDRequest.ProtoReflect.Descriptor instead.
+func (*AllocIDRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{0}
+}
+
+type AllocIDResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AllocIDResponse) Reset() {
+	*x = AllocIDResponse{}
+	mi := &file_pdpb_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AllocIDResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AllocIDResponse) ProtoMessage() {}
+
+func (x *AllocIDResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AllocIDResponse.ProtoReflect.Descriptor instead.
+func (*AllocIDResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AllocIDResponse) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+type MetaStore struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	State         StoreState             `protobuf:"varint,3,opt,name=state,proto3,enum=pdpb.StoreState" json:"state,omitempty"`
+	Labels        []*StoreLabel          `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty"`   // 机房、机架信息，用于调度
+	Version       string                 `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"` // TitanKV 版本
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetaStore) Reset() {
+	*x = MetaStore{}
+	mi := &file_pdpb_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetaStore) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetaStore) ProtoMessage() {}
+
+func (x *MetaStore) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetaStore.ProtoReflect.Descriptor instead.
+func (*MetaStore) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *MetaStore) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *MetaStore) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *MetaStore) GetState() StoreState {
+	if x != nil {
+		return x.State
+	}
+	return StoreState_UP
+}
+
+func (x *MetaStore) GetLabels() []*StoreLabel {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *MetaStore) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+type StoreLabel struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreLabel) Reset() {
+	*x = StoreLabel{}
+	mi := &file_pdpb_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreLabel) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreLabel) ProtoMessage() {}
+
+func (x *StoreLabel) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreLabel.ProtoReflect.Descriptor instead.
+func (*StoreLabel) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *StoreLabel) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *StoreLabel) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+type StoreStats struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Capacity           uint64                 `protobuf:"varint,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	Available          uint64                 `protobuf:"varint,2,opt,name=available,proto3" json:"available,omitempty"`
+	RegionCount        uint32                 `protobuf:"varint,3,opt,name=region_count,json=regionCount,proto3" json:"region_count,omitempty"`
+	SendingSnapCount   uint32                 `protobuf:"varint,4,opt,name=sending_snap_count,json=sendingSnapCount,proto3" json:"sending_snap_count,omitempty"`
+	ReceivingSnapCount uint32                 `protobuf:"varint,5,opt,name=receiving_snap_count,json=receivingSnapCount,proto3" json:"receiving_snap_count,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *StoreStats) Reset() {
+	*x = StoreStats{}
+	mi := &file_pdpb_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreStats) ProtoMessage() {}
+
+func (x *StoreStats) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreStats.ProtoReflect.Descriptor instead.
+func (*StoreStats) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StoreStats) GetCapacity() uint64 {
+	if x != nil {
+		return x.Capacity
+	}
+	return 0
+}
+
+func (x *StoreStats) GetAvailable() uint64 {
+	if x != nil {
+		return x.Available
+	}
+	return 0
+}
+
+func (x *StoreStats) GetRegionCount() uint32 {
+	if x != nil {
+		return x.RegionCount
+	}
+	return 0
+}
+
+func (x *StoreStats) GetSendingSnapCount() uint32 {
+	if x != nil {
+		return x.SendingSnapCount
+	}
+	return 0
+}
+
+func (x *StoreStats) GetReceivingSnapCount() uint32 {
+	if x != nil {
+		return x.ReceivingSnapCount
+	}
+	return 0
+}
+
+type PutStoreRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Store         *MetaStore             `protobuf:"bytes,1,opt,name=store,proto3" json:"store,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutStoreRequest) Reset() {
+	*x = PutStoreRequest{}
+	mi := &file_pdpb_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutStoreRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutStoreRequest) ProtoMessage() {}
+
+func (x *PutStoreRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutStoreRequest.ProtoReflect.Descriptor instead.
+func (*PutStoreRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PutStoreRequest) GetStore() *MetaStore {
+	if x != nil {
+		return x.Store
+	}
+	return nil
+}
+
+type PutStoreResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutStoreResponse) Reset() {
+	*x = PutStoreResponse{}
+	mi := &file_pdpb_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutStoreResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutStoreResponse) ProtoMessage() {}
+
+func (x *PutStoreResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutStoreResponse.ProtoReflect.Descriptor instead.
+func (*PutStoreResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{6}
+}
+
+type StoreHeartbeatRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StoreId       uint64                 `protobuf:"varint,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`
+	Stats         *StoreStats            `protobuf:"bytes,2,opt,name=stats,proto3" json:"stats,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreHeartbeatRequest) Reset() {
+	*x = StoreHeartbeatRequest{}
+	mi := &file_pdpb_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreHeartbeatRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreHeartbeatRequest) ProtoMessage() {}
+
+func (x *StoreHeartbeatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreHeartbeatRequest.ProtoReflect.Descriptor instead.
+func (*StoreHeartbeatRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *StoreHeartbeatRequest) GetStoreId() uint64 {
+	if x != nil {
+		return x.StoreId
+	}
+	return 0
+}
+
+func (x *StoreHeartbeatRequest) GetStats() *StoreStats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
+type StoreHeartbeatResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreHeartbeatResponse) Reset() {
+	*x = StoreHeartbeatResponse{}
+	mi := &file_pdpb_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreHeartbeatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreHeartbeatResponse) ProtoMessage() {}
+
+func (x *StoreHeartbeatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreHeartbeatResponse.ProtoReflect.Descriptor instead.
+func (*StoreHeartbeatResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{8}
+}
+
 type GetTSRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Count         uint32                 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"` // 一次申请多少个 TS (通常是 1 个，用于批处理优化)
@@ -30,7 +531,7 @@ type GetTSRequest struct {
 
 func (x *GetTSRequest) Reset() {
 	*x = GetTSRequest{}
-	mi := &file_pdpb_proto_msgTypes[0]
+	mi := &file_pdpb_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -42,7 +543,7 @@ func (x *GetTSRequest) String() string {
 func (*GetTSRequest) ProtoMessage() {}
 
 func (x *GetTSRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pdpb_proto_msgTypes[0]
+	mi := &file_pdpb_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -55,7 +556,7 @@ func (x *GetTSRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTSRequest.ProtoReflect.Descriptor instead.
 func (*GetTSRequest) Descriptor() ([]byte, []int) {
-	return file_pdpb_proto_rawDescGZIP(), []int{0}
+	return file_pdpb_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetTSRequest) GetCount() uint32 {
@@ -75,7 +576,7 @@ type Timestamp struct {
 
 func (x *Timestamp) Reset() {
 	*x = Timestamp{}
-	mi := &file_pdpb_proto_msgTypes[1]
+	mi := &file_pdpb_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -87,7 +588,7 @@ func (x *Timestamp) String() string {
 func (*Timestamp) ProtoMessage() {}
 
 func (x *Timestamp) ProtoReflect() protoreflect.Message {
-	mi := &file_pdpb_proto_msgTypes[1]
+	mi := &file_pdpb_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -100,7 +601,7 @@ func (x *Timestamp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Timestamp.ProtoReflect.Descriptor instead.
 func (*Timestamp) Descriptor() ([]byte, []int) {
-	return file_pdpb_proto_rawDescGZIP(), []int{1}
+	return file_pdpb_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Timestamp) GetPhysical() int64 {
@@ -127,7 +628,7 @@ type GetTSResponse struct {
 
 func (x *GetTSResponse) Reset() {
 	*x = GetTSResponse{}
-	mi := &file_pdpb_proto_msgTypes[2]
+	mi := &file_pdpb_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -139,7 +640,7 @@ func (x *GetTSResponse) String() string {
 func (*GetTSResponse) ProtoMessage() {}
 
 func (x *GetTSResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pdpb_proto_msgTypes[2]
+	mi := &file_pdpb_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -152,7 +653,7 @@ func (x *GetTSResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTSResponse.ProtoReflect.Descriptor instead.
 func (*GetTSResponse) Descriptor() ([]byte, []int) {
-	return file_pdpb_proto_rawDescGZIP(), []int{2}
+	return file_pdpb_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetTSResponse) GetTimestamp() *Timestamp {
@@ -174,7 +675,34 @@ var File_pdpb_proto protoreflect.FileDescriptor
 const file_pdpb_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"pdpb.proto\x12\x04pdpb\"$\n" +
+	"pdpb.proto\x12\x04pdpb\"\x10\n" +
+	"\x0eAllocIDRequest\"!\n" +
+	"\x0fAllocIDResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\"\xa1\x01\n" +
+	"\tMetaStore\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12&\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x10.pdpb.StoreStateR\x05state\x12(\n" +
+	"\x06labels\x18\x04 \x03(\v2\x10.pdpb.StoreLabelR\x06labels\x12\x18\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\"4\n" +
+	"\n" +
+	"StoreLabel\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xc9\x01\n" +
+	"\n" +
+	"StoreStats\x12\x1a\n" +
+	"\bcapacity\x18\x01 \x01(\x04R\bcapacity\x12\x1c\n" +
+	"\tavailable\x18\x02 \x01(\x04R\tavailable\x12!\n" +
+	"\fregion_count\x18\x03 \x01(\rR\vregionCount\x12,\n" +
+	"\x12sending_snap_count\x18\x04 \x01(\rR\x10sendingSnapCount\x120\n" +
+	"\x14receiving_snap_count\x18\x05 \x01(\rR\x12receivingSnapCount\"8\n" +
+	"\x0fPutStoreRequest\x12%\n" +
+	"\x05store\x18\x01 \x01(\v2\x0f.pdpb.MetaStoreR\x05store\"\x12\n" +
+	"\x10PutStoreResponse\"Z\n" +
+	"\x15StoreHeartbeatRequest\x12\x19\n" +
+	"\bstore_id\x18\x01 \x01(\x04R\astoreId\x12&\n" +
+	"\x05stats\x18\x02 \x01(\v2\x10.pdpb.StoreStatsR\x05stats\"\x18\n" +
+	"\x16StoreHeartbeatResponse\"$\n" +
 	"\fGetTSRequest\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\"A\n" +
 	"\tTimestamp\x12\x1a\n" +
@@ -182,9 +710,17 @@ const file_pdpb_proto_rawDesc = "" +
 	"\alogical\x18\x02 \x01(\x03R\alogical\"T\n" +
 	"\rGetTSResponse\x12-\n" +
 	"\ttimestamp\x18\x01 \x01(\v2\x0f.pdpb.TimestampR\ttimestamp\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\rR\x05count26\n" +
+	"\x05count\x18\x02 \x01(\rR\x05count*0\n" +
+	"\n" +
+	"StoreState\x12\x06\n" +
+	"\x02UP\x10\x00\x12\v\n" +
+	"\aOFFLINE\x10\x01\x12\r\n" +
+	"\tTOMBSTONE\x10\x022\xf6\x01\n" +
 	"\x02PD\x120\n" +
-	"\x05GetTS\x12\x12.pdpb.GetTSRequest\x1a\x13.pdpb.GetTSResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
+	"\x05GetTS\x12\x12.pdpb.GetTSRequest\x1a\x13.pdpb.GetTSResponse\x129\n" +
+	"\bPutStore\x12\x15.pdpb.PutStoreRequest\x1a\x16.pdpb.PutStoreResponse\x12K\n" +
+	"\x0eStoreHeartbeat\x12\x1b.pdpb.StoreHeartbeatRequest\x1a\x1c.pdpb.StoreHeartbeatResponse\x126\n" +
+	"\aAllocID\x12\x14.pdpb.AllocIDRequest\x1a\x15.pdpb.AllocIDResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
 
 var (
 	file_pdpb_proto_rawDescOnce sync.Once
@@ -198,21 +734,42 @@ func file_pdpb_proto_rawDescGZIP() []byte {
 	return file_pdpb_proto_rawDescData
 }
 
-var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_pdpb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_pdpb_proto_goTypes = []any{
-	(*GetTSRequest)(nil),  // 0: pdpb.GetTSRequest
-	(*Timestamp)(nil),     // 1: pdpb.Timestamp
-	(*GetTSResponse)(nil), // 2: pdpb.GetTSResponse
+	(StoreState)(0),                // 0: pdpb.StoreState
+	(*AllocIDRequest)(nil),         // 1: pdpb.AllocIDRequest
+	(*AllocIDResponse)(nil),        // 2: pdpb.AllocIDResponse
+	(*MetaStore)(nil),              // 3: pdpb.MetaStore
+	(*StoreLabel)(nil),             // 4: pdpb.StoreLabel
+	(*StoreStats)(nil),             // 5: pdpb.StoreStats
+	(*PutStoreRequest)(nil),        // 6: pdpb.PutStoreRequest
+	(*PutStoreResponse)(nil),       // 7: pdpb.PutStoreResponse
+	(*StoreHeartbeatRequest)(nil),  // 8: pdpb.StoreHeartbeatRequest
+	(*StoreHeartbeatResponse)(nil), // 9: pdpb.StoreHeartbeatResponse
+	(*GetTSRequest)(nil),           // 10: pdpb.GetTSRequest
+	(*Timestamp)(nil),              // 11: pdpb.Timestamp
+	(*GetTSResponse)(nil),          // 12: pdpb.GetTSResponse
 }
 var file_pdpb_proto_depIdxs = []int32{
-	1, // 0: pdpb.GetTSResponse.timestamp:type_name -> pdpb.Timestamp
-	0, // 1: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
-	2, // 2: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0,  // 0: pdpb.MetaStore.state:type_name -> pdpb.StoreState
+	4,  // 1: pdpb.MetaStore.labels:type_name -> pdpb.StoreLabel
+	3,  // 2: pdpb.PutStoreRequest.store:type_name -> pdpb.MetaStore
+	5,  // 3: pdpb.StoreHeartbeatRequest.stats:type_name -> pdpb.StoreStats
+	11, // 4: pdpb.GetTSResponse.timestamp:type_name -> pdpb.Timestamp
+	10, // 5: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
+	6,  // 6: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
+	8,  // 7: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
+	1,  // 8: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
+	12, // 9: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
+	7,  // 10: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
+	9,  // 11: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
+	2,  // 12: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
+	9,  // [9:13] is the sub-list for method output_type
+	5,  // [5:9] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_pdpb_proto_init() }
@@ -225,13 +782,14 @@ func file_pdpb_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pdpb_proto_rawDesc), len(file_pdpb_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   3,
+			NumEnums:      1,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_pdpb_proto_goTypes,
 		DependencyIndexes: file_pdpb_proto_depIdxs,
+		EnumInfos:         file_pdpb_proto_enumTypes,
 		MessageInfos:      file_pdpb_proto_msgTypes,
 	}.Build()
 	File_pdpb_proto = out.File
