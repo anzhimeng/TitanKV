@@ -7,15 +7,22 @@ import (
 	"sync/atomic"
 	"time"
 
+	"titankv/pd/api/pdpb"
+     "titankv/pd/tso"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency" // 确保包含这个
 	"go.etcd.io/etcd/server/v3/embed"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 const (
 	etcdTimeout = 3 * time.Second
 )
 
 type Server struct {
+     pdpb.UnimplementedPDServer // 实现 gRPC 接口
 	cfg      *Config
 	etcd     *embed.Etcd
 	client   *clientv3.Client
@@ -26,6 +33,7 @@ type Server struct {
 	// 用于通知退出的 Context
 	ctx      context.Context
 	cancel   context.CancelFunc
+	tso *tso.Allocator
 }
 
 func NewServer(cfg *Config) *Server {
@@ -71,7 +79,8 @@ func (s *Server) Run() error {
 		return err
 	}
 	s.client = client
-
+	// 初始化 TSO
+     s.tso = tso.NewAllocator(s.client)
 	// 5. 启动竞选 Loop (异步)
 	go s.campaignLoop()
 
@@ -123,6 +132,20 @@ func (s *Server) campaignLoop() {
 		log.Println("I am the Leader!")
 		atomic.StoreInt64(&s.isLeader, 1)
 
+          // 【新增】当选 Leader 后，初始化 TSO
+        	// 这一步会从 Etcd 读取旧时间，防止时间倒流
+        	if err := s.tso.Initialize(s.ctx); err != nil {
+            	log.Printf("Failed to initialize TSO: %v", err)
+            	// 初始化失败应立即放弃 Leader 身份
+            	atomic.StoreInt64(&s.isLeader, 0)
+            	session.Close()
+            	continue
+        	}
+
+        	// 启动同步循环
+        	tsoCtx, tsoCancel := context.WithCancel(s.ctx)
+        	go s.tso.SyncLoop(tsoCtx)
+
 		// 5. 阻塞直到 Session 过期或被取消 (Resign)
 		// 只要 Session 还在，我就一直是 Leader
 		select {
@@ -132,8 +155,34 @@ func (s *Server) campaignLoop() {
 			log.Println("Server stopping, stepping down")
 		}
 
-		// 6. 退位
-		atomic.StoreInt64(&s.isLeader, 0)
+        	// 退位
+        	tsoCancel() // 停止 TSO 同步
+        	atomic.StoreInt64(&s.isLeader, 0)
 		session.Close()
 	}
+}
+
+
+// --- 实现 gRPC 接口 ---
+
+func (s *Server) GetTS(ctx context.Context, req *pdpb.GetTSRequest) (*pdpb.GetTSResponse, error) {
+    // 1. 检查是否是 Leader
+    if !s.IsLeader() {
+        // 生产环境应该返回 Leader 的地址让 Client 重定向
+        return nil, status.Error(codes.Unavailable, "not leader")
+    }
+
+    // 2. 分配时间戳
+    count := req.Count
+    if count == 0 { count = 1 }
+    
+    ts, err := s.tso.Generate(count)
+    if err != nil {
+        return nil, status.Error(codes.Internal, err.Error())
+    }
+
+    return &pdpb.GetTSResponse{
+        Timestamp: &ts,
+        Count:     count,
+    }, nil
 }

@@ -1,0 +1,24 @@
+syntax = "proto3";
+package pdpb;
+option go_package = "titankv/pd/api/pdpb";
+
+service PD {
+    // 获取时间戳
+    rpc GetTS(GetTSRequest) returns (GetTSResponse);
+    
+    // ... 后续还会添加心跳等接口 ...
+}
+
+message GetTSRequest {
+    uint32 count = 1; // 一次申请多少个 TS (通常是 1 个，用于批处理优化)
+}
+
+message Timestamp {
+    int64 physical = 1; // 物理时钟 (毫秒)
+    int64 logical  = 2; // 逻辑时钟
+}
+
+message GetTSResponse {
+    Timestamp timestamp = 1; // 返回的起始时间戳
+    uint32 count = 2;        // 返回的数量
+}
