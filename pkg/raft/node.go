@@ -485,3 +485,7 @@ func (tr *TitanRaft) processSnapshot(snap raftpb.Snapshot) {
 	atomic.StoreUint64(&tr.lastApplied, snap.Metadata.Index)
 	tr.applyCond.Broadcast()
 }
+
+func (tr *TitanRaft) Stop() {
+    tr.Node.Stop()
+}

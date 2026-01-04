@@ -113,17 +113,31 @@ func main() {
 
 	titankvpb.RegisterTitanKVServer(grpcServer, titanServer)
 
-	// 6. 优雅关闭
+	// 6. 优雅关闭控制
+	// 使用一个 channel 来通知 main 函数可以退出了
+	done := make(chan struct{})
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		<-sigCh
 		log.Println("Shutting down gRPC server...")
 		grpcServer.GracefulStop()
+		// 显式停止 Raft 节点
+		log.Println("Stopping Raft Node...")
+		raftNode.Stop() // 需要在 TitanRaft 中实现 Stop
+		
+		close(done)
 	}()
 
 	log.Printf("Server listening on port %d", *port)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
+
+	// 等待关闭信号完成
+	<-done
+	
+	// defer db.Close() 会在这里执行
+	// 此时 Raft 已经停了，不会再有并发写入，DB 可以安全析构
+    log.Println("TitanKV Server exit.")
 }
