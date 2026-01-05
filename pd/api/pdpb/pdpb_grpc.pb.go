@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PD_GetTS_FullMethodName          = "/pdpb.PD/GetTS"
-	PD_PutStore_FullMethodName       = "/pdpb.PD/PutStore"
-	PD_StoreHeartbeat_FullMethodName = "/pdpb.PD/StoreHeartbeat"
-	PD_AllocID_FullMethodName        = "/pdpb.PD/AllocID"
+	PD_GetTS_FullMethodName           = "/pdpb.PD/GetTS"
+	PD_PutStore_FullMethodName        = "/pdpb.PD/PutStore"
+	PD_StoreHeartbeat_FullMethodName  = "/pdpb.PD/StoreHeartbeat"
+	PD_AllocID_FullMethodName         = "/pdpb.PD/AllocID"
+	PD_GetRegion_FullMethodName       = "/pdpb.PD/GetRegion"
+	PD_RegionHeartbeat_FullMethodName = "/pdpb.PD/RegionHeartbeat"
 )
 
 // PDClient is the client API for PD service.
@@ -34,6 +36,8 @@ type PDClient interface {
 	PutStore(ctx context.Context, in *PutStoreRequest, opts ...grpc.CallOption) (*PutStoreResponse, error)
 	StoreHeartbeat(ctx context.Context, in *StoreHeartbeatRequest, opts ...grpc.CallOption) (*StoreHeartbeatResponse, error)
 	AllocID(ctx context.Context, in *AllocIDRequest, opts ...grpc.CallOption) (*AllocIDResponse, error)
+	GetRegion(ctx context.Context, in *GetRegionRequest, opts ...grpc.CallOption) (*GetRegionResponse, error)
+	RegionHeartbeat(ctx context.Context, in *RegionHeartbeatRequest, opts ...grpc.CallOption) (*RegionHeartbeatResponse, error)
 }
 
 type pDClient struct {
@@ -84,6 +88,26 @@ func (c *pDClient) AllocID(ctx context.Context, in *AllocIDRequest, opts ...grpc
 	return out, nil
 }
 
+func (c *pDClient) GetRegion(ctx context.Context, in *GetRegionRequest, opts ...grpc.CallOption) (*GetRegionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRegionResponse)
+	err := c.cc.Invoke(ctx, PD_GetRegion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pDClient) RegionHeartbeat(ctx context.Context, in *RegionHeartbeatRequest, opts ...grpc.CallOption) (*RegionHeartbeatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegionHeartbeatResponse)
+	err := c.cc.Invoke(ctx, PD_RegionHeartbeat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PDServer is the server API for PD service.
 // All implementations must embed UnimplementedPDServer
 // for forward compatibility.
@@ -93,6 +117,8 @@ type PDServer interface {
 	PutStore(context.Context, *PutStoreRequest) (*PutStoreResponse, error)
 	StoreHeartbeat(context.Context, *StoreHeartbeatRequest) (*StoreHeartbeatResponse, error)
 	AllocID(context.Context, *AllocIDRequest) (*AllocIDResponse, error)
+	GetRegion(context.Context, *GetRegionRequest) (*GetRegionResponse, error)
+	RegionHeartbeat(context.Context, *RegionHeartbeatRequest) (*RegionHeartbeatResponse, error)
 	mustEmbedUnimplementedPDServer()
 }
 
@@ -114,6 +140,12 @@ func (UnimplementedPDServer) StoreHeartbeat(context.Context, *StoreHeartbeatRequ
 }
 func (UnimplementedPDServer) AllocID(context.Context, *AllocIDRequest) (*AllocIDResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AllocID not implemented")
+}
+func (UnimplementedPDServer) GetRegion(context.Context, *GetRegionRequest) (*GetRegionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRegion not implemented")
+}
+func (UnimplementedPDServer) RegionHeartbeat(context.Context, *RegionHeartbeatRequest) (*RegionHeartbeatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegionHeartbeat not implemented")
 }
 func (UnimplementedPDServer) mustEmbedUnimplementedPDServer() {}
 func (UnimplementedPDServer) testEmbeddedByValue()            {}
@@ -208,6 +240,42 @@ func _PD_AllocID_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PD_GetRegion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRegionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDServer).GetRegion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PD_GetRegion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDServer).GetRegion(ctx, req.(*GetRegionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PD_RegionHeartbeat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegionHeartbeatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PDServer).RegionHeartbeat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PD_RegionHeartbeat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PDServer).RegionHeartbeat(ctx, req.(*RegionHeartbeatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PD_ServiceDesc is the grpc.ServiceDesc for PD service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -230,6 +298,14 @@ var PD_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AllocID",
 			Handler:    _PD_AllocID_Handler,
+		},
+		{
+			MethodName: "GetRegion",
+			Handler:    _PD_GetRegion_Handler,
+		},
+		{
+			MethodName: "RegionHeartbeat",
+			Handler:    _PD_RegionHeartbeat_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

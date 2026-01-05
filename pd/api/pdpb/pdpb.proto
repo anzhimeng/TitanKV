@@ -9,6 +9,9 @@ service PD {
     rpc PutStore(PutStoreRequest) returns (PutStoreResponse);
     rpc StoreHeartbeat(StoreHeartbeatRequest) returns (StoreHeartbeatResponse);
     rpc AllocID(AllocIDRequest) returns (AllocIDResponse);
+    
+    rpc GetRegion(GetRegionRequest) returns (GetRegionResponse);
+    rpc RegionHeartbeat(RegionHeartbeatRequest) returns (RegionHeartbeatResponse);
 }
 
 
@@ -69,4 +72,56 @@ message Timestamp {
 message GetTSResponse {
     Timestamp timestamp = 1; // 返回的起始时间戳
     uint32 count = 2;        // 返回的数量
+}
+
+message Region {
+    uint64 id = 1;
+    // Range: [start_key, end_key)
+    bytes start_key = 2;
+    bytes end_key = 3;
+    
+    RegionEpoch region_epoch = 4; // 版本控制，防止脑裂和过时路由
+    repeated Peer peers = 5;
+}
+
+message Peer {
+    uint64 id = 1;
+    uint64 store_id = 2;
+    // bool is_learner = 3; // 进阶：Learner 角色
+}
+
+// Region 版本，用于 Split/Merge 保护
+message RegionEpoch {
+    // 配置变更版本 (AddPeer/RemovePeer)
+    uint64 conf_ver = 1;
+    // 分裂/合并版本 (Split/Merge)
+    uint64 version = 2;
+}
+
+message GetRegionRequest {
+    bytes key = 1;
+}
+message GetRegionResponse {
+    Region region = 1;
+    Peer leader = 2; // 告诉 Client 谁是 Leader
+}
+
+message RegionHeartbeatRequest {
+    // Region 的元数据 (Range, Epoch, Peers)
+    Region region = 1;
+    
+    // 当前的 Leader 是谁
+    Peer leader = 2;
+    
+    // --- 以下字段用于 Week 9 调度 (Day 4 先占位) ---
+    // Region 的大概大小 (MB)
+    uint64 approximate_size = 3;
+    // Region 包含的 Key 数量
+    uint64 approximate_keys = 4;
+}
+
+message RegionHeartbeatResponse {
+    // Week 9: 这里会返回调度指令 (如 TransferLeader, AddPeer)
+    // Day 4: 暂时为空
+    uint64 timestamp = 1; // 可选：返回一个 TSO 用于校准
 }

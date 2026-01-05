@@ -670,6 +670,405 @@ func (x *GetTSResponse) GetCount() uint32 {
 	return 0
 }
 
+type Region struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Range: [start_key, end_key)
+	StartKey      []byte       `protobuf:"bytes,2,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
+	EndKey        []byte       `protobuf:"bytes,3,opt,name=end_key,json=endKey,proto3" json:"end_key,omitempty"`
+	RegionEpoch   *RegionEpoch `protobuf:"bytes,4,opt,name=region_epoch,json=regionEpoch,proto3" json:"region_epoch,omitempty"` // 版本控制，防止脑裂和过时路由
+	Peers         []*Peer      `protobuf:"bytes,5,rep,name=peers,proto3" json:"peers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Region) Reset() {
+	*x = Region{}
+	mi := &file_pdpb_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Region) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Region) ProtoMessage() {}
+
+func (x *Region) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Region.ProtoReflect.Descriptor instead.
+func (*Region) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Region) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *Region) GetStartKey() []byte {
+	if x != nil {
+		return x.StartKey
+	}
+	return nil
+}
+
+func (x *Region) GetEndKey() []byte {
+	if x != nil {
+		return x.EndKey
+	}
+	return nil
+}
+
+func (x *Region) GetRegionEpoch() *RegionEpoch {
+	if x != nil {
+		return x.RegionEpoch
+	}
+	return nil
+}
+
+func (x *Region) GetPeers() []*Peer {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+type Peer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	StoreId       uint64                 `protobuf:"varint,2,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"` // bool is_learner = 3; // 进阶：Learner 角色
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Peer) Reset() {
+	*x = Peer{}
+	mi := &file_pdpb_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Peer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Peer) ProtoMessage() {}
+
+func (x *Peer) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Peer.ProtoReflect.Descriptor instead.
+func (*Peer) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Peer) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *Peer) GetStoreId() uint64 {
+	if x != nil {
+		return x.StoreId
+	}
+	return 0
+}
+
+// Region 版本，用于 Split/Merge 保护
+type RegionEpoch struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 配置变更版本 (AddPeer/RemovePeer)
+	ConfVer uint64 `protobuf:"varint,1,opt,name=conf_ver,json=confVer,proto3" json:"conf_ver,omitempty"`
+	// 分裂/合并版本 (Split/Merge)
+	Version       uint64 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionEpoch) Reset() {
+	*x = RegionEpoch{}
+	mi := &file_pdpb_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionEpoch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionEpoch) ProtoMessage() {}
+
+func (x *RegionEpoch) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionEpoch.ProtoReflect.Descriptor instead.
+func (*RegionEpoch) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *RegionEpoch) GetConfVer() uint64 {
+	if x != nil {
+		return x.ConfVer
+	}
+	return 0
+}
+
+func (x *RegionEpoch) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+type GetRegionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           []byte                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRegionRequest) Reset() {
+	*x = GetRegionRequest{}
+	mi := &file_pdpb_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRegionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRegionRequest) ProtoMessage() {}
+
+func (x *GetRegionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRegionRequest.ProtoReflect.Descriptor instead.
+func (*GetRegionRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetRegionRequest) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+type GetRegionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Region        *Region                `protobuf:"bytes,1,opt,name=region,proto3" json:"region,omitempty"`
+	Leader        *Peer                  `protobuf:"bytes,2,opt,name=leader,proto3" json:"leader,omitempty"` // 告诉 Client 谁是 Leader
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRegionResponse) Reset() {
+	*x = GetRegionResponse{}
+	mi := &file_pdpb_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRegionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRegionResponse) ProtoMessage() {}
+
+func (x *GetRegionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRegionResponse.ProtoReflect.Descriptor instead.
+func (*GetRegionResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetRegionResponse) GetRegion() *Region {
+	if x != nil {
+		return x.Region
+	}
+	return nil
+}
+
+func (x *GetRegionResponse) GetLeader() *Peer {
+	if x != nil {
+		return x.Leader
+	}
+	return nil
+}
+
+type RegionHeartbeatRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Region 的元数据 (Range, Epoch, Peers)
+	Region *Region `protobuf:"bytes,1,opt,name=region,proto3" json:"region,omitempty"`
+	// 当前的 Leader 是谁
+	Leader *Peer `protobuf:"bytes,2,opt,name=leader,proto3" json:"leader,omitempty"`
+	// --- 以下字段用于 Week 9 调度 (Day 4 先占位) ---
+	// Region 的大概大小 (MB)
+	ApproximateSize uint64 `protobuf:"varint,3,opt,name=approximate_size,json=approximateSize,proto3" json:"approximate_size,omitempty"`
+	// Region 包含的 Key 数量
+	ApproximateKeys uint64 `protobuf:"varint,4,opt,name=approximate_keys,json=approximateKeys,proto3" json:"approximate_keys,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RegionHeartbeatRequest) Reset() {
+	*x = RegionHeartbeatRequest{}
+	mi := &file_pdpb_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionHeartbeatRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionHeartbeatRequest) ProtoMessage() {}
+
+func (x *RegionHeartbeatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionHeartbeatRequest.ProtoReflect.Descriptor instead.
+func (*RegionHeartbeatRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RegionHeartbeatRequest) GetRegion() *Region {
+	if x != nil {
+		return x.Region
+	}
+	return nil
+}
+
+func (x *RegionHeartbeatRequest) GetLeader() *Peer {
+	if x != nil {
+		return x.Leader
+	}
+	return nil
+}
+
+func (x *RegionHeartbeatRequest) GetApproximateSize() uint64 {
+	if x != nil {
+		return x.ApproximateSize
+	}
+	return 0
+}
+
+func (x *RegionHeartbeatRequest) GetApproximateKeys() uint64 {
+	if x != nil {
+		return x.ApproximateKeys
+	}
+	return 0
+}
+
+type RegionHeartbeatResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Week 9: 这里会返回调度指令 (如 TransferLeader, AddPeer)
+	// Day 4: 暂时为空
+	Timestamp     uint64 `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // 可选：返回一个 TSO 用于校准
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionHeartbeatResponse) Reset() {
+	*x = RegionHeartbeatResponse{}
+	mi := &file_pdpb_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionHeartbeatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionHeartbeatResponse) ProtoMessage() {}
+
+func (x *RegionHeartbeatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionHeartbeatResponse.ProtoReflect.Descriptor instead.
+func (*RegionHeartbeatResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RegionHeartbeatResponse) GetTimestamp() uint64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
 var File_pdpb_proto protoreflect.FileDescriptor
 
 const file_pdpb_proto_rawDesc = "" +
@@ -710,17 +1109,46 @@ const file_pdpb_proto_rawDesc = "" +
 	"\alogical\x18\x02 \x01(\x03R\alogical\"T\n" +
 	"\rGetTSResponse\x12-\n" +
 	"\ttimestamp\x18\x01 \x01(\v2\x0f.pdpb.TimestampR\ttimestamp\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\rR\x05count*0\n" +
+	"\x05count\x18\x02 \x01(\rR\x05count\"\xa6\x01\n" +
+	"\x06Region\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x1b\n" +
+	"\tstart_key\x18\x02 \x01(\fR\bstartKey\x12\x17\n" +
+	"\aend_key\x18\x03 \x01(\fR\x06endKey\x124\n" +
+	"\fregion_epoch\x18\x04 \x01(\v2\x11.pdpb.RegionEpochR\vregionEpoch\x12 \n" +
+	"\x05peers\x18\x05 \x03(\v2\n" +
+	".pdpb.PeerR\x05peers\"1\n" +
+	"\x04Peer\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x19\n" +
+	"\bstore_id\x18\x02 \x01(\x04R\astoreId\"B\n" +
+	"\vRegionEpoch\x12\x19\n" +
+	"\bconf_ver\x18\x01 \x01(\x04R\aconfVer\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x04R\aversion\"$\n" +
+	"\x10GetRegionRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\fR\x03key\"]\n" +
+	"\x11GetRegionResponse\x12$\n" +
+	"\x06region\x18\x01 \x01(\v2\f.pdpb.RegionR\x06region\x12\"\n" +
+	"\x06leader\x18\x02 \x01(\v2\n" +
+	".pdpb.PeerR\x06leader\"\xb8\x01\n" +
+	"\x16RegionHeartbeatRequest\x12$\n" +
+	"\x06region\x18\x01 \x01(\v2\f.pdpb.RegionR\x06region\x12\"\n" +
+	"\x06leader\x18\x02 \x01(\v2\n" +
+	".pdpb.PeerR\x06leader\x12)\n" +
+	"\x10approximate_size\x18\x03 \x01(\x04R\x0fapproximateSize\x12)\n" +
+	"\x10approximate_keys\x18\x04 \x01(\x04R\x0fapproximateKeys\"7\n" +
+	"\x17RegionHeartbeatResponse\x12\x1c\n" +
+	"\ttimestamp\x18\x01 \x01(\x04R\ttimestamp*0\n" +
 	"\n" +
 	"StoreState\x12\x06\n" +
 	"\x02UP\x10\x00\x12\v\n" +
 	"\aOFFLINE\x10\x01\x12\r\n" +
-	"\tTOMBSTONE\x10\x022\xf6\x01\n" +
+	"\tTOMBSTONE\x10\x022\x84\x03\n" +
 	"\x02PD\x120\n" +
 	"\x05GetTS\x12\x12.pdpb.GetTSRequest\x1a\x13.pdpb.GetTSResponse\x129\n" +
 	"\bPutStore\x12\x15.pdpb.PutStoreRequest\x1a\x16.pdpb.PutStoreResponse\x12K\n" +
 	"\x0eStoreHeartbeat\x12\x1b.pdpb.StoreHeartbeatRequest\x1a\x1c.pdpb.StoreHeartbeatResponse\x126\n" +
-	"\aAllocID\x12\x14.pdpb.AllocIDRequest\x1a\x15.pdpb.AllocIDResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
+	"\aAllocID\x12\x14.pdpb.AllocIDRequest\x1a\x15.pdpb.AllocIDResponse\x12<\n" +
+	"\tGetRegion\x12\x16.pdpb.GetRegionRequest\x1a\x17.pdpb.GetRegionResponse\x12N\n" +
+	"\x0fRegionHeartbeat\x12\x1c.pdpb.RegionHeartbeatRequest\x1a\x1d.pdpb.RegionHeartbeatResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
 
 var (
 	file_pdpb_proto_rawDescOnce sync.Once
@@ -735,21 +1163,28 @@ func file_pdpb_proto_rawDescGZIP() []byte {
 }
 
 var file_pdpb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_pdpb_proto_goTypes = []any{
-	(StoreState)(0),                // 0: pdpb.StoreState
-	(*AllocIDRequest)(nil),         // 1: pdpb.AllocIDRequest
-	(*AllocIDResponse)(nil),        // 2: pdpb.AllocIDResponse
-	(*MetaStore)(nil),              // 3: pdpb.MetaStore
-	(*StoreLabel)(nil),             // 4: pdpb.StoreLabel
-	(*StoreStats)(nil),             // 5: pdpb.StoreStats
-	(*PutStoreRequest)(nil),        // 6: pdpb.PutStoreRequest
-	(*PutStoreResponse)(nil),       // 7: pdpb.PutStoreResponse
-	(*StoreHeartbeatRequest)(nil),  // 8: pdpb.StoreHeartbeatRequest
-	(*StoreHeartbeatResponse)(nil), // 9: pdpb.StoreHeartbeatResponse
-	(*GetTSRequest)(nil),           // 10: pdpb.GetTSRequest
-	(*Timestamp)(nil),              // 11: pdpb.Timestamp
-	(*GetTSResponse)(nil),          // 12: pdpb.GetTSResponse
+	(StoreState)(0),                 // 0: pdpb.StoreState
+	(*AllocIDRequest)(nil),          // 1: pdpb.AllocIDRequest
+	(*AllocIDResponse)(nil),         // 2: pdpb.AllocIDResponse
+	(*MetaStore)(nil),               // 3: pdpb.MetaStore
+	(*StoreLabel)(nil),              // 4: pdpb.StoreLabel
+	(*StoreStats)(nil),              // 5: pdpb.StoreStats
+	(*PutStoreRequest)(nil),         // 6: pdpb.PutStoreRequest
+	(*PutStoreResponse)(nil),        // 7: pdpb.PutStoreResponse
+	(*StoreHeartbeatRequest)(nil),   // 8: pdpb.StoreHeartbeatRequest
+	(*StoreHeartbeatResponse)(nil),  // 9: pdpb.StoreHeartbeatResponse
+	(*GetTSRequest)(nil),            // 10: pdpb.GetTSRequest
+	(*Timestamp)(nil),               // 11: pdpb.Timestamp
+	(*GetTSResponse)(nil),           // 12: pdpb.GetTSResponse
+	(*Region)(nil),                  // 13: pdpb.Region
+	(*Peer)(nil),                    // 14: pdpb.Peer
+	(*RegionEpoch)(nil),             // 15: pdpb.RegionEpoch
+	(*GetRegionRequest)(nil),        // 16: pdpb.GetRegionRequest
+	(*GetRegionResponse)(nil),       // 17: pdpb.GetRegionResponse
+	(*RegionHeartbeatRequest)(nil),  // 18: pdpb.RegionHeartbeatRequest
+	(*RegionHeartbeatResponse)(nil), // 19: pdpb.RegionHeartbeatResponse
 }
 var file_pdpb_proto_depIdxs = []int32{
 	0,  // 0: pdpb.MetaStore.state:type_name -> pdpb.StoreState
@@ -757,19 +1192,29 @@ var file_pdpb_proto_depIdxs = []int32{
 	3,  // 2: pdpb.PutStoreRequest.store:type_name -> pdpb.MetaStore
 	5,  // 3: pdpb.StoreHeartbeatRequest.stats:type_name -> pdpb.StoreStats
 	11, // 4: pdpb.GetTSResponse.timestamp:type_name -> pdpb.Timestamp
-	10, // 5: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
-	6,  // 6: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
-	8,  // 7: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
-	1,  // 8: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
-	12, // 9: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
-	7,  // 10: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
-	9,  // 11: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
-	2,  // 12: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
-	9,  // [9:13] is the sub-list for method output_type
-	5,  // [5:9] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	15, // 5: pdpb.Region.region_epoch:type_name -> pdpb.RegionEpoch
+	14, // 6: pdpb.Region.peers:type_name -> pdpb.Peer
+	13, // 7: pdpb.GetRegionResponse.region:type_name -> pdpb.Region
+	14, // 8: pdpb.GetRegionResponse.leader:type_name -> pdpb.Peer
+	13, // 9: pdpb.RegionHeartbeatRequest.region:type_name -> pdpb.Region
+	14, // 10: pdpb.RegionHeartbeatRequest.leader:type_name -> pdpb.Peer
+	10, // 11: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
+	6,  // 12: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
+	8,  // 13: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
+	1,  // 14: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
+	16, // 15: pdpb.PD.GetRegion:input_type -> pdpb.GetRegionRequest
+	18, // 16: pdpb.PD.RegionHeartbeat:input_type -> pdpb.RegionHeartbeatRequest
+	12, // 17: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
+	7,  // 18: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
+	9,  // 19: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
+	2,  // 20: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
+	17, // 21: pdpb.PD.GetRegion:output_type -> pdpb.GetRegionResponse
+	19, // 22: pdpb.PD.RegionHeartbeat:output_type -> pdpb.RegionHeartbeatResponse
+	17, // [17:23] is the sub-list for method output_type
+	11, // [11:17] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_pdpb_proto_init() }
@@ -783,7 +1228,7 @@ func file_pdpb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pdpb_proto_rawDesc), len(file_pdpb_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
