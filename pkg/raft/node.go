@@ -169,7 +169,7 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 	}
     initialRegion := &pdpb.Region{
     	Id: 1,
-    	RegionEpoch: &pdpb.RegionEpoch{ConfVer: 1, Version: 1},
+    	RegionEpoch: &pdpb.RegionEpoch{ConfVer: 0, Version: 1},
     	Peers: []*pdpb.Peer{}, // 根据 peers map 填充
     	}
     tr.region.Store(initialRegion)
@@ -688,21 +688,30 @@ func (tr *TitanRaft) sendStoreHeartbeat() {
 	}()
 }
 
-// 【核心】Epoch 检查逻辑
-func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
-    current := tr.region.Load().(*pdpb.Region)
-    
-    // 1. 检查 Version (数据范围版本，Split/Merge 时增加)
-    if reqEpoch.Version != current.RegionEpoch.Version {
-        return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
-    }
 
-    // 2. 检查 ConfVer (成员变更版本，AddPeer/RemovePeer 时增加)
-    if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
-         return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
-    }
-    
-    return nil
+func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
+	val := tr.region.Load()
+	if val == nil {
+		// 还没初始化完成
+		return nil
+	}
+	current := val.(*pdpb.Region)
+
+	// 【新增调试日志】
+	// 生产环境通常不需要，但调试时这能救命
+	// log.Printf("[CheckEpoch] Req: {Ver:%d, Conf:%d} vs Cur: {Ver:%d, Conf:%d}",
+	// 	reqEpoch.Version, reqEpoch.ConfVer,
+	// 	current.RegionEpoch.Version, current.RegionEpoch.ConfVer)
+
+	if reqEpoch.Version != current.RegionEpoch.Version {
+		return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
+	}
+
+	if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
+		return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
+	}
+
+	return nil
 }
 
 // 统一处理配置变更的所有副作用
