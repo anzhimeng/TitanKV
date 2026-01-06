@@ -19,6 +19,10 @@ type StoreInfo struct {
 	Meta         *pdpb.MetaStore
 	Stats        *pdpb.StoreStats
 	LastHeartbeat time.Time
+	// 【新增】实时维护的 Leader 数量
+     LeaderCount int
+     // 【新增】实时维护的 Region 数量 (副本数)
+     RegionCount int 
 }
 
 func NewStoreInfo(meta *pdpb.MetaStore) *StoreInfo {
@@ -48,5 +52,8 @@ func (s *StoreInfo) Clone() *StoreInfo {
 		Meta:          s.Meta, // Meta 通常只读，浅拷贝即可，或者 ProtoClone
 		Stats:         s.Stats,
 		LastHeartbeat: s.LastHeartbeat,
+		// 【新增】
+          LeaderCount:   s.LeaderCount,
+          RegionCount:   s.RegionCount,
 	}
 }

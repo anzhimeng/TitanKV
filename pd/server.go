@@ -101,7 +101,7 @@ func (s *Server) Run() error {
 
 	// 初始化调度器
 	s.coordinator = schedule.NewCoordinator(s.cluster)
-	s.coordinator.AddScheduler(&schedule.DummyScheduler{}) // 注册测试调度器
+	s.coordinator.AddScheduler(schedule.NewBalanceLeaderScheduler()) // 注册测试调度器
 
 	// 6. 启动竞选 Loop (异步)
 	go s.campaignLoop()

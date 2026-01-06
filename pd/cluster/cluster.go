@@ -158,6 +158,34 @@ func (c *RaftCluster) HandleRegionHeartbeat(ctx context.Context, req *pdpb.Regio
 		}
 	}
 	log.Printf("current leader: %v", peer)
+
+    // --- 【新增】更新 Store 的计数器 ---
+    // 1. 如果是旧 Region，先减去旧的计数
+    if exists {
+        if origin.Leader != nil {
+            if store, ok := c.stores[origin.Leader.StoreId]; ok {
+                store.LeaderCount--
+            }
+        }
+        for _, p := range origin.Meta.Peers {
+            if store, ok := c.stores[p.StoreId]; ok {
+                store.RegionCount--
+            }
+        }
+    }
+
+    // 2. 加上新的计数
+    if peer != nil { // peer is current leader
+        if store, ok := c.stores[peer.StoreId]; ok {
+            store.LeaderCount++
+        }
+    }
+    for _, p := range region.Peers {
+         if store, ok := c.stores[p.StoreId]; ok {
+             store.RegionCount++
+         }
+    }
+	
 	// 3. 构建新 RegionInfo
 	newRegionInfo := NewRegionInfo(region, peer)
 	newRegionInfo.ApproximateSize = req.ApproximateSize
