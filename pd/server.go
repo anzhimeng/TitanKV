@@ -11,6 +11,7 @@ import (
      "titankv/pd/tso"
      "titankv/pd/cluster"
      "titankv/pd/id"
+     "titankv/pd/schedule"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency" // 确保包含这个
@@ -38,6 +39,7 @@ type Server struct {
 	tso *tso.Allocator
 	idAllocator *id.Allocator
 	cluster     *cluster.RaftCluster
+	coordinator *schedule.Coordinator
 }
 
 func NewServer(cfg *Config) *Server {
@@ -91,6 +93,9 @@ func (s *Server) Run() error {
      // 如果是新集群，可以容忍空数据
         log.Printf("Load regions warning: %v", err)
      }
+     // 【新增】初始化 Coordinator 并注册调度器
+     s.coordinator = schedule.NewCoordinator(s.cluster)
+     s.coordinator.AddScheduler(&schedule.DummyScheduler{}) // 注册测试调度器
 	// 5. 启动竞选 Loop (异步)
 	go s.campaignLoop()
 
@@ -129,6 +134,10 @@ func (s *Server) campaignLoop() {
 
 		// 2. 创建 Election 对象
 		election := concurrency.NewElection(session, "/pd/leader")
+		
+		// 【新增】启动调度器循环 (伴随 Leader 生命周期)
+          schedCtx, schedCancel := context.WithCancel(s.ctx)
+          go s.coordinator.Run(schedCtx)
 
 		// 3. 开始竞选 (阻塞调用，直到当选)
 		log.Println("Campaigning for leader...")
@@ -166,6 +175,7 @@ func (s *Server) campaignLoop() {
 		}
 
         	// 退位
+        	schedCancel() // 停止调度
         	tsoCancel() // 停止 TSO 同步
         	atomic.StoreInt64(&s.isLeader, 0)
 		session.Close()
