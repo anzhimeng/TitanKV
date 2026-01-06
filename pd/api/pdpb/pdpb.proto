@@ -120,8 +120,24 @@ message RegionHeartbeatRequest {
     uint64 approximate_keys = 4;
 }
 
+message TransferLeader {
+    uint64 peer_id = 1; // 目标 Peer ID
+    uint64 store_id = 2; // 目标 Store ID (辅助校验)
+}
+
+
 message RegionHeartbeatResponse {
-    // Week 9: 这里会返回调度指令 (如 TransferLeader, AddPeer)
-    // Day 4: 暂时为空
     uint64 timestamp = 1; // 可选：返回一个 TSO 用于校准
+    TransferLeader transfer_leader = 2;
+    ChangePeer change_peer = 3;
+}
+
+message ChangePeer {
+    enum ChangeType {
+        ADD_NODE = 0;
+        REMOVE_NODE = 1;
+        // ADD_LEARNER = 2;
+    }
+    ChangeType change_type = 1;
+    Peer peer = 2; // 包含 PeerID 和 StoreID
 }

@@ -70,6 +70,52 @@ func (StoreState) EnumDescriptor() ([]byte, []int) {
 	return file_pdpb_proto_rawDescGZIP(), []int{0}
 }
 
+type ChangePeer_ChangeType int32
+
+const (
+	ChangePeer_ADD_NODE    ChangePeer_ChangeType = 0
+	ChangePeer_REMOVE_NODE ChangePeer_ChangeType = 1 // ADD_LEARNER = 2;
+)
+
+// Enum value maps for ChangePeer_ChangeType.
+var (
+	ChangePeer_ChangeType_name = map[int32]string{
+		0: "ADD_NODE",
+		1: "REMOVE_NODE",
+	}
+	ChangePeer_ChangeType_value = map[string]int32{
+		"ADD_NODE":    0,
+		"REMOVE_NODE": 1,
+	}
+)
+
+func (x ChangePeer_ChangeType) Enum() *ChangePeer_ChangeType {
+	p := new(ChangePeer_ChangeType)
+	*p = x
+	return p
+}
+
+func (x ChangePeer_ChangeType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ChangePeer_ChangeType) Descriptor() protoreflect.EnumDescriptor {
+	return file_pdpb_proto_enumTypes[1].Descriptor()
+}
+
+func (ChangePeer_ChangeType) Type() protoreflect.EnumType {
+	return &file_pdpb_proto_enumTypes[1]
+}
+
+func (x ChangePeer_ChangeType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ChangePeer_ChangeType.Descriptor instead.
+func (ChangePeer_ChangeType) EnumDescriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{20, 0}
+}
+
 type AllocIDRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1023,18 +1069,70 @@ func (x *RegionHeartbeatRequest) GetApproximateKeys() uint64 {
 	return 0
 }
 
-type RegionHeartbeatResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Week 9: 这里会返回调度指令 (如 TransferLeader, AddPeer)
-	// Day 4: 暂时为空
-	Timestamp     uint64 `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // 可选：返回一个 TSO 用于校准
+type TransferLeader struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PeerId        uint64                 `protobuf:"varint,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`    // 目标 Peer ID
+	StoreId       uint64                 `protobuf:"varint,2,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"` // 目标 Store ID (辅助校验)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *TransferLeader) Reset() {
+	*x = TransferLeader{}
+	mi := &file_pdpb_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferLeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferLeader) ProtoMessage() {}
+
+func (x *TransferLeader) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferLeader.ProtoReflect.Descriptor instead.
+func (*TransferLeader) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *TransferLeader) GetPeerId() uint64 {
+	if x != nil {
+		return x.PeerId
+	}
+	return 0
+}
+
+func (x *TransferLeader) GetStoreId() uint64 {
+	if x != nil {
+		return x.StoreId
+	}
+	return 0
+}
+
+type RegionHeartbeatResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp      uint64                 `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // 可选：返回一个 TSO 用于校准
+	TransferLeader *TransferLeader        `protobuf:"bytes,2,opt,name=transfer_leader,json=transferLeader,proto3" json:"transfer_leader,omitempty"`
+	ChangePeer     *ChangePeer            `protobuf:"bytes,3,opt,name=change_peer,json=changePeer,proto3" json:"change_peer,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
 func (x *RegionHeartbeatResponse) Reset() {
 	*x = RegionHeartbeatResponse{}
-	mi := &file_pdpb_proto_msgTypes[18]
+	mi := &file_pdpb_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1046,7 +1144,7 @@ func (x *RegionHeartbeatResponse) String() string {
 func (*RegionHeartbeatResponse) ProtoMessage() {}
 
 func (x *RegionHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pdpb_proto_msgTypes[18]
+	mi := &file_pdpb_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1059,7 +1157,7 @@ func (x *RegionHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegionHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*RegionHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_pdpb_proto_rawDescGZIP(), []int{18}
+	return file_pdpb_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RegionHeartbeatResponse) GetTimestamp() uint64 {
@@ -1067,6 +1165,72 @@ func (x *RegionHeartbeatResponse) GetTimestamp() uint64 {
 		return x.Timestamp
 	}
 	return 0
+}
+
+func (x *RegionHeartbeatResponse) GetTransferLeader() *TransferLeader {
+	if x != nil {
+		return x.TransferLeader
+	}
+	return nil
+}
+
+func (x *RegionHeartbeatResponse) GetChangePeer() *ChangePeer {
+	if x != nil {
+		return x.ChangePeer
+	}
+	return nil
+}
+
+type ChangePeer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChangeType    ChangePeer_ChangeType  `protobuf:"varint,1,opt,name=change_type,json=changeType,proto3,enum=pdpb.ChangePeer_ChangeType" json:"change_type,omitempty"`
+	Peer          *Peer                  `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"` // 包含 PeerID 和 StoreID
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangePeer) Reset() {
+	*x = ChangePeer{}
+	mi := &file_pdpb_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangePeer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangePeer) ProtoMessage() {}
+
+func (x *ChangePeer) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangePeer.ProtoReflect.Descriptor instead.
+func (*ChangePeer) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ChangePeer) GetChangeType() ChangePeer_ChangeType {
+	if x != nil {
+		return x.ChangeType
+	}
+	return ChangePeer_ADD_NODE
+}
+
+func (x *ChangePeer) GetPeer() *Peer {
+	if x != nil {
+		return x.Peer
+	}
+	return nil
 }
 
 var File_pdpb_proto protoreflect.FileDescriptor
@@ -1134,9 +1298,25 @@ const file_pdpb_proto_rawDesc = "" +
 	"\x06leader\x18\x02 \x01(\v2\n" +
 	".pdpb.PeerR\x06leader\x12)\n" +
 	"\x10approximate_size\x18\x03 \x01(\x04R\x0fapproximateSize\x12)\n" +
-	"\x10approximate_keys\x18\x04 \x01(\x04R\x0fapproximateKeys\"7\n" +
+	"\x10approximate_keys\x18\x04 \x01(\x04R\x0fapproximateKeys\"D\n" +
+	"\x0eTransferLeader\x12\x17\n" +
+	"\apeer_id\x18\x01 \x01(\x04R\x06peerId\x12\x19\n" +
+	"\bstore_id\x18\x02 \x01(\x04R\astoreId\"\xa9\x01\n" +
 	"\x17RegionHeartbeatResponse\x12\x1c\n" +
-	"\ttimestamp\x18\x01 \x01(\x04R\ttimestamp*0\n" +
+	"\ttimestamp\x18\x01 \x01(\x04R\ttimestamp\x12=\n" +
+	"\x0ftransfer_leader\x18\x02 \x01(\v2\x14.pdpb.TransferLeaderR\x0etransferLeader\x121\n" +
+	"\vchange_peer\x18\x03 \x01(\v2\x10.pdpb.ChangePeerR\n" +
+	"changePeer\"\x97\x01\n" +
+	"\n" +
+	"ChangePeer\x12<\n" +
+	"\vchange_type\x18\x01 \x01(\x0e2\x1b.pdpb.ChangePeer.ChangeTypeR\n" +
+	"changeType\x12\x1e\n" +
+	"\x04peer\x18\x02 \x01(\v2\n" +
+	".pdpb.PeerR\x04peer\"+\n" +
+	"\n" +
+	"ChangeType\x12\f\n" +
+	"\bADD_NODE\x10\x00\x12\x0f\n" +
+	"\vREMOVE_NODE\x10\x01*0\n" +
 	"\n" +
 	"StoreState\x12\x06\n" +
 	"\x02UP\x10\x00\x12\v\n" +
@@ -1162,59 +1342,66 @@ func file_pdpb_proto_rawDescGZIP() []byte {
 	return file_pdpb_proto_rawDescData
 }
 
-var file_pdpb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_pdpb_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_pdpb_proto_goTypes = []any{
 	(StoreState)(0),                 // 0: pdpb.StoreState
-	(*AllocIDRequest)(nil),          // 1: pdpb.AllocIDRequest
-	(*AllocIDResponse)(nil),         // 2: pdpb.AllocIDResponse
-	(*MetaStore)(nil),               // 3: pdpb.MetaStore
-	(*StoreLabel)(nil),              // 4: pdpb.StoreLabel
-	(*StoreStats)(nil),              // 5: pdpb.StoreStats
-	(*PutStoreRequest)(nil),         // 6: pdpb.PutStoreRequest
-	(*PutStoreResponse)(nil),        // 7: pdpb.PutStoreResponse
-	(*StoreHeartbeatRequest)(nil),   // 8: pdpb.StoreHeartbeatRequest
-	(*StoreHeartbeatResponse)(nil),  // 9: pdpb.StoreHeartbeatResponse
-	(*GetTSRequest)(nil),            // 10: pdpb.GetTSRequest
-	(*Timestamp)(nil),               // 11: pdpb.Timestamp
-	(*GetTSResponse)(nil),           // 12: pdpb.GetTSResponse
-	(*Region)(nil),                  // 13: pdpb.Region
-	(*Peer)(nil),                    // 14: pdpb.Peer
-	(*RegionEpoch)(nil),             // 15: pdpb.RegionEpoch
-	(*GetRegionRequest)(nil),        // 16: pdpb.GetRegionRequest
-	(*GetRegionResponse)(nil),       // 17: pdpb.GetRegionResponse
-	(*RegionHeartbeatRequest)(nil),  // 18: pdpb.RegionHeartbeatRequest
-	(*RegionHeartbeatResponse)(nil), // 19: pdpb.RegionHeartbeatResponse
+	(ChangePeer_ChangeType)(0),      // 1: pdpb.ChangePeer.ChangeType
+	(*AllocIDRequest)(nil),          // 2: pdpb.AllocIDRequest
+	(*AllocIDResponse)(nil),         // 3: pdpb.AllocIDResponse
+	(*MetaStore)(nil),               // 4: pdpb.MetaStore
+	(*StoreLabel)(nil),              // 5: pdpb.StoreLabel
+	(*StoreStats)(nil),              // 6: pdpb.StoreStats
+	(*PutStoreRequest)(nil),         // 7: pdpb.PutStoreRequest
+	(*PutStoreResponse)(nil),        // 8: pdpb.PutStoreResponse
+	(*StoreHeartbeatRequest)(nil),   // 9: pdpb.StoreHeartbeatRequest
+	(*StoreHeartbeatResponse)(nil),  // 10: pdpb.StoreHeartbeatResponse
+	(*GetTSRequest)(nil),            // 11: pdpb.GetTSRequest
+	(*Timestamp)(nil),               // 12: pdpb.Timestamp
+	(*GetTSResponse)(nil),           // 13: pdpb.GetTSResponse
+	(*Region)(nil),                  // 14: pdpb.Region
+	(*Peer)(nil),                    // 15: pdpb.Peer
+	(*RegionEpoch)(nil),             // 16: pdpb.RegionEpoch
+	(*GetRegionRequest)(nil),        // 17: pdpb.GetRegionRequest
+	(*GetRegionResponse)(nil),       // 18: pdpb.GetRegionResponse
+	(*RegionHeartbeatRequest)(nil),  // 19: pdpb.RegionHeartbeatRequest
+	(*TransferLeader)(nil),          // 20: pdpb.TransferLeader
+	(*RegionHeartbeatResponse)(nil), // 21: pdpb.RegionHeartbeatResponse
+	(*ChangePeer)(nil),              // 22: pdpb.ChangePeer
 }
 var file_pdpb_proto_depIdxs = []int32{
 	0,  // 0: pdpb.MetaStore.state:type_name -> pdpb.StoreState
-	4,  // 1: pdpb.MetaStore.labels:type_name -> pdpb.StoreLabel
-	3,  // 2: pdpb.PutStoreRequest.store:type_name -> pdpb.MetaStore
-	5,  // 3: pdpb.StoreHeartbeatRequest.stats:type_name -> pdpb.StoreStats
-	11, // 4: pdpb.GetTSResponse.timestamp:type_name -> pdpb.Timestamp
-	15, // 5: pdpb.Region.region_epoch:type_name -> pdpb.RegionEpoch
-	14, // 6: pdpb.Region.peers:type_name -> pdpb.Peer
-	13, // 7: pdpb.GetRegionResponse.region:type_name -> pdpb.Region
-	14, // 8: pdpb.GetRegionResponse.leader:type_name -> pdpb.Peer
-	13, // 9: pdpb.RegionHeartbeatRequest.region:type_name -> pdpb.Region
-	14, // 10: pdpb.RegionHeartbeatRequest.leader:type_name -> pdpb.Peer
-	10, // 11: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
-	6,  // 12: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
-	8,  // 13: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
-	1,  // 14: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
-	16, // 15: pdpb.PD.GetRegion:input_type -> pdpb.GetRegionRequest
-	18, // 16: pdpb.PD.RegionHeartbeat:input_type -> pdpb.RegionHeartbeatRequest
-	12, // 17: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
-	7,  // 18: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
-	9,  // 19: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
-	2,  // 20: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
-	17, // 21: pdpb.PD.GetRegion:output_type -> pdpb.GetRegionResponse
-	19, // 22: pdpb.PD.RegionHeartbeat:output_type -> pdpb.RegionHeartbeatResponse
-	17, // [17:23] is the sub-list for method output_type
-	11, // [11:17] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	5,  // 1: pdpb.MetaStore.labels:type_name -> pdpb.StoreLabel
+	4,  // 2: pdpb.PutStoreRequest.store:type_name -> pdpb.MetaStore
+	6,  // 3: pdpb.StoreHeartbeatRequest.stats:type_name -> pdpb.StoreStats
+	12, // 4: pdpb.GetTSResponse.timestamp:type_name -> pdpb.Timestamp
+	16, // 5: pdpb.Region.region_epoch:type_name -> pdpb.RegionEpoch
+	15, // 6: pdpb.Region.peers:type_name -> pdpb.Peer
+	14, // 7: pdpb.GetRegionResponse.region:type_name -> pdpb.Region
+	15, // 8: pdpb.GetRegionResponse.leader:type_name -> pdpb.Peer
+	14, // 9: pdpb.RegionHeartbeatRequest.region:type_name -> pdpb.Region
+	15, // 10: pdpb.RegionHeartbeatRequest.leader:type_name -> pdpb.Peer
+	20, // 11: pdpb.RegionHeartbeatResponse.transfer_leader:type_name -> pdpb.TransferLeader
+	22, // 12: pdpb.RegionHeartbeatResponse.change_peer:type_name -> pdpb.ChangePeer
+	1,  // 13: pdpb.ChangePeer.change_type:type_name -> pdpb.ChangePeer.ChangeType
+	15, // 14: pdpb.ChangePeer.peer:type_name -> pdpb.Peer
+	11, // 15: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
+	7,  // 16: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
+	9,  // 17: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
+	2,  // 18: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
+	17, // 19: pdpb.PD.GetRegion:input_type -> pdpb.GetRegionRequest
+	19, // 20: pdpb.PD.RegionHeartbeat:input_type -> pdpb.RegionHeartbeatRequest
+	13, // 21: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
+	8,  // 22: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
+	10, // 23: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
+	3,  // 24: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
+	18, // 25: pdpb.PD.GetRegion:output_type -> pdpb.GetRegionResponse
+	21, // 26: pdpb.PD.RegionHeartbeat:output_type -> pdpb.RegionHeartbeatResponse
+	21, // [21:27] is the sub-list for method output_type
+	15, // [15:21] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_pdpb_proto_init() }
@@ -1227,8 +1414,8 @@ func file_pdpb_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pdpb_proto_rawDesc), len(file_pdpb_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   19,
+			NumEnums:      2,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

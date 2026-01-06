@@ -3,6 +3,7 @@ package schedulers
 import (
 	"log"
 	"sort"
+	"context"
 	"titankv/pd/cluster"
 	"titankv/pd/schedule"
 )
@@ -12,10 +13,16 @@ const (
 	minRegionScoreDiff = 0.2 
 )
 
-type balanceRegionScheduler struct{}
+type IDAllocator interface {
+    Alloc(ctx context.Context) (uint64, error)
+}
 
-func NewBalanceRegionScheduler() schedule.Scheduler {
-	return &balanceRegionScheduler{}
+type balanceRegionScheduler struct{
+    alloc IDAllocator // 【新增】
+}
+
+func NewBalanceRegionScheduler(alloc IDAllocator) schedule.Scheduler {
+    return &balanceRegionScheduler{alloc: alloc}
 }
 
 func (s *balanceRegionScheduler) Name() string {
@@ -63,14 +70,18 @@ func (s *balanceRegionScheduler) Schedule(c *cluster.RaftCluster) *schedule.Oper
         region.Meta.Id, source.Meta.Id, target.Meta.Id, 
         source.GetResourceScore(), target.GetResourceScore())
 
-	// 5. 生成 Operator (MovePeer = Add + Remove)
+    // 5. 生成 Operator (MovePeer = Add + Remove)
     // 我们需要为新 Peer 分配一个 ID (这里暂时 Mock，Day 5 结合 AllocID 完善)
     // 假设我们直接用 target store id 作为 peer id 的基底 (仅演示，实际必须 AllocID)
     // newPeerID := target.Meta.Id * 1000 + region.Meta.Id 
     // 正确做法：应该在 Schedule 接口传入 ID Allocator，或者 Operator 执行时分配。
-    // Day 4 简化：我们生成一个占位符，由 Server 执行时或 Day 5 完善分配逻辑。
-    // 这里暂时填 0，由执行者分配。
-    newPeerID := uint64(0) 
+    // 5. 生成 Operator
+    // 【关键修复】分配真正的 PeerID
+    newPeerID, err := s.alloc.Alloc(context.Background())
+    if err != nil {
+        log.Printf("Failed to alloc peer id: %v", err)
+        return nil
+    }
 
 	return schedule.NewOperator(
 		region.Meta.Id,

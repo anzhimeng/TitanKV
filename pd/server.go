@@ -11,6 +11,7 @@ import (
 	"titankv/pd/cluster"
 	"titankv/pd/id"
 	"titankv/pd/schedule"
+	"titankv/pd/schedule/schedulers" 
 	"titankv/pd/tso"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -79,7 +80,7 @@ func (s *Server) Run() error {
 		return fmt.Errorf("server took too long to start")
 	}
 
-	// 4. 创建连接自己的 Client
+	// 4. 创建 Client
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   s.cfg.ClientUrls,
 		DialTimeout: etcdTimeout,
@@ -94,17 +95,23 @@ func (s *Server) Run() error {
 	s.idAllocator = id.NewAllocator(s.client)
 	s.cluster = cluster.NewRaftCluster(s.client)
 
-	// 预加载元数据 (非 Leader 也可以加载，保持内存最新)
 	if err := s.cluster.Load(s.ctx); err != nil {
 		log.Printf("Load stores warning: %v", err)
 	}
+	// 注意：LoadRegions 是在 Cluster 中定义的，确保那里有这个方法
+	// 如果没有，可以暂且忽略，因为 Heartbeat 会自动补全
+	// if err := s.cluster.LoadRegions(s.ctx); err != nil { ... }
 
 	// 初始化调度器
 	s.coordinator = schedule.NewCoordinator(s.cluster)
-	s.coordinator.AddScheduler(schedule.NewBalanceLeaderScheduler()) // 注册调度器
-	s.coordinator.AddScheduler(schedulers.NewBalanceRegionScheduler())
+	
+	// 【关键修复 1】使用 schedulers 包名
+	s.coordinator.AddScheduler(schedulers.NewBalanceLeaderScheduler())
+	
+	// 【关键修复 2】传入 s.idAllocator
+	s.coordinator.AddScheduler(schedulers.NewBalanceRegionScheduler(s.idAllocator))
 
-	// 6. 启动竞选 Loop (异步)
+	// 6. 启动竞选
 	go s.campaignLoop()
 
 	return nil
@@ -242,28 +249,11 @@ func (s *Server) GetRegion(ctx context.Context, req *pdpb.GetRegionRequest) (*pd
 	}, nil
 }
 
-func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error) {
-	if !s.IsLeader() {
-		return nil, status.Error(codes.Unavailable, "not pd leader")
-	}
-
-	if req.Region == nil {
-		return nil, status.Error(codes.InvalidArgument, "missing region")
-	}
-
-	err := s.cluster.HandleRegionHeartbeat(ctx, req)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	return &pdpb.RegionHeartbeatResponse{}, nil
-}
-
+// 【修复】PutStore 只是单纯的注册 Store，不涉及 Region 和 Operator
 func (s *Server) PutStore(ctx context.Context, req *pdpb.PutStoreRequest) (*pdpb.PutStoreResponse, error) {
 	if !s.IsLeader() {
 		return nil, status.Error(codes.Unavailable, "not pd leader")
 	}
-
 	if err := s.cluster.PutStore(ctx, req.Store); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -274,9 +264,71 @@ func (s *Server) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatReq
 	if !s.IsLeader() {
 		return nil, status.Error(codes.Unavailable, "not pd leader")
 	}
-
 	if err := s.cluster.HandleStoreHeartbeat(req); err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
 	}
 	return &pdpb.StoreHeartbeatResponse{}, nil
+}
+
+// 【修复】RegionHeartbeat 才是处理调度指令的地方
+func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error) {
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not pd leader")
+	}
+	if req.Region == nil {
+		return nil, status.Error(codes.InvalidArgument, "missing region")
+	}
+
+	if err := s.cluster.HandleRegionHeartbeat(ctx, req); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	resp := &pdpb.RegionHeartbeatResponse{}
+
+	// 检查是否有调度指令 (Operator)
+	op := s.coordinator.GetOperator(req.Region.Id)
+	if op != nil {
+		if op.Current < len(op.Steps) {
+			step := op.Steps[op.Current]
+			// 检查是否完成
+			if step.IsFinish(req.Region, req.Leader) {
+				op.Current++
+				if op.Current >= len(op.Steps) {
+					s.coordinator.RemoveOperator(req.Region.Id)
+					log.Printf("[PD] Operator finished: %s", op.String())
+				}
+			} else {
+				// 未完成，下发指令
+				switch step := step.(type) {
+				case *schedule.TransferLeader:
+					for _, p := range req.Region.Peers {
+						if p.StoreId == step.ToStore {
+							resp.TransferLeader = &pdpb.TransferLeader{
+								PeerId:  p.Id,
+								StoreId: step.ToStore,
+							}
+							break
+						}
+					}
+				case *schedule.AddPeer:
+					resp.ChangePeer = &pdpb.ChangePeer{
+						ChangeType: pdpb.ChangePeer_ADD_NODE,
+						Peer:       &pdpb.Peer{Id: step.PeerID, StoreId: step.ToStore},
+					}
+				case *schedule.RemovePeer:
+					for _, p := range req.Region.Peers {
+						if p.StoreId == step.FromStore {
+							resp.ChangePeer = &pdpb.ChangePeer{
+								ChangeType: pdpb.ChangePeer_REMOVE_NODE,
+								Peer:       p,
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return resp, nil
 }

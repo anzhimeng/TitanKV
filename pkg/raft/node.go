@@ -333,12 +333,17 @@ func (tr *TitanRaft) run() {
     // 【新增】Region 心跳定时器 (每 5 秒一次)
     pdHeartbeatTicker := time.NewTicker(5 * time.Second)
     defer pdHeartbeatTicker.Stop()
+    storeHeartbeatTicker := time.NewTicker(10 * time.Second)
+    defer storeHeartbeatTicker.Stop()
 
 	for {
 		select {
 		// 【新增】触发 PD 心跳
           case <-pdHeartbeatTicker.C:
              tr.sendPDHeartbeat()
+          // 【新增】发送 Store 心跳
+          case <-storeHeartbeatTicker.C:
+            tr.sendStoreHeartbeat()
 		case rd := <-tr.Node.Ready():
 			// 1. ReadIndex
 			if len(rd.ReadStates) > 0 {
@@ -374,8 +379,21 @@ func (tr *TitanRaft) run() {
 
 			// 5. Apply
 			for _, entry := range rd.CommittedEntries {
-				tr.processEntry(entry)
-				
+			     if entry.Type == raftpb.EntryConfChange {
+	                    var cc raftpb.ConfChange
+	                    cc.Unmarshal(entry.Data)
+	                    
+	                    // 1. 更新 Raft 内部成员列表
+	                    tr.Node.ApplyConfChange(cc)
+	                    
+	                    // 2. 更新本地维护的 peers 列表 (用于快照和心跳)
+	                    tr.updatePeers(cc)
+	                    
+                    	log.Printf("Applied ConfChange: %v", cc)
+                	} else {
+                		// 普通 Put/Delete
+					tr.processEntry(entry)
+				}
 				currentApplied := tr.getApplied()
 				if entry.Index > currentApplied {
 					atomic.StoreUint64(&tr.lastApplied, entry.Index)
@@ -505,7 +523,31 @@ func (tr *TitanRaft) sendPDHeartbeat() {
     if tr.Node.Status().Lead != tr.ID {
         return
     }
-
+    // 【测试 Hack】: 只有 Node 1 (假设 ID=1) 发送伪造的 Region 心跳
+    /*if tr.ID == 1 {
+        // 模拟报告 10 个 Region
+        for i := uint64(100); i < 110; i++ {
+            fakeRegion := &pdpb.Region{
+                Id:       i,
+                Peers:    []*pdpb.Peer{{Id: i*10 + 1, StoreId: 1}, {Id: i*10 + 2, StoreId: 2}, {Id: i*10 + 3, StoreId: 3}},
+                // 伪造版本
+                RegionEpoch: &pdpb.RegionEpoch{ConfVer: 1, Version: 1},
+            }
+            
+            // 说我是 Leader
+            fakeLeader := &pdpb.Peer{Id: i*10 + 1, StoreId: 1}
+            
+            go func(r *pdpb.Region, l *pdpb.Peer) {
+                req := &pdpb.RegionHeartbeatRequest{
+                    Region:          r,
+                    Leader:          l,
+                    ApproximateSize: 10,
+                }
+                // 发送
+                tr.pdClient.RegionHeartbeat(context.Background(), req)
+            }(fakeRegion, fakeLeader)
+        }
+    }*/
     // 1. 组装 Region 信息
     // 目前我们是单 Raft 组，假设 ID=1，范围是全集
     // 生产环境这些信息应该存储在 Raft Storage 的元数据中
@@ -546,9 +588,98 @@ func (tr *TitanRaft) sendPDHeartbeat() {
         ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
         defer cancel()
         
-        _, err := tr.pdClient.RegionHeartbeat(ctx, req)
+        resp, err := tr.pdClient.RegionHeartbeat(ctx, req)
         if err != nil {
             log.Printf("Failed to send region heartbeat: %v", err)
         }
+        // 【新增】处理调度指令
+        if resp.TransferLeader != nil {
+            log.Printf("Received TransferLeader to peer %d", resp.TransferLeader.PeerId)
+            tr.Node.TransferLeadership(context.Background(), 1, resp.TransferLeader.PeerId)
+        } else if resp.ChangePeer != nil {
+            tr.handleConfChange(resp.ChangePeer)
+        }
     }()
+}
+
+// 处理成员变更
+func (tr *TitanRaft) handleConfChange(cp *pdpb.ChangePeer) {
+    var cc raftpb.ConfChange
+    cc.ID = tr.reqIDGen + 1 // 简单生成个 ID，或者用 atomic
+    cc.NodeID = cp.Peer.Id
+    
+    if cp.ChangeType == pdpb.ChangePeer_ADD_NODE {
+        cc.Type = raftpb.ConfChangeAddNode
+        log.Printf("Received AddPeer %d on store %d", cp.Peer.Id, cp.Peer.StoreId)
+    } else if cp.ChangeType == pdpb.ChangePeer_REMOVE_NODE {
+        cc.Type = raftpb.ConfChangeRemoveNode
+        log.Printf("Received RemovePeer %d on store %d", cp.Peer.Id, cp.Peer.StoreId)
+    }
+
+    // Propose ConfChange
+    if err := tr.Node.ProposeConfChange(context.Background(), cc); err != nil {
+        log.Printf("Failed to propose conf change: %v", err)
+    }
+}
+
+func (tr *TitanRaft) updatePeers(cc raftpb.ConfChange) {
+    if cc.Type == raftpb.ConfChangeAddNode {
+        // 检查是否已存在
+        for _, id := range tr.peers {
+            if id == cc.NodeID { return }
+        }
+        tr.peers = append(tr.peers, cc.NodeID)
+    } else if cc.Type == raftpb.ConfChangeRemoveNode {
+        var newPeers []uint64
+        for _, id := range tr.peers {
+            if id != cc.NodeID {
+                newPeers = append(newPeers, id)
+            }
+        }
+        tr.peers = newPeers
+        
+        // 如果是自己被删除了，关闭节点
+        if cc.NodeID == tr.ID {
+            log.Printf("I have been removed from the cluster! Shutting down...")
+            // tr.Stop() 
+        }
+    }
+}
+
+func (tr *TitanRaft) sendStoreHeartbeat() {
+	// 1. 构造 Store 统计信息
+    // 【修改】titankvpb -> pdpb
+	stats := &pdpb.StoreStats{
+		Capacity:    100 * 1024 * 1024 * 1024,
+		Available:   50 * 1024 * 1024 * 1024,
+		RegionCount: 0,
+	}
+
+	// 2. 发送心跳 (异步)
+	go func() {
+		// A. 先尝试注册 Store
+        // 【修改】titankvpb -> pdpb
+		meta := &pdpb.MetaStore{
+			Id:      tr.ID,
+			Address: "127.0.0.1:????", // 记得这里如果是测试最好填写真实地址或Mock
+			State:   pdpb.StoreState_UP, // 【修改】titankvpb -> pdpb
+		}
+        // 【修改】titankvpb -> pdpb
+		_, err := tr.pdClient.PutStore(context.Background(), &pdpb.PutStoreRequest{Store: meta})
+		if err != nil {
+			log.Printf("PutStore failed: %v", err)
+			return
+		}
+
+		// B. 发送心跳
+        // 【修改】titankvpb -> pdpb
+		req := &pdpb.StoreHeartbeatRequest{
+			StoreId: tr.ID,
+			Stats:   stats,
+		}
+		_, err = tr.pdClient.StoreHeartbeat(context.Background(), req)
+		if err != nil {
+			log.Printf("StoreHeartbeat failed: %v", err)
+		}
+	}()
 }

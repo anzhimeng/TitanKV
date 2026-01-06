@@ -73,9 +73,17 @@ func (c *Coordinator) runSchedulers() {
 	// TODO: 清理已完成或超时的 Operator (Day 5 完善)
 }
 
-// Day 5 接口：获取 Region 的待执行 Operator
+// 获取并移除（消费）Operator 的第一个步骤
+// 注意：工业级实现会更复杂（状态机跟踪），这里简化为每次心跳取一步
 func (c *Coordinator) GetOperator(regionID uint64) *Operator {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.operators[regionID]
+}
+
+// 任务完成或超时移除
+func (c *Coordinator) RemoveOperator(regionID uint64) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    delete(c.operators, regionID)
 }

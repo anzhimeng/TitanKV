@@ -26,11 +26,16 @@ func (s *balanceLeaderScheduler) Name() string {
 func (s *balanceLeaderScheduler) Schedule(c *cluster.RaftCluster) *schedule.Operator {
 	// 1. 获取所有健康的 Store
 	stores := c.GetStores()
+     // 【新增调试】看看 PD 到底看到了几个 Store
+     log.Printf("[Debug] Scheduler saw %d stores", len(stores))
 	var suitableStores []*cluster.StoreInfo
 	for _, store := range stores {
 		if store.GetStatus() == cluster.StoreStatusUp {
 			suitableStores = append(suitableStores, store)
-		}
+		} else {
+            // 【新增调试】看看为什么 Store 不健康
+            log.Printf("[Debug] Store %d is not UP. LastHeartbeat: %v", store.Meta.Id, store.LastHeartbeat)
+        }
 	}
 
 	if len(suitableStores) < 2 {
@@ -46,7 +51,11 @@ func (s *balanceLeaderScheduler) Schedule(c *cluster.RaftCluster) *schedule.Oper
 	// Source: Leader 最多的
 	target := suitableStores[0]
 	source := suitableStores[len(suitableStores)-1]
-
+	// 【新增调试】打印排序后的 Leader 数量
+     if len(suitableStores) >= 2 {
+     log.Printf("[Debug] Source(ID=%d, Leaders=%d) -> Target(ID=%d, Leaders=%d)", 
+             source.Meta.Id, source.LeaderCount, target.Meta.Id, target.LeaderCount)
+     }
 	// 3. 检查阈值
 	if source.LeaderCount-target.LeaderCount < minLeaderBalanceDiff {
 		return nil // 比较平衡，无需调度
