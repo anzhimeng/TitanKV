@@ -16,33 +16,56 @@ service TitanKV {
     rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
 }
 
+message RegionEpoch {
+    uint64 conf_ver = 1;
+    uint64 version = 2;
+}
+
+message Peer {
+    uint64 id = 1;
+    uint64 store_id = 2;
+}
+
+message RegionContext {
+    uint64 region_id = 1;
+    RegionEpoch region_epoch = 2;
+    Peer peer = 3;
+}
+
+// --- 请求/响应定义 ---
+
 message GetRequest {
-    bytes key = 1;
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
 }
 
 message GetResponse {
     bytes value = 1;
-    // 如果找不到，通过 gRPC 错误码 (NotFound) 返回，这里不需要 extra field
 }
 
 message PutRequest {
-    bytes key = 1;
-    bytes value = 2;
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
+    bytes value = 3;
 }
 
 message PutResponse {
-    // 错误码：0=成功, 1=不是Leader
-    int32 err_code = 1; 
-    // 如果不是 Leader，这里返回 Leader 的 Node ID
+    int32 err_code = 1;
     uint64 leader_id = 2;
 }
+
 message DeleteRequest {
-    bytes key = 1;
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
 }
 
-message DeleteResponse {}
+message DeleteResponse {
+    int32 err_code = 1;
+    uint64 leader_id = 2;
+}
 
-// 这一层是给 Raft Log 用的，不直接暴露给外部 Client
+// --- Raft 内部指令 ---
+
 message RaftCommand {
     enum OpType {
         PUT = 0;
@@ -51,13 +74,11 @@ message RaftCommand {
     OpType op = 1;
     bytes key = 2;
     bytes value = 3;
-    uint64 request_id = 4;
 }
 
 message BatchRaftCommand {
     repeated RaftCommand commands = 1;
 }
-
 message RaftMessage {
     // 直接传输序列化后的 etcd/raft/raftpb.Message
     bytes data = 1;

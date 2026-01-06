@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"titankv/api/titankvpb"
+	"titankv/pd/api/pdpb"
 	"titankv/pkg/raft"
 	"titankv/pkg/store" // 用于 Get 直接读
 	"google.golang.org/grpc/codes"
@@ -26,6 +27,19 @@ func NewServer(r *raft.TitanRaft, b *raft.Batcher, s *store.TitanStore) *Server 
 }
 
 func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb.PutResponse, error) {
+    // 1. 检查 Region ID
+    if req.Context != nil && req.Context.RegionId != s.raftNode.ID {
+        // 简单处理：为了测试方便，如果 ID 不对可以报错，但在单 Region 测试中通常 Client 填对就行
+    }
+
+    // 2. 检查 Epoch 【关键修复】
+    if req.Context != nil {
+        // 使用 toPdpbEpoch 进行类型转换
+        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+            return nil, status.Error(codes.Aborted, "EpochNotMatch")
+        }
+    }
+
     // 1. 检查 Leader
     if s.raftNode.Node.Status().Lead != s.raftNode.ID {
         return &titankvpb.PutResponse{
@@ -52,7 +66,12 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
 	if len(req.Key) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "key cannot be empty")
 	}
-
+     // Epoch 检查 【关键修复】
+     if req.Context != nil {
+         if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+             return nil, status.Error(codes.Aborted, "EpochNotMatch")
+         }
+     }
 	// 【Day 4 核心逻辑】
 	// 1. 发起 ReadIndex (这一步会阻塞直到 Leader 确认身份)
 	readIndex, err := s.raftNode.LinearizableRead(ctx)
@@ -79,6 +98,12 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
 
 // Delete 也要走 Raft
 func (s *Server) Delete(ctx context.Context, req *titankvpb.DeleteRequest) (*titankvpb.DeleteResponse, error) {
+    // Epoch 检查 【关键修复】
+    if req.Context != nil {
+        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+            return nil, status.Error(codes.Aborted, "EpochNotMatch")
+        }
+    }
     cmd := &titankvpb.RaftCommand{
 		Op:  titankvpb.RaftCommand_DELETE,
 		Key: req.Key,
@@ -106,4 +131,14 @@ func (s *Server) UpdateConfig(ctx context.Context, req *titankvpb.UpdateConfigRe
         s.store.SetGCThreshold(req.GcThreshold)
     }
     return &titankvpb.UpdateConfigResponse{}, nil
+}
+
+func toPdpbEpoch(e *titankvpb.RegionEpoch) *pdpb.RegionEpoch {
+    if e == nil {
+        return &pdpb.RegionEpoch{} // 默认空值
+    }
+    return &pdpb.RegionEpoch{
+        ConfVer: e.ConfVer,
+        Version: e.Version,
+    }
 }

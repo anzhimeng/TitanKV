@@ -354,3 +354,12 @@ func (c *RaftCluster) GetRegions() []*RegionInfo {
 	}
 	return res
 }
+
+// 仅供测试使用
+func (c *RaftCluster) SetStoreLeaderCountForTest(id uint64, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s, ok := c.stores[id]; ok {
+		s.LeaderCount = count
+	}
+}

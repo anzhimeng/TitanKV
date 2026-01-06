@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
 	"google.golang.org/grpc"
@@ -81,7 +80,28 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 			c.cache.Invalidate(key)
 			continue
 		}
-
+		// 构造请求时带上 Context
+        	region, _ := c.cache.Search(key)
+       	req := &titankvpb.PutRequest{
+          Context: &titankvpb.RegionContext{
+                RegionId:    region.Id,
+                RegionEpoch: region.RegionEpoch, // 带上 Client 认为的版本
+            },
+          Key: key, 
+          Value: value,
+          }
+        
+        resp, err := client.Put(ctx, req)
+        
+        // 检查错误
+        if status.Code(err) == codes.Aborted && status.Convert(err).Message() == "EpochNotMatch" {
+            // 【关键】Epoch 不匹配，说明路由过时了
+            log.Printf("Epoch mismatch for key %s, invalidating cache...", key)
+            c.cache.Invalidate(key)
+            // 下一次循环会去 PD 重新拉取
+            continue
+        }
+		
 		// 3. 处理业务层错误 (NotLeader)
 		if resp.ErrCode == 1 { // Not Leader
 			// Server 告诉我们新 Leader 是谁，更新缓存

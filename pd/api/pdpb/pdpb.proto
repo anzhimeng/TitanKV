@@ -141,3 +141,26 @@ message ChangePeer {
     ChangeType change_type = 1;
     Peer peer = 2; // 包含 PeerID 和 StoreID
 }
+
+message RegionContext {
+    uint64 region_id = 1;
+    RegionEpoch region_epoch = 2; // 客户端持有的版本号
+    Peer peer = 3; // 客户端认为自己正在发给谁
+}
+
+message PutRequest {
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
+    bytes value = 3;
+}
+
+message GetRequest {
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
+}
+
+message DeleteRequest {
+    RegionContext context = 1; // 【新增】
+    bytes key = 2;
+}
+

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"fmt"
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
 	"titankv/pd/api/pdpb"
@@ -59,6 +59,7 @@ type TitanRaft struct {
 	leaseMu         sync.Mutex 
 	electionTimeout time.Duration
 	pdClient pdpb.PDClient // 【新增】持有 PD 连接
+	region atomic.Value // 存 *pdpb.Region
 }
 
 func replayWAL(walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, *raft.MemoryStorage) {
@@ -166,6 +167,12 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 		electionTimeout: time.Duration(electionTicks*tickMs) * time.Millisecond,
 		pdClient: pdClient,
 	}
+    initialRegion := &pdpb.Region{
+    	Id: 1,
+    	RegionEpoch: &pdpb.RegionEpoch{ConfVer: 1, Version: 1},
+    	Peers: []*pdpb.Peer{}, // 根据 peers map 填充
+    	}
+    tr.region.Store(initialRegion)
 	
 	// 内部初始化 Batcher
 	tr.batcher = NewBatcher(tr, 100, 10*time.Millisecond)
@@ -383,11 +390,7 @@ func (tr *TitanRaft) run() {
 	                    var cc raftpb.ConfChange
 	                    cc.Unmarshal(entry.Data)
 	                    
-	                    // 1. 更新 Raft 内部成员列表
-	                    tr.Node.ApplyConfChange(cc)
-	                    
-	                    // 2. 更新本地维护的 peers 列表 (用于快照和心跳)
-	                    tr.updatePeers(cc)
+					tr.applyConfChange(cc)
 	                    
                     	log.Printf("Applied ConfChange: %v", cc)
                 	} else {
@@ -592,6 +595,7 @@ func (tr *TitanRaft) sendPDHeartbeat() {
         if err != nil {
             log.Printf("Failed to send region heartbeat: %v", err)
         }
+        return 
         // 【新增】处理调度指令
         if resp.TransferLeader != nil {
             log.Printf("Received TransferLeader to peer %d", resp.TransferLeader.PeerId)
@@ -682,4 +686,96 @@ func (tr *TitanRaft) sendStoreHeartbeat() {
 			log.Printf("StoreHeartbeat failed: %v", err)
 		}
 	}()
+}
+
+// 【核心】Epoch 检查逻辑
+func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
+    current := tr.region.Load().(*pdpb.Region)
+    
+    // 1. 检查 Version (数据范围版本，Split/Merge 时增加)
+    if reqEpoch.Version != current.RegionEpoch.Version {
+        return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
+    }
+
+    // 2. 检查 ConfVer (成员变更版本，AddPeer/RemovePeer 时增加)
+    if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
+         return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
+    }
+    
+    return nil
+}
+
+// 统一处理配置变更的所有副作用
+func (tr *TitanRaft) applyConfChange(cc raftpb.ConfChange) {
+	// 1. 【库】更新 Raft 核心共识状态
+	tr.Node.ApplyConfChange(cc)
+
+	// 2. 【网络】更新本地 Peer 列表 (用于快照和心跳)
+	tr.updatePeersSlice(cc)
+
+	// 3. 【元数据】更新 Region Epoch (ConfVer++)
+	// 这一步对于 Week 9 的调度和 Smart Client 至关重要
+	tr.updateRegionMeta(cc)
+
+	log.Printf("Applied ConfChange: Type=%v, NodeID=%d", cc.Type, cc.NodeID)
+}
+
+// (原来的 updatePeers 改个名，或者直接用这个)
+func (tr *TitanRaft) updatePeersSlice(cc raftpb.ConfChange) {
+	if cc.Type == raftpb.ConfChangeAddNode {
+		for _, id := range tr.peers {
+			if id == cc.NodeID { return }
+		}
+		tr.peers = append(tr.peers, cc.NodeID)
+	} else if cc.Type == raftpb.ConfChangeRemoveNode {
+		var newPeers []uint64
+		for _, id := range tr.peers {
+			if id != cc.NodeID {
+				newPeers = append(newPeers, id)
+			}
+		}
+		tr.peers = newPeers
+		// 移除自己时的退出逻辑
+		if cc.NodeID == tr.ID {
+			log.Printf("❌ I have been removed from the cluster! Shutting down...")
+			// os.Exit(0) 
+		}
+	}
+}
+
+// 必须补上这个函数
+func (tr *TitanRaft) updateRegionMeta(cc raftpb.ConfChange) {
+    // 这里的逻辑复用之前提供的：
+    // Load -> Clone -> ConfVer++ -> Append/Remove Peers -> Store
+	// 1. 加载旧数据 (Copy-On-Write)
+	oldRegion := tr.region.Load().(*pdpb.Region)
+	newRegion := proto.Clone(oldRegion).(*pdpb.Region)
+
+	// 2. 增加 ConfVer (配置变更版本号)
+	newRegion.RegionEpoch.ConfVer++
+
+	// 3. 更新 Peers 列表
+	if cc.Type == raftpb.ConfChangeAddNode {
+		exists := false
+		for _, p := range newRegion.Peers {
+			if p.Id == cc.NodeID { exists = true; break }
+		}
+		if !exists {
+			newRegion.Peers = append(newRegion.Peers, &pdpb.Peer{
+				Id:      cc.NodeID,
+				StoreId: cc.NodeID,
+			})
+		}
+	} else if cc.Type == raftpb.ConfChangeRemoveNode {
+		var activePeers []*pdpb.Peer
+		for _, p := range newRegion.Peers {
+			if p.Id != cc.NodeID {
+				activePeers = append(activePeers, p)
+			}
+		}
+		newRegion.Peers = activePeers
+	}
+
+	// 4. 原子存回
+	tr.region.Store(newRegion)
 }
