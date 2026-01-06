@@ -57,3 +57,13 @@ func (s *StoreInfo) Clone() *StoreInfo {
           RegionCount:   s.RegionCount,
 	}
 }
+
+// 获取资源分数 (使用率: 0.0 ~ 1.0)
+// 分数越高，说明磁盘越满，越需要把数据搬走
+func (s *StoreInfo) GetResourceScore() float64 {
+    if s.Stats == nil || s.Stats.Capacity == 0 {
+        return 0
+    }
+    used := s.Stats.Capacity - s.Stats.Available
+    return float64(used) / float64(s.Stats.Capacity)
+}

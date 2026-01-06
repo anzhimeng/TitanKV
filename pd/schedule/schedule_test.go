@@ -98,3 +98,56 @@ func TestBalanceLeader(t *testing.T) {
 	
 	t.Logf("Successfully generated operator: %s", op.String())
 }
+
+func TestBalanceRegion(t *testing.T) {
+	c := cluster.NewRaftCluster(nil)
+
+	// Store 1: 满 (100GB / 100GB), Usage = 1.0
+	c.PutStore(context.Background(), &pdpb.MetaStore{Id: 1, Address: "addr1", State: pdpb.StoreState_UP})
+	c.HandleStoreHeartbeat(&pdpb.StoreHeartbeatRequest{
+		StoreId: 1,
+		Stats:   &pdpb.StoreStats{Capacity: 100, Available: 0},
+	})
+
+	// Store 2: 空 (0GB / 100GB), Usage = 0.0
+	c.PutStore(context.Background(), &pdpb.MetaStore{Id: 2, Address: "addr2", State: pdpb.StoreState_UP})
+	c.HandleStoreHeartbeat(&pdpb.StoreHeartbeatRequest{
+		StoreId: 2,
+		Stats:   &pdpb.StoreStats{Capacity: 100, Available: 100},
+	})
+
+	// Region 1 在 Store 1 上
+	req := &pdpb.RegionHeartbeatRequest{
+		Region: &pdpb.Region{
+			Id: 1,
+			Peers: []*pdpb.Peer{{Id: 101, StoreId: 1}}, // 单副本在 Store 1
+		},
+		Leader: &pdpb.Peer{Id: 101, StoreId: 1},
+	}
+	c.HandleRegionHeartbeat(context.Background(), req)
+
+	// 运行调度
+	sched := schedulers.NewBalanceRegionScheduler()
+	op := sched.Schedule(c)
+
+	if op == nil {
+		t.Fatal("Expected balance-region operator, got nil")
+	}
+    
+    // 验证 Operator 步骤
+    if len(op.Steps) != 2 {
+        t.Fatalf("Expected 2 steps (Add+Remove), got %d", len(op.Steps))
+    }
+    
+    addStep, ok := op.Steps[0].(*schedule.AddPeer)
+    if !ok || addStep.ToStore != 2 {
+        t.Error("Step 1 should be AddPeer to Store 2")
+    }
+
+    removeStep, ok2 := op.Steps[1].(*schedule.RemovePeer)
+    if !ok2 || removeStep.FromStore != 1 {
+        t.Error("Step 2 should be RemovePeer from Store 1")
+    }
+
+	t.Logf("Generated Operator: %s", op.String())
+}

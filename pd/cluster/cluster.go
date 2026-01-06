@@ -25,6 +25,7 @@ type RaftCluster struct {
 	stores      map[uint64]*StoreInfo
 	regions     map[uint64]*RegionInfo // ID -> Info
 	regionsTree *RegionTree            // KeyRange -> Info
+	storeRegions map[uint64]map[uint64]struct{}
 }
 
 func NewRaftCluster(client *clientv3.Client) *RaftCluster {
@@ -33,6 +34,7 @@ func NewRaftCluster(client *clientv3.Client) *RaftCluster {
 		stores:      make(map[uint64]*StoreInfo),
 		regions:     make(map[uint64]*RegionInfo),
 		regionsTree: NewRegionTree(),
+		storeRegions: make(map[uint64]map[uint64]struct{}),
 	}
 }
 
@@ -95,13 +97,24 @@ func (c *RaftCluster) PutStore(ctx context.Context, meta *pdpb.MetaStore) error 
 	}
 
 	// 1. 持久化到 Etcd
-	data, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	key := fmt.Sprintf("%s/%d", storePathPrefix, meta.Id)
-	if _, err := c.client.Put(ctx, key, string(data)); err != nil {
-		return err
+	//data, err := json.Marshal(meta)
+	//if err != nil {
+		//return err
+	//}
+	//key := fmt.Sprintf("%s/%d", storePathPrefix, meta.Id)
+	//if _, err := c.client.Put(ctx, key, string(data)); err != nil {
+	//	return err
+	//}
+	// 测试模式 (client == nil)，跳过持久化
+	if c.client != nil {
+		data, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		key := fmt.Sprintf("%s/%d", storePathPrefix, meta.Id)
+		if _, err := c.client.Put(ctx, key, string(data)); err != nil {
+			return err
+		}
 	}
 
 	// 2. 更新内存
@@ -137,6 +150,30 @@ func (c *RaftCluster) GetStores() []*StoreInfo {
 	return stores
 }
 
+// 辅助：更新倒排索引 (Store -> Regions)
+func (c *RaftCluster) updateStoreRegionIndex(regionID uint64, oldPeers []*pdpb.Peer, newPeers []*pdpb.Peer) {
+	// 1. 从旧 Store 中移除
+	for _, p := range oldPeers {
+		storeID := p.StoreId
+		if regionSet, ok := c.storeRegions[storeID]; ok {
+			delete(regionSet, regionID)
+			// 如果空了可以删掉 map，但在频繁变动下保留也无妨
+		}
+	}
+
+	// 2. 添加到新 Store
+	for _, p := range newPeers {
+		storeID := p.StoreId
+		regionSet, ok := c.storeRegions[storeID]
+		if !ok {
+			regionSet = make(map[uint64]struct{})
+			c.storeRegions[storeID] = regionSet
+		}
+		regionSet[regionID] = struct{}{}
+	}
+}
+
+
 // HandleRegionHeartbeat 处理 Region 心跳
 func (c *RaftCluster) HandleRegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) error {
 	c.mu.Lock()
@@ -145,69 +182,110 @@ func (c *RaftCluster) HandleRegionHeartbeat(ctx context.Context, req *pdpb.Regio
 	region := req.Region
 	peer := req.Leader
 
-	// 1. 获取旧信息
 	origin, exists := c.regions[region.Id]
 
-	// 2. 检查 Epoch
 	if exists {
 		if region.RegionEpoch != nil && origin.Meta.RegionEpoch != nil {
 			if region.RegionEpoch.Version < origin.Meta.RegionEpoch.Version ||
 				region.RegionEpoch.ConfVer < origin.Meta.RegionEpoch.ConfVer {
-				return nil // 过期消息
+				return nil
 			}
 		}
 	}
-	log.Printf("current leader: %v", peer)
 
-    // --- 【新增】更新 Store 的计数器 ---
-    // 1. 如果是旧 Region，先减去旧的计数
-    if exists {
-        if origin.Leader != nil {
-            if store, ok := c.stores[origin.Leader.StoreId]; ok {
-                store.LeaderCount--
-            }
-        }
-        for _, p := range origin.Meta.Peers {
-            if store, ok := c.stores[p.StoreId]; ok {
-                store.RegionCount--
-            }
-        }
-    }
+	// 更新倒排索引 (如果 Peer 列表发生了变化，或者这是新 Region)
+	// 简化判断：直接全量更新索引（先删旧的，再加新的），虽然有少许性能损耗但逻辑绝对正确
+	var oldPeers []*pdpb.Peer
+	if exists {
+		oldPeers = origin.Meta.Peers
+	}
+	// 【新增】调用辅助函数更新索引
+	c.updateStoreRegionIndex(region.Id, oldPeers, region.Peers)
 
-    // 2. 加上新的计数
-    if peer != nil { // peer is current leader
-        if store, ok := c.stores[peer.StoreId]; ok {
-            store.LeaderCount++
-        }
-    }
-    for _, p := range region.Peers {
-         if store, ok := c.stores[p.StoreId]; ok {
-             store.RegionCount++
-         }
-    }
-	
-	// 3. 构建新 RegionInfo
+	// 更新 Store 的 LeaderCount / RegionCount (Day 3 的逻辑)
+	if exists {
+		if origin.Leader != nil {
+			if store, ok := c.stores[origin.Leader.StoreId]; ok {
+				store.LeaderCount--
+			}
+		}
+		for _, p := range origin.Meta.Peers {
+			if store, ok := c.stores[p.StoreId]; ok {
+				store.RegionCount--
+			}
+		}
+	}
+
+	if peer != nil {
+		if store, ok := c.stores[peer.StoreId]; ok {
+			store.LeaderCount++
+		}
+	}
+	for _, p := range region.Peers {
+		if store, ok := c.stores[p.StoreId]; ok {
+			store.RegionCount++
+		}
+	}
+
+	// 构建新对象
 	newRegionInfo := NewRegionInfo(region, peer)
 	newRegionInfo.ApproximateSize = req.ApproximateSize
 	newRegionInfo.ApproximateKeys = req.ApproximateKeys
 
-	// 4. 更新内存索引 (Map)
 	c.regions[region.Id] = newRegionInfo
 
-	// 5. 更新内存索引 (B-Tree)
 	if exists && !bytes.Equal(origin.Meta.StartKey, region.StartKey) {
 		c.regionsTree.Remove(origin)
 	}
 	c.regionsTree.Update(newRegionInfo)
 
-	// 6. 持久化
+	// 持久化
 	needPersist := !exists ||
 		(origin.Meta.RegionEpoch.Version != region.RegionEpoch.Version) ||
 		(origin.Meta.RegionEpoch.ConfVer != region.RegionEpoch.ConfVer)
 
 	if needPersist {
 		if err := c.saveRegion(ctx, region); err != nil {
-			log.Printf("[PD] Async save failed: %v", err)
+			// log.Printf(...)
+		}
+	}
+
+	return nil
+}
+
+// 【工业级实现】RandRegionOnStore
+// 利用倒排索引，复杂度从 O(TotalRegions) 降低到 O(StoreRegions)
+func (c *RaftCluster) RandRegionOnStore(storeID uint64, excludeStoreID uint64) *RegionInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 1. 直接获取该 Store 上的 Region 集合
+	regionSet, ok := c.storeRegions[storeID]
+	if !ok || len(regionSet) == 0 {
+		return nil
+	}
+
+	// 2. 利用 Go map 遍历的随机性来选取
+	// 我们遍历这个集合，直到找到一个符合条件的
+	for regionID := range regionSet {
+		region := c.regions[regionID]
+		if region == nil {
+			continue // Should not happen
+		}
+
+		// 3. 检查 excludeStoreID
+		// 我们已经确信该 Region 在 storeID 上（因为是从 storeRegions[storeID] 拿的）
+		// 只需要检查它是否同时在 excludeStoreID 上
+		onTarget := false
+		for _, p := range region.Meta.Peers {
+			if p.StoreId == excludeStoreID {
+				onTarget = true
+				break
+			}
+		}
+
+		if !onTarget {
+			return region.Clone()
 		}
 	}
 
@@ -246,6 +324,10 @@ func (c *RaftCluster) GetRegionByID(id uint64) *RegionInfo {
 
 // 内部辅助：保存 Region 到 Etcd
 func (c *RaftCluster) saveRegion(ctx context.Context, region *pdpb.Region) error {
+	// 【修复 Panic】如果 client 为空，直接返回（测试模式）
+	if c.client == nil {
+		return nil
+	}
 	data, err := json.Marshal(region)
 	if err != nil {
 		return err
