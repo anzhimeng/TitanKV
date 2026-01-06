@@ -2,41 +2,45 @@ package pd
 
 import (
 	"context"
-	"fmt" // 【新增】修复 undefined: fmt
+	"fmt"
 	"log"
 	"sync/atomic"
 	"time"
 
 	"titankv/pd/api/pdpb"
-     "titankv/pd/tso"
-     "titankv/pd/cluster"
-     "titankv/pd/id"
-     "titankv/pd/schedule"
+	"titankv/pd/cluster"
+	"titankv/pd/id"
+	"titankv/pd/schedule"
+	"titankv/pd/tso"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/concurrency" // 确保包含这个
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/server/v3/embed"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
 const (
 	etcdTimeout = 3 * time.Second
 )
 
 type Server struct {
-     pdpb.UnimplementedPDServer // 实现 gRPC 接口
-	cfg      *Config
-	etcd     *embed.Etcd
-	client   *clientv3.Client
-	
+	pdpb.UnimplementedPDServer
+
+	cfg    *Config
+	etcd   *embed.Etcd
+	client *clientv3.Client
+
 	// 原子变量：1 表示我是 Leader，0 表示 Follower
-	isLeader int64 
-	
-	// 用于通知退出的 Context
-	ctx      context.Context
-	cancel   context.CancelFunc
-	tso *tso.Allocator
+	isLeader int64
+
+	// 全局 Context，用于 Server 停止
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// 核心组件
+	tso         *tso.Allocator
 	idAllocator *id.Allocator
 	cluster     *cluster.RaftCluster
 	coordinator *schedule.Coordinator
@@ -75,8 +79,7 @@ func (s *Server) Run() error {
 		return fmt.Errorf("server took too long to start")
 	}
 
-	// 4. 创建连接自己的 Client (用于后续选主和元数据存取)
-	// 因为是连接本地，Endpoints 填 ClientUrls 即可
+	// 4. 创建连接自己的 Client
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   s.cfg.ClientUrls,
 		DialTimeout: etcdTimeout,
@@ -85,18 +88,22 @@ func (s *Server) Run() error {
 		return err
 	}
 	s.client = client
-	// 初始化 TSO
-     s.tso = tso.NewAllocator(s.client)
-     s.idAllocator = id.NewAllocator(s.client)
-	s.cluster = cluster.NewRaftCluster(s.client) 
-	if err := s.cluster.LoadRegions(s.ctx); err != nil {
-     // 如果是新集群，可以容忍空数据
-        log.Printf("Load regions warning: %v", err)
-     }
-     // 【新增】初始化 Coordinator 并注册调度器
-     s.coordinator = schedule.NewCoordinator(s.cluster)
-     s.coordinator.AddScheduler(&schedule.DummyScheduler{}) // 注册测试调度器
-	// 5. 启动竞选 Loop (异步)
+
+	// 5. 初始化核心组件
+	s.tso = tso.NewAllocator(s.client)
+	s.idAllocator = id.NewAllocator(s.client)
+	s.cluster = cluster.NewRaftCluster(s.client)
+
+	// 预加载元数据 (非 Leader 也可以加载，保持内存最新)
+	if err := s.cluster.Load(s.ctx); err != nil {
+		log.Printf("Load stores warning: %v", err)
+	}
+
+	// 初始化调度器
+	s.coordinator = schedule.NewCoordinator(s.cluster)
+	s.coordinator.AddScheduler(&schedule.DummyScheduler{}) // 注册测试调度器
+
+	// 6. 启动竞选 Loop (异步)
 	go s.campaignLoop()
 
 	return nil
@@ -123,9 +130,8 @@ func (s *Server) campaignLoop() {
 			return
 		}
 
-		// 1. 创建 Session (带 TTL 的会话)
-		// 如果 PD 挂了，TTL 过期，Lease 自动释放，其他节点可以抢
-		session, err := concurrency.NewSession(s.client, concurrency.WithTTL(5)) // 5秒 TTL
+		// 1. 创建 Session
+		session, err := concurrency.NewSession(s.client, concurrency.WithTTL(5))
 		if err != nil {
 			log.Printf("Failed to create session: %v", err)
 			time.Sleep(time.Second)
@@ -134,12 +140,8 @@ func (s *Server) campaignLoop() {
 
 		// 2. 创建 Election 对象
 		election := concurrency.NewElection(session, "/pd/leader")
-		
-		// 【新增】启动调度器循环 (伴随 Leader 生命周期)
-          schedCtx, schedCancel := context.WithCancel(s.ctx)
-          go s.coordinator.Run(schedCtx)
 
-		// 3. 开始竞选 (阻塞调用，直到当选)
+		// 3. 开始竞选
 		log.Println("Campaigning for leader...")
 		if err := election.Campaign(s.ctx, s.cfg.Name); err != nil {
 			log.Printf("Campaign failed: %v", err)
@@ -151,22 +153,29 @@ func (s *Server) campaignLoop() {
 		log.Println("I am the Leader!")
 		atomic.StoreInt64(&s.isLeader, 1)
 
-          // 【新增】当选 Leader 后，初始化 TSO
-        	// 这一步会从 Etcd 读取旧时间，防止时间倒流
-        	if err := s.tso.Initialize(s.ctx); err != nil {
-            	log.Printf("Failed to initialize TSO: %v", err)
-            	// 初始化失败应立即放弃 Leader 身份
-            	atomic.StoreInt64(&s.isLeader, 0)
-            	session.Close()
-            	continue
-        	}
+		// 5. 初始化 Leader 独占服务
+		// 初始化 TSO
+		if err := s.tso.Initialize(s.ctx); err != nil {
+			log.Printf("Failed to initialize TSO: %v", err)
+			atomic.StoreInt64(&s.isLeader, 0)
+			session.Close()
+			continue
+		}
 
-        	// 启动同步循环
-        	tsoCtx, tsoCancel := context.WithCancel(s.ctx)
-        	go s.tso.SyncLoop(tsoCtx)
+		// 创建 Leader 专用的 Context，退位时统一取消
+		leaderCtx, cancel := context.WithCancel(s.ctx)
 
-		// 5. 阻塞直到 Session 过期或被取消 (Resign)
-		// 只要 Session 还在，我就一直是 Leader
+		// 启动 TSO 同步循环
+		go s.tso.SyncLoop(leaderCtx)
+		
+		// 启动 调度器循环
+		go s.coordinator.Run(leaderCtx)
+		
+		// 启动 集群监控 (Week 8 Day 3)
+		// 假设你已经在 Cluster 中实现了 StartMonitor
+		// go s.cluster.StartMonitor(leaderCtx) 
+
+		// 6. 阻塞直到 Session 过期
 		select {
 		case <-session.Done():
 			log.Println("Session expired, stepping down")
@@ -174,39 +183,52 @@ func (s *Server) campaignLoop() {
 			log.Println("Server stopping, stepping down")
 		}
 
-        	// 退位
-        	schedCancel() // 停止调度
-        	tsoCancel() // 停止 TSO 同步
-        	atomic.StoreInt64(&s.isLeader, 0)
+		// 7. 退位清理
+		cancel() // 停止 TSO, Coordinator, Monitor
+		atomic.StoreInt64(&s.isLeader, 0)
 		session.Close()
 	}
 }
 
-
 // --- 实现 gRPC 接口 ---
 
 func (s *Server) GetTS(ctx context.Context, req *pdpb.GetTSRequest) (*pdpb.GetTSResponse, error) {
-    // 1. 检查是否是 Leader
-    if !s.IsLeader() {
-        // 生产环境应该返回 Leader 的地址让 Client 重定向
-        return nil, status.Error(codes.Unavailable, "not leader")
-    }
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not pd leader")
+	}
 
-    // 2. 分配时间戳
-    count := req.Count
-    if count == 0 { count = 1 }
-    
-    ts, err := s.tso.Generate(count)
-    if err != nil {
-        return nil, status.Error(codes.Internal, err.Error())
-    }
+	count := req.Count
+	if count == 0 {
+		count = 1
+	}
 
-    return &pdpb.GetTSResponse{
-        Timestamp: &ts,
-        Count:     count,
-    }, nil
+	ts, err := s.tso.Generate(count)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &pdpb.GetTSResponse{
+		Timestamp: &ts,
+		Count:     count,
+	}, nil
 }
+
+func (s *Server) AllocID(ctx context.Context, req *pdpb.AllocIDRequest) (*pdpb.AllocIDResponse, error) {
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not pd leader")
+	}
+
+	id, err := s.idAllocator.Alloc(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &pdpb.AllocIDResponse{Id: id}, nil
+}
+
 func (s *Server) GetRegion(ctx context.Context, req *pdpb.GetRegionRequest) (*pdpb.GetRegionResponse, error) {
+	// 允许 Follower 提供读服务？为了简单，暂时只允许 Leader
+	// 生产环境可以允许 Follower 读，只要元数据是新的
 	if !s.IsLeader() {
 		return nil, status.Error(codes.Unavailable, "not pd leader")
 	}
@@ -234,4 +256,26 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 	}
 
 	return &pdpb.RegionHeartbeatResponse{}, nil
+}
+
+func (s *Server) PutStore(ctx context.Context, req *pdpb.PutStoreRequest) (*pdpb.PutStoreResponse, error) {
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not pd leader")
+	}
+
+	if err := s.cluster.PutStore(ctx, req.Store); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pdpb.PutStoreResponse{}, nil
+}
+
+func (s *Server) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatRequest) (*pdpb.StoreHeartbeatResponse, error) {
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not pd leader")
+	}
+
+	if err := s.cluster.HandleStoreHeartbeat(req); err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	return &pdpb.StoreHeartbeatResponse{}, nil
 }

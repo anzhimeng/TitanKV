@@ -18,11 +18,13 @@ import (
 	"titankv/pkg/raft"
 	"titankv/pkg/service"
 	"titankv/pkg/store"
+	"titankv/pd/api/pdpb"
 
 	"google.golang.org/grpc"
 
 	
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc/credentials/insecure"
      "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -88,10 +90,20 @@ func main() {
         }
     }()
 
+    // 解析 PD 地址 (假设用 --pd 参数，或者复用 --cluster 的解析逻辑，通常 PD 是独立地址)
+    // 这里简单起见，假设 PD 在本地 9000
+    pdAddr := "127.0.0.1:9000"
+    
+    conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+    if err != nil {
+		log.Fatalf("Failed to init pd: %v", err)
+    }
+    pdClient := pdpb.NewPDClient(conn)
+	
 	// 3. 初始化 Raft 节点
 	// 注意：NewTitanRaft 内部现在会自动初始化 Batcher，不需要外部手动创建了
 	log.Printf("Starting Raft Node %d...", *nodeID)
-	raftNode := raft.NewTitanRaft(*nodeID, peers, db, *dbPath)
+	raftNode := raft.NewTitanRaft(*nodeID, peers, db, *dbPath, pdClient)
 	batcher := raft.NewBatcher(raftNode, 500, 10*time.Millisecond)
 	// 4. 监听端口
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))

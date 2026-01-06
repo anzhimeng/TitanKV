@@ -7,36 +7,36 @@ import (
 	"log"
 	"sync"
 	"time"
-
+	"bytes"
 	"titankv/pd/api/pdpb"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const (
-	storePathPrefix = "/pd/stores"
+	storePathPrefix  = "/pd/stores"
 	regionPathPrefix = "/pd/regions"
 )
 
 type RaftCluster struct {
 	client *clientv3.Client
 	mu     sync.RWMutex
-	stores map[uint64]*StoreInfo
-	regions *RegionTree
-	// 【新增】缓存每个 Region 的 Leader
-	// Key: RegionID, Value: Leader Peer
-	leaders map[uint64]*pdpb.Peer
+
+	stores      map[uint64]*StoreInfo
+	regions     map[uint64]*RegionInfo // ID -> Info
+	regionsTree *RegionTree            // KeyRange -> Info
 }
 
 func NewRaftCluster(client *clientv3.Client) *RaftCluster {
 	return &RaftCluster{
-		client: client,
-		stores: make(map[uint64]*StoreInfo),
-		regions: NewRegionTree(),
-		leaders: make(map[uint64]*pdpb.Peer),
+		client:      client,
+		stores:      make(map[uint64]*StoreInfo),
+		regions:     make(map[uint64]*RegionInfo),
+		regionsTree: NewRegionTree(),
 	}
 }
 
-// 启动时加载 Etcd 中的元数据
+// 启动时加载 Etcd 中的 Store 元数据
 func (c *RaftCluster) Load(ctx context.Context) error {
 	resp, err := c.client.Get(ctx, storePathPrefix, clientv3.WithPrefix())
 	if err != nil {
@@ -54,6 +54,34 @@ func (c *RaftCluster) Load(ctx context.Context) error {
 		c.stores[meta.Id] = NewStoreInfo(&meta)
 	}
 	log.Printf("Loaded %d stores from Etcd", len(c.stores))
+	
+	// 顺便加载 Regions
+	return c.loadRegionsLocked(ctx)
+}
+
+// 内部辅助：加载所有 Region (需要在锁内调用，或者由 Load 调用)
+func (c *RaftCluster) loadRegionsLocked(ctx context.Context) error {
+	// 扫描 /pd/regions 前缀的所有 key
+	resp, err := c.client.Get(ctx, regionPathPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+
+	for _, kv := range resp.Kvs {
+		var region pdpb.Region
+		if err := json.Unmarshal(kv.Value, &region); err != nil {
+			continue
+		}
+		
+		// 构造 RegionInfo (启动时 Leader 未知，设为 nil)
+		info := NewRegionInfo(&region, nil)
+		
+		// 更新内存 Map
+		c.regions[region.Id] = info
+		// 更新内存 B-Tree
+		c.regionsTree.Update(info)
+	}
+	log.Printf("Loaded %d regions from Etcd", len(resp.Kvs))
 	return nil
 }
 
@@ -63,7 +91,6 @@ func (c *RaftCluster) PutStore(ctx context.Context, meta *pdpb.MetaStore) error 
 	defer c.mu.Unlock()
 
 	if _, ok := c.stores[meta.Id]; ok {
-		// 已存在，可能只是更新地址，暂不处理
 		return nil
 	}
 
@@ -83,38 +110,31 @@ func (c *RaftCluster) PutStore(ctx context.Context, meta *pdpb.MetaStore) error 
 	return nil
 }
 
+// 处理 Store 心跳 (Day 3 内容)
+func (c *RaftCluster) HandleStoreHeartbeat(req *pdpb.StoreHeartbeatRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	store, ok := c.stores[req.StoreId]
+	if !ok {
+		return fmt.Errorf("store %d not found", req.StoreId)
+	}
+
+	store.LastHeartbeat = time.Now()
+	store.Stats = req.Stats
+	return nil
+}
 
 // 获取所有 Store
 func (c *RaftCluster) GetStores() []*StoreInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	var stores []*StoreInfo
 	for _, s := range c.stores {
 		stores = append(stores, s.Clone())
 	}
 	return stores
-}
-
-
-// 【新增】启动时加载所有 Region
-func (c *RaftCluster) LoadRegions(ctx context.Context) error {
-    // 扫描 /pd/regions 前缀的所有 key
-    resp, err := c.client.Get(ctx, regionPathPrefix, clientv3.WithPrefix())
-    if err != nil {
-        return err
-    }
-
-    for _, kv := range resp.Kvs {
-        var region pdpb.Region
-        if err := json.Unmarshal(kv.Value, &region); err != nil {
-            continue
-        }
-        // 更新内存树
-        c.regions.Update(&region)
-    }
-    log.Printf("Loaded %d regions from Etcd", len(resp.Kvs))
-    return nil
 }
 
 // HandleRegionHeartbeat 处理 Region 心跳
@@ -123,32 +143,77 @@ func (c *RaftCluster) HandleRegionHeartbeat(ctx context.Context, req *pdpb.Regio
 	defer c.mu.Unlock()
 
 	region := req.Region
-	leader := req.Leader
+	peer := req.Leader
 
-	// 1. 检查 Region 有效性 (简单的 Epoch 检查)
-	// 在工业级实现中，如果 PD 发现心跳的 Epoch 小于 PD 缓存的 Epoch，
-	// 说明是过期的心跳，应该忽略或返回错误让 TiKV 更新。
-	// 这里 Day 4 简化：总是信任最新的心跳。
+	// 1. 获取旧信息
+	origin, exists := c.regions[region.Id]
 
-	// 2. 更新内存 B-Tree (RegionTree)
-	// 这会处理 Region 的 StartKey/EndKey 变化（如分裂）
-	c.regions.Update(region)
+	// 2. 检查 Epoch
+	if exists {
+		if region.RegionEpoch != nil && origin.Meta.RegionEpoch != nil {
+			if region.RegionEpoch.Version < origin.Meta.RegionEpoch.Version ||
+				region.RegionEpoch.ConfVer < origin.Meta.RegionEpoch.ConfVer {
+				return nil // 过期消息
+			}
+		}
+	}
+	log.Printf("current leader: %v", peer)
+	// 3. 构建新 RegionInfo
+	newRegionInfo := NewRegionInfo(region, peer)
+	newRegionInfo.ApproximateSize = req.ApproximateSize
+	newRegionInfo.ApproximateKeys = req.ApproximateKeys
 
-	// 3. 更新 Leader 缓存
-	if leader != nil {
-		c.leaders[region.Id] = leader
+	// 4. 更新内存索引 (Map)
+	c.regions[region.Id] = newRegionInfo
+
+	// 5. 更新内存索引 (B-Tree)
+	if exists && !bytes.Equal(origin.Meta.StartKey, region.StartKey) {
+		c.regionsTree.Remove(origin)
+	}
+	c.regionsTree.Update(newRegionInfo)
+
+	// 6. 持久化
+	needPersist := !exists ||
+		(origin.Meta.RegionEpoch.Version != region.RegionEpoch.Version) ||
+		(origin.Meta.RegionEpoch.ConfVer != region.RegionEpoch.ConfVer)
+
+	if needPersist {
+		if err := c.saveRegion(ctx, region); err != nil {
+			log.Printf("[PD] Async save failed: %v", err)
+		}
 	}
 
-	// 4. (可选) 更新统计信息
-	// c.regionStats[region.Id] = req.ApproximateSize ...
+	return nil
+}
 
-	// 5. 持久化 Region 元数据到 Etcd
-	// 注意：频繁写 Etcd 会有性能问题。
-	// 优化策略：只有当 Region 的 Meta (Range, Epoch, Peers) 发生变化时才写。
-	// 如果只是 Leader 变了或者 Size 变了，只更新内存，不写 Etcd。
-	
-	// TODO: 比较新旧 Region，只有变化才 save。为了简单，Day 4 每次都 save。
-	return c.saveRegion(ctx, region)
+// SearchRegion 查找 Key 所在的 Region
+func (c *RaftCluster) SearchRegion(key []byte) *RegionInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.regionsTree.Search(key)
+}
+
+// GetRegion 根据 Key 查找 Region 和 Leader (Client API 用)
+func (c *RaftCluster) GetRegion(key []byte) (*pdpb.Region, *pdpb.Peer) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 1. 从 B-Tree 查找 Region
+	r := c.regionsTree.Search(key) // 【修复】使用 regionsTree
+	if r == nil {
+		return nil, nil
+	}
+
+	// 2. 获取 Leader (直接从 RegionInfo 获取)
+	// 【修复】leaders map 已被移除，直接用 r.Leader
+	return r.Meta, r.Leader
+}
+
+// GetRegionByID
+func (c *RaftCluster) GetRegionByID(id uint64) *RegionInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.regions[id]
 }
 
 // 内部辅助：保存 Region 到 Etcd
@@ -159,40 +224,23 @@ func (c *RaftCluster) saveRegion(ctx context.Context, region *pdpb.Region) error
 	}
 	key := fmt.Sprintf("%s/%d", regionPathPrefix, region.Id)
 
-	// 使用独立的 Context 避免主请求超时导致持久化中断
-	// 但在这个简单的同步实现中，直接用 ctx 也可以，或者用 Background
-	// 为了不阻塞 Heartbeat 的 RPC 返回，最好是异步写，或者用 KV 系统的 Batch Put
-	
-	// 这里演示异步写 (Fire and Forget)，生产环境需要更严谨的错误处理
 	go func() {
-		// 这里的 Timeout 设短一点
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if _, err := c.client.Put(ctx, key, string(data)); err != nil {
 			log.Printf("[PD] Failed to persist region %d: %v", region.Id, err)
 		}
 	}()
-	
 	return nil
 }
 
-// GetRegion 根据 Key 查找 Region 和 Leader
-func (c *RaftCluster) GetRegion(key []byte) (*pdpb.Region, *pdpb.Peer) {
-	// 读锁
+// 供 Week 9 Day 1 调度器使用：获取所有 Region
+func (c *RaftCluster) GetRegions() []*RegionInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	// 1. 从 B-Tree 查找 Region
-	r := c.regions.Search(key)
-	if r == nil {
-		return nil, nil
+	res := make([]*RegionInfo, 0, len(c.regions))
+	for _, r := range c.regions {
+		res = append(res, r.Clone())
 	}
-
-	// 2. 【新增】从 Map 查找 Leader
-	// 注意：如果刚启动还没收到心跳，leader 可能是 nil，Client 端需要处理这种情况（重试）
-	leader := c.leaders[r.Id]
-
-	// 返回副本以防止外部修改内部状态 (虽然 Protobuf 生成的结构体是指针)
-	// 简单的浅拷贝返回即可，因为我们只读
-	return r, leader
+	return res
 }

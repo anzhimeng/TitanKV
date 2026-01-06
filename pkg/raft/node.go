@@ -12,6 +12,7 @@ import (
 
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
+	"titankv/pd/api/pdpb"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/raft/v3"
@@ -57,6 +58,7 @@ type TitanRaft struct {
 	leaseExpiration time.Time
 	leaseMu         sync.Mutex 
 	electionTimeout time.Duration
+	pdClient pdpb.PDClient // 【新增】持有 PD 连接
 }
 
 func replayWAL(walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, *raft.MemoryStorage) {
@@ -100,7 +102,7 @@ func replayWAL(walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, *raft.Memory
 	return w, storage
 }
 
-func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbPath string) *TitanRaft {
+func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbPath string, pdClient pdpb.PDClient) *TitanRaft {
 	walDir := filepath.Join(dbPath, "raft-wal")
 	snapDir := filepath.Join(dbPath, "raft-snap")
 
@@ -162,6 +164,7 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 		walDir:          walDir,
 		readWaitC:       make(map[string]chan uint64),
 		electionTimeout: time.Duration(electionTicks*tickMs) * time.Millisecond,
+		pdClient: pdClient,
 	}
 	
 	// 内部初始化 Batcher
@@ -327,8 +330,15 @@ func (tr *TitanRaft) run() {
 		}
 	}()
 
+    // 【新增】Region 心跳定时器 (每 5 秒一次)
+    pdHeartbeatTicker := time.NewTicker(5 * time.Second)
+    defer pdHeartbeatTicker.Stop()
+
 	for {
 		select {
+		// 【新增】触发 PD 心跳
+          case <-pdHeartbeatTicker.C:
+             tr.sendPDHeartbeat()
 		case rd := <-tr.Node.Ready():
 			// 1. ReadIndex
 			if len(rd.ReadStates) > 0 {
@@ -488,4 +498,57 @@ func (tr *TitanRaft) processSnapshot(snap raftpb.Snapshot) {
 
 func (tr *TitanRaft) Stop() {
     tr.Node.Stop()
+}
+
+func (tr *TitanRaft) sendPDHeartbeat() {
+    // 只有 Leader 才发 Region 心跳
+    if tr.Node.Status().Lead != tr.ID {
+        return
+    }
+
+    // 1. 组装 Region 信息
+    // 目前我们是单 Raft 组，假设 ID=1，范围是全集
+    // 生产环境这些信息应该存储在 Raft Storage 的元数据中
+    region := &pdpb.Region{
+        Id:       1, // Hardcode for Phase 2
+        StartKey: []byte(""),
+        EndKey:   []byte(""),
+        RegionEpoch: &pdpb.RegionEpoch{
+            ConfVer: 1,
+            Version: 1,
+        },
+        // Peers: 应该填入当前配置中的所有 Peer
+        Peers: []*pdpb.Peer{}, 
+    }
+    
+    // 填充 Peers (从 tr.peers 获取)
+    // 注意：我们现在的 tr.peers 只是 ID 列表，Proto 需要 ID + StoreID
+    // 简化：假设 PeerID == StoreID
+    for _, pid := range tr.peers {
+        region.Peers = append(region.Peers, &pdpb.Peer{Id: pid, StoreId: pid})
+    }
+    
+    // 2. 组装 Leader 信息
+    leaderPeer := &pdpb.Peer{Id: tr.ID, StoreId: tr.ID}
+
+    // 3. 统计信息 (调用 C++ 接口获取，这里先 Mock)
+    approxSize := uint64(100) // MB
+    
+    // 4. 发送请求 (异步，不要阻塞 Raft 循环)
+    go func() {
+        req := &pdpb.RegionHeartbeatRequest{
+            Region:          region,
+            Leader:          leaderPeer,
+            ApproximateSize: approxSize,
+        }
+        
+        // 使用短超时
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+        
+        _, err := tr.pdClient.RegionHeartbeat(ctx, req)
+        if err != nil {
+            log.Printf("Failed to send region heartbeat: %v", err)
+        }
+    }()
 }
