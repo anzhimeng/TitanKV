@@ -3,16 +3,17 @@ package raft
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
-	"fmt"
+
 	"titankv/api/titankvpb"
-	"titankv/pkg/store"
 	"titankv/pd/api/pdpb"
+	"titankv/pkg/store"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/raft/v3"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	electionTicks = 20 // 2秒超时，容忍 IO 抖动
+	electionTicks = 20
 	tickMs        = 100
 	
 	// 时钟漂移保护时间
@@ -40,7 +41,7 @@ type TitanRaft struct {
 	snapshotter *snap.Snapshotter
 	fsm         *store.TitanStore
 	transport   *Transport
-	batcher     *Batcher
+	// batcher     *Batcher // 【删除】旧 Batcher 已废弃
 	peers       []uint64
 	walDir      string
 
@@ -58,8 +59,9 @@ type TitanRaft struct {
 	leaseExpiration time.Time
 	leaseMu         sync.Mutex 
 	electionTimeout time.Duration
-	pdClient pdpb.PDClient // 【新增】持有 PD 连接
-	region atomic.Value // 存 *pdpb.Region
+	
+	pdClient pdpb.PDClient
+	region   atomic.Value // 存 *pdpb.Region
 }
 
 func replayWAL(walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, *raft.MemoryStorage) {
@@ -165,17 +167,18 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 		walDir:          walDir,
 		readWaitC:       make(map[string]chan uint64),
 		electionTimeout: time.Duration(electionTicks*tickMs) * time.Millisecond,
-		pdClient: pdClient,
+		pdClient:        pdClient,
 	}
-    initialRegion := &pdpb.Region{
-    	Id: 1,
-    	RegionEpoch: &pdpb.RegionEpoch{ConfVer: 0, Version: 1},
-    	Peers: []*pdpb.Peer{}, // 根据 peers map 填充
-    	}
-    tr.region.Store(initialRegion)
-	
-	// 内部初始化 Batcher
-	tr.batcher = NewBatcher(tr, 100, 10*time.Millisecond)
+
+	// 初始化 Region 元数据
+	initialRegion := &pdpb.Region{
+		Id: 1,
+		RegionEpoch: &pdpb.RegionEpoch{ConfVer: 0, Version: 1},
+		Peers: []*pdpb.Peer{},
+	}
+	tr.region.Store(initialRegion)
+
+	// 【删除】Batcher 初始化逻辑已移除
 
 	tr.applyCond = sync.NewCond(&tr.applyMu)
 
@@ -191,18 +194,16 @@ func (tr *TitanRaft) getApplied() uint64 {
 	return atomic.LoadUint64(&tr.lastApplied)
 }
 
-// 核心读入口：线性一致性读
+// LinearizableRead 获取线性一致性读的安全 Index
 func (tr *TitanRaft) LinearizableRead(ctx context.Context) (uint64, error) {
-	// 1. 尝试 Lease Read (Fast Path)
 	if tr.isLeaseValid() {
+		// log.Printf("Lease Valid. Return local index: %d", tr.getApplied())
 		return tr.getApplied(), nil
-	}
-
-	// 2. 回退到标准 ReadIndex (Slow Path)
+	} 
+	// log.Printf("Lease Invalid! Fallback to ReadIndex.")
 	return tr.requestReadIndex(ctx)
 }
 
-// 检查租约有效性
 func (tr *TitanRaft) isLeaseValid() bool {
 	if tr.Node.Status().Lead != tr.ID {
 		return false
@@ -268,19 +269,16 @@ func (tr *TitanRaft) WaitApplied(ctx context.Context, targetIndex uint64) error 
 	}
 }
 
-// Client 调用的 Propose (走 Batcher)
+// 【关键修改】直接调用 Raft Node Propose，不再走 Batcher
 func (tr *TitanRaft) Propose(ctx context.Context, cmd *titankvpb.RaftCommand) error {
-	return tr.batcher.Propose(ctx, cmd)
-}
-
-// Batcher 调用的批量 Propose
-func (tr *TitanRaft) ProposeBatch(ctx context.Context, batch *titankvpb.BatchRaftCommand) error {
-	data, err := proto.Marshal(batch)
+	data, err := proto.Marshal(cmd)
 	if err != nil {
 		return err
 	}
 	return tr.Node.Propose(ctx, data)
 }
+
+// 【删除】ProposeBatch 已移除
 
 func (tr *TitanRaft) Step(ctx context.Context, msg *titankvpb.RaftMessage) error {
 	var rMsg raftpb.Message
@@ -288,7 +286,6 @@ func (tr *TitanRaft) Step(ctx context.Context, msg *titankvpb.RaftMessage) error
 		return err
 	}
 
-	// 拦截心跳，更新租约
 	if rMsg.Type == raftpb.MsgHeartbeatResp {
 		tr.peerLastActive.Store(rMsg.From, time.Now())
 		tr.leaseMu.Lock()
@@ -325,7 +322,6 @@ func (tr *TitanRaft) updateLease() {
 }
 
 func (tr *TitanRaft) run() {
-	// 独立 Ticker
 	go func() {
 		ticker := time.NewTicker(time.Duration(tickMs) * time.Millisecond)
 		defer ticker.Stop()
@@ -337,7 +333,6 @@ func (tr *TitanRaft) run() {
 		}
 	}()
 
-    // 【新增】Region 心跳定时器 (每 5 秒一次)
     pdHeartbeatTicker := time.NewTicker(5 * time.Second)
     defer pdHeartbeatTicker.Stop()
     storeHeartbeatTicker := time.NewTicker(10 * time.Second)
@@ -345,14 +340,11 @@ func (tr *TitanRaft) run() {
 
 	for {
 		select {
-		// 【新增】触发 PD 心跳
           case <-pdHeartbeatTicker.C:
              tr.sendPDHeartbeat()
-          // 【新增】发送 Store 心跳
           case <-storeHeartbeatTicker.C:
             tr.sendStoreHeartbeat()
 		case rd := <-tr.Node.Ready():
-			// 1. ReadIndex
 			if len(rd.ReadStates) > 0 {
 				tr.readMu.Lock()
 				for _, rs := range rd.ReadStates {
@@ -365,12 +357,10 @@ func (tr *TitanRaft) run() {
 				tr.readMu.Unlock()
 			}
 
-			// 2. Snapshot
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				tr.handleSnapshot(rd.Snapshot)
 			}
 
-			// 3. WAL
 			if !raft.IsEmptyHardState(rd.HardState) || len(rd.Entries) > 0 {
 				if err := tr.wal.Save(rd.HardState, rd.Entries); err != nil {
 					log.Fatalf("Failed to save WAL: %v", err)
@@ -379,24 +369,19 @@ func (tr *TitanRaft) run() {
 
 			tr.raftStorage.Append(rd.Entries)
 
-			// 4. Send
 			for _, msg := range rd.Messages {
 				tr.sendRaftMessage(msg)
 			}
 
-			// 5. Apply
 			for _, entry := range rd.CommittedEntries {
-			     if entry.Type == raftpb.EntryConfChange {
-	                    var cc raftpb.ConfChange
-	                    cc.Unmarshal(entry.Data)
-	                    
+				if entry.Type == raftpb.EntryConfChange {
+	                var cc raftpb.ConfChange
+	                cc.Unmarshal(entry.Data)
 					tr.applyConfChange(cc)
-	                    
-                    	log.Printf("Applied ConfChange: %v", cc)
-                	} else {
-                		// 普通 Put/Delete
+                } else {
 					tr.processEntry(entry)
 				}
+				
 				currentApplied := tr.getApplied()
 				if entry.Index > currentApplied {
 					atomic.StoreUint64(&tr.lastApplied, entry.Index)
@@ -515,6 +500,7 @@ func (tr *TitanRaft) applySingleCommand(cmd *titankvpb.RaftCommand) {
 func (tr *TitanRaft) processSnapshot(snap raftpb.Snapshot) {
 	atomic.StoreUint64(&tr.lastApplied, snap.Metadata.Index)
 	tr.applyCond.Broadcast()
+	log.Printf("Snapshot applied. LastApplied: %d", snap.Metadata.Index)
 }
 
 func (tr *TitanRaft) Stop() {
@@ -522,64 +508,28 @@ func (tr *TitanRaft) Stop() {
 }
 
 func (tr *TitanRaft) sendPDHeartbeat() {
-    // 只有 Leader 才发 Region 心跳
     if tr.Node.Status().Lead != tr.ID {
         return
     }
-    // 【测试 Hack】: 只有 Node 1 (假设 ID=1) 发送伪造的 Region 心跳
-    /*if tr.ID == 1 {
-        // 模拟报告 10 个 Region
-        for i := uint64(100); i < 110; i++ {
-            fakeRegion := &pdpb.Region{
-                Id:       i,
-                Peers:    []*pdpb.Peer{{Id: i*10 + 1, StoreId: 1}, {Id: i*10 + 2, StoreId: 2}, {Id: i*10 + 3, StoreId: 3}},
-                // 伪造版本
-                RegionEpoch: &pdpb.RegionEpoch{ConfVer: 1, Version: 1},
-            }
-            
-            // 说我是 Leader
-            fakeLeader := &pdpb.Peer{Id: i*10 + 1, StoreId: 1}
-            
-            go func(r *pdpb.Region, l *pdpb.Peer) {
-                req := &pdpb.RegionHeartbeatRequest{
-                    Region:          r,
-                    Leader:          l,
-                    ApproximateSize: 10,
-                }
-                // 发送
-                tr.pdClient.RegionHeartbeat(context.Background(), req)
-            }(fakeRegion, fakeLeader)
-        }
-    }*/
-    // 1. 组装 Region 信息
-    // 目前我们是单 Raft 组，假设 ID=1，范围是全集
-    // 生产环境这些信息应该存储在 Raft Storage 的元数据中
+
     region := &pdpb.Region{
-        Id:       1, // Hardcode for Phase 2
+        Id:       1,
         StartKey: []byte(""),
         EndKey:   []byte(""),
         RegionEpoch: &pdpb.RegionEpoch{
             ConfVer: 1,
             Version: 1,
         },
-        // Peers: 应该填入当前配置中的所有 Peer
         Peers: []*pdpb.Peer{}, 
     }
     
-    // 填充 Peers (从 tr.peers 获取)
-    // 注意：我们现在的 tr.peers 只是 ID 列表，Proto 需要 ID + StoreID
-    // 简化：假设 PeerID == StoreID
     for _, pid := range tr.peers {
         region.Peers = append(region.Peers, &pdpb.Peer{Id: pid, StoreId: pid})
     }
     
-    // 2. 组装 Leader 信息
     leaderPeer := &pdpb.Peer{Id: tr.ID, StoreId: tr.ID}
-
-    // 3. 统计信息 (调用 C++ 接口获取，这里先 Mock)
-    approxSize := uint64(100) // MB
+    approxSize := uint64(100)
     
-    // 4. 发送请求 (异步，不要阻塞 Raft 循环)
     go func() {
         req := &pdpb.RegionHeartbeatRequest{
             Region:          region,
@@ -587,16 +537,15 @@ func (tr *TitanRaft) sendPDHeartbeat() {
             ApproximateSize: approxSize,
         }
         
-        // 使用短超时
         ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
         defer cancel()
         
         resp, err := tr.pdClient.RegionHeartbeat(ctx, req)
         if err != nil {
             log.Printf("Failed to send region heartbeat: %v", err)
+            return
         }
-        return 
-        // 【新增】处理调度指令
+
         if resp.TransferLeader != nil {
             log.Printf("Received TransferLeader to peer %d", resp.TransferLeader.PeerId)
             tr.Node.TransferLeadership(context.Background(), 1, resp.TransferLeader.PeerId)
@@ -606,10 +555,9 @@ func (tr *TitanRaft) sendPDHeartbeat() {
     }()
 }
 
-// 处理成员变更
 func (tr *TitanRaft) handleConfChange(cp *pdpb.ChangePeer) {
     var cc raftpb.ConfChange
-    cc.ID = tr.reqIDGen + 1 // 简单生成个 ID，或者用 atomic
+    cc.ID = tr.reqIDGen + 1 
     cc.NodeID = cp.Peer.Id
     
     if cp.ChangeType == pdpb.ChangePeer_ADD_NODE {
@@ -620,116 +568,11 @@ func (tr *TitanRaft) handleConfChange(cp *pdpb.ChangePeer) {
         log.Printf("Received RemovePeer %d on store %d", cp.Peer.Id, cp.Peer.StoreId)
     }
 
-    // Propose ConfChange
     if err := tr.Node.ProposeConfChange(context.Background(), cc); err != nil {
         log.Printf("Failed to propose conf change: %v", err)
     }
 }
 
-func (tr *TitanRaft) updatePeers(cc raftpb.ConfChange) {
-    if cc.Type == raftpb.ConfChangeAddNode {
-        // 检查是否已存在
-        for _, id := range tr.peers {
-            if id == cc.NodeID { return }
-        }
-        tr.peers = append(tr.peers, cc.NodeID)
-    } else if cc.Type == raftpb.ConfChangeRemoveNode {
-        var newPeers []uint64
-        for _, id := range tr.peers {
-            if id != cc.NodeID {
-                newPeers = append(newPeers, id)
-            }
-        }
-        tr.peers = newPeers
-        
-        // 如果是自己被删除了，关闭节点
-        if cc.NodeID == tr.ID {
-            log.Printf("I have been removed from the cluster! Shutting down...")
-            // tr.Stop() 
-        }
-    }
-}
-
-func (tr *TitanRaft) sendStoreHeartbeat() {
-	// 1. 构造 Store 统计信息
-    // 【修改】titankvpb -> pdpb
-	stats := &pdpb.StoreStats{
-		Capacity:    100 * 1024 * 1024 * 1024,
-		Available:   50 * 1024 * 1024 * 1024,
-		RegionCount: 0,
-	}
-
-	// 2. 发送心跳 (异步)
-	go func() {
-		// A. 先尝试注册 Store
-        // 【修改】titankvpb -> pdpb
-		meta := &pdpb.MetaStore{
-			Id:      tr.ID,
-			Address: "127.0.0.1:????", // 记得这里如果是测试最好填写真实地址或Mock
-			State:   pdpb.StoreState_UP, // 【修改】titankvpb -> pdpb
-		}
-        // 【修改】titankvpb -> pdpb
-		_, err := tr.pdClient.PutStore(context.Background(), &pdpb.PutStoreRequest{Store: meta})
-		if err != nil {
-			log.Printf("PutStore failed: %v", err)
-			return
-		}
-
-		// B. 发送心跳
-        // 【修改】titankvpb -> pdpb
-		req := &pdpb.StoreHeartbeatRequest{
-			StoreId: tr.ID,
-			Stats:   stats,
-		}
-		_, err = tr.pdClient.StoreHeartbeat(context.Background(), req)
-		if err != nil {
-			log.Printf("StoreHeartbeat failed: %v", err)
-		}
-	}()
-}
-
-
-func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
-	val := tr.region.Load()
-	if val == nil {
-		// 还没初始化完成
-		return nil
-	}
-	current := val.(*pdpb.Region)
-
-	// 【新增调试日志】
-	// 生产环境通常不需要，但调试时这能救命
-	// log.Printf("[CheckEpoch] Req: {Ver:%d, Conf:%d} vs Cur: {Ver:%d, Conf:%d}",
-	// 	reqEpoch.Version, reqEpoch.ConfVer,
-	// 	current.RegionEpoch.Version, current.RegionEpoch.ConfVer)
-
-	if reqEpoch.Version != current.RegionEpoch.Version {
-		return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
-	}
-
-	if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
-		return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
-	}
-
-	return nil
-}
-
-// 统一处理配置变更的所有副作用
-func (tr *TitanRaft) applyConfChange(cc raftpb.ConfChange) {
-	// 1. 【库】更新 Raft 核心共识状态
-	tr.Node.ApplyConfChange(cc)
-
-	// 2. 【网络】更新本地 Peer 列表 (用于快照和心跳)
-	tr.updatePeersSlice(cc)
-
-	// 3. 【元数据】更新 Region Epoch (ConfVer++)
-	// 这一步对于 Week 9 的调度和 Smart Client 至关重要
-	tr.updateRegionMeta(cc)
-
-	log.Printf("Applied ConfChange: Type=%v, NodeID=%d", cc.Type, cc.NodeID)
-}
-
-// (原来的 updatePeers 改个名，或者直接用这个)
 func (tr *TitanRaft) updatePeersSlice(cc raftpb.ConfChange) {
 	if cc.Type == raftpb.ConfChangeAddNode {
 		for _, id := range tr.peers {
@@ -744,26 +587,73 @@ func (tr *TitanRaft) updatePeersSlice(cc raftpb.ConfChange) {
 			}
 		}
 		tr.peers = newPeers
-		// 移除自己时的退出逻辑
 		if cc.NodeID == tr.ID {
 			log.Printf("❌ I have been removed from the cluster! Shutting down...")
-			// os.Exit(0) 
 		}
 	}
 }
 
-// 必须补上这个函数
+func (tr *TitanRaft) sendStoreHeartbeat() {
+	stats := &pdpb.StoreStats{
+		Capacity:    100 * 1024 * 1024 * 1024,
+		Available:   50 * 1024 * 1024 * 1024,
+		RegionCount: 0,
+	}
+
+	go func() {
+		meta := &pdpb.MetaStore{
+			Id:      tr.ID,
+			Address: "127.0.0.1:????",
+			State:   pdpb.StoreState_UP,
+		}
+		_, err := tr.pdClient.PutStore(context.Background(), &pdpb.PutStoreRequest{Store: meta})
+		if err != nil {
+			log.Printf("PutStore failed: %v", err)
+			return
+		}
+
+		req := &pdpb.StoreHeartbeatRequest{
+			StoreId: tr.ID,
+			Stats:   stats,
+		}
+		_, err = tr.pdClient.StoreHeartbeat(context.Background(), req)
+		if err != nil {
+			log.Printf("StoreHeartbeat failed: %v", err)
+		}
+	}()
+}
+
+func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
+	val := tr.region.Load()
+	if val == nil {
+		return nil
+	}
+	current := val.(*pdpb.Region)
+
+	if reqEpoch.Version != current.RegionEpoch.Version {
+		return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
+	}
+
+	if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
+		return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
+	}
+
+	return nil
+}
+
+func (tr *TitanRaft) applyConfChange(cc raftpb.ConfChange) {
+	tr.Node.ApplyConfChange(cc)
+	tr.updatePeersSlice(cc)
+	tr.updateRegionMeta(cc)
+	log.Printf("Applied ConfChange: Type=%v, NodeID=%d", cc.Type, cc.NodeID)
+}
+
 func (tr *TitanRaft) updateRegionMeta(cc raftpb.ConfChange) {
-    // 这里的逻辑复用之前提供的：
-    // Load -> Clone -> ConfVer++ -> Append/Remove Peers -> Store
-	// 1. 加载旧数据 (Copy-On-Write)
 	oldRegion := tr.region.Load().(*pdpb.Region)
 	newRegion := proto.Clone(oldRegion).(*pdpb.Region)
 
-	// 2. 增加 ConfVer (配置变更版本号)
 	newRegion.RegionEpoch.ConfVer++
 
-	// 3. 更新 Peers 列表
 	if cc.Type == raftpb.ConfChangeAddNode {
 		exists := false
 		for _, p := range newRegion.Peers {
@@ -785,6 +675,5 @@ func (tr *TitanRaft) updateRegionMeta(cc raftpb.ConfChange) {
 		newRegion.Peers = activePeers
 	}
 
-	// 4. 原子存回
 	tr.region.Store(newRegion)
 }

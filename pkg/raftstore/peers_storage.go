@@ -1,9 +1,6 @@
 package raftstore
 
 import (
-	"fmt"
-	"log"
-
 	"titankv/api/titankvpb"
 	"titankv/pkg/store" // C++ Store
 
@@ -11,6 +8,11 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 )
+
+type kvPair struct {
+	key   []byte
+	value []byte
+}
 
 // PeerStorage 负责单个 Region 的 Raft 数据存储
 type PeerStorage struct {
@@ -43,6 +45,7 @@ func (s *PeerStorage) loadState() error {
 		return err
 	}
 	if len(val) > 0 {
+		// 【修复】使用 proto.Unmarshal，传入指针
 		if err := proto.Unmarshal(val, &s.raftState); err != nil {
 			return err
 		}
@@ -57,11 +60,18 @@ func (s *PeerStorage) loadState() error {
 		return err
 	}
 	if len(val) > 0 {
+		// 【修复】使用 proto.Unmarshal
 		if err := proto.Unmarshal(val, &s.applyState); err != nil {
 			return err
 		}
 	}
-	
+	if s.applyState.TruncatedState == nil {
+        s.applyState.TruncatedState = &titankvpb.RaftTruncatedState{
+            Index: 0, // 截断位置为 0，意味着 FirstIndex 为 1
+            Term:  0,
+        }
+     }
+    
 	return nil
 }
 
@@ -104,7 +114,8 @@ func (s *PeerStorage) Entries(lo, hi, maxSize uint64) ([]raftpb.Entry, error) {
 		}
 		
 		var ent raftpb.Entry
-		if err := proto.Unmarshal(val, &ent); err != nil {
+		// 【修复】raftpb.Entry 使用自带的 Unmarshal
+		if err := ent.Unmarshal(val); err != nil {
 			return nil, err
 		}
 		
@@ -135,7 +146,8 @@ func (s *PeerStorage) Term(i uint64) (uint64, error) {
 		return 0, err
 	}
 	var ent raftpb.Entry
-	proto.Unmarshal(val, &ent)
+	// 【修复】直接调用 Unmarshal
+	ent.Unmarshal(val)
 	return ent.Term, nil
 }
 
@@ -153,35 +165,44 @@ func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
 	return raftpb.Snapshot{}, raft.ErrSnapshotTemporarilyUnavailable
 }
 
-// --- 辅助：保存状态 (供 RaftStore 循环调用) ---
 
-// 注意：这里我们不直接写 DB，而是生成 WriteBatch 所需的 KV 对
-// 因为 RaftStore 会把多个 Peer 的写入合并成一个大 Batch 写入 C++
-// 这里为了演示逻辑，假设有一个 helper
-func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) error {
-    // 1. 保存 Entries
-    for _, ent := range entries {
-        key := RaftLogKey(s.region.Id, ent.Index)
-        val, _ := proto.Marshal(&ent)
-        s.engine.Put(key, val) // 实际上应该添加到 WriteBatch
+// pkg/raftstore/peers_storage.go
+
+func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) ([]kvPair, error) {
+    var batch []kvPair
+    
+    // 标记状态是否需要更新
+    stateChanged := false
+
+    // 1. 处理 Log Entries
+    if len(entries) > 0 {
+        for _, ent := range entries {
+            key := RaftLogKey(s.region.Id, ent.Index)
+            val, _ := ent.Marshal()
+            batch = append(batch, kvPair{key, val})
+        }
+        
+        // 【关键修复】更新内存中的 LastIndex
+        lastIndex := entries[len(entries)-1].Index
+        s.raftState.LastIndex = lastIndex
+        stateChanged = true
     }
     
-    // 2. 更新并保存 HardState
-    if raftState != nil {
+    // 2. 处理 HardState (Term, Vote, Commit)
+    if !raft.IsEmptyHardState(*raftState) {
         s.raftState.Term = raftState.Term
         s.raftState.Vote = raftState.Vote
         s.raftState.Commit = raftState.Commit
+        stateChanged = true
     }
     
-    // 更新 LastIndex
-    if len(entries) > 0 {
-        s.raftState.LastIndex = entries[len(entries)-1].Index
+    // 3. 持久化 RaftLocalState (包含 LastIndex 和 HardState)
+    // 【关键修复】只要 LastIndex 变了，也必须保存，否则重启后数据丢失/状态不一致
+    if stateChanged {
+        key := RaftStateKey(s.region.Id)
+        val, _ := proto.Marshal(&s.raftState)
+        batch = append(batch, kvPair{key, val})
     }
     
-    // 保存 RaftState
-    key := RaftStateKey(s.region.Id)
-    val, _ := proto.Marshal(&s.raftState)
-    s.engine.Put(key, val) // 实际上添加到 WriteBatch
-
-    return nil
+    return batch, nil
 }

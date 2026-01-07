@@ -2,7 +2,6 @@ package raftstore
 
 import (
 	"titankv/api/titankvpb"
-	"titankv/pd/api/pdpb"
 )
 
 type MsgType int
@@ -27,6 +26,14 @@ type Msg struct {
 	Callback func(error)
 }
 
+func NewMsgRaftMessage(msg *titankvpb.RaftMessage) Msg {
+	return Msg{
+        Type: MsgTypeRaftMessage, 
+        RaftMessage: msg, 
+        RegionID: msg.RegionId,
+    }
+}
+
 // 简单的工厂函数
 func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand, cb func(error)) Msg {
     return Msg{
@@ -37,9 +44,6 @@ func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand, cb func(error)) 
     }
 }
 
-func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand) Msg {
-	return Msg{Type: MsgTypeRaftCmd, RegionID: regionID, RaftCmd: cmd}
-}
 
 func NewMsgTick() Msg {
 	return Msg{Type: MsgTypeTick}

@@ -4,6 +4,7 @@
 #include "titankv/status.h"
 #include "titankv/slice.h"
 #include "titankv/options.h"
+#include "titankv/write_batch.h"
 
 namespace titankv {
 
@@ -39,6 +40,7 @@ class DB {
   virtual Status Get(const ReadOptions& options,
                      const Slice& key,
                      std::string* value) = 0;
+  virtual Status Write(const WriteOptions& options, WriteBatch* batch) = 0;
 };
 
 } // namespace titankv

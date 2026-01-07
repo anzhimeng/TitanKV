@@ -31,6 +31,7 @@ set(CORE_SOURCES
     src/util/status.cc
     src/util/hash.cc
     src/util/bloom.cc
+    src/util/write_batch.cc
     
     # 日志组件
     src/wal/log_reader.cc

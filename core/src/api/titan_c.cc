@@ -1,6 +1,7 @@
 #include "titan_c.h"
 #include "titan_db.h" // Week 2 整理的总入口
 #include "titankv/db_impl.h"
+#include "titankv/write_batch.h"
 #include <cstring>
 #include <cstdlib>
 #include <thread>
@@ -112,6 +113,43 @@ void titan_set_gc_threshold(titan_db_t* db, double threshold) {
         auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
         impl->SetGCThreshold(threshold);
     }
+}
+
+void titan_batch_write(titan_db_t* db, 
+                       const char** keys, size_t* klen, 
+                       const char** vals, size_t* vlen, 
+                       int count, char** err) {
+    if (!db || !db->rep) {
+        // 简单的错误处理
+        *err = strdup("db is closed or invalid");
+        return;
+    }
+
+    WriteBatch batch;
+    for (int i = 0; i < count; ++i) {
+        // 构造 Slice (零拷贝，直接引用 C 传进来的内存)
+        Slice key(keys[i], klen[i]);
+        Slice value(vals[i], vlen[i]);
+        
+        // 区分 Put 和 Delete
+        // 这里为了简化 C 接口，假设如果是 Delete，vals[i] 传 nullptr 或者 vlen[i] == 0 且有一个标记数组？
+        // 既然 titankv.proto 里 Put 和 Delete 是分开的 RPC，
+        // 而 PeerStorage::Append 产生的都是 Put (Raft Log 持久化)。
+        // Raft 状态机的 Apply 才是真正的 Put/Delete。
+        
+        // 【注意】目前的 handleReady 中，我们是把 Raft Log Entry 写入 DB。
+        // Raft Log 的 Key 是 `r{RegionID}_{Index}`，Value 是 Entry 的序列化数据。
+        // 这是一个 Put 操作。
+        
+        // 如果你需要支持 Delete（比如 Apply 阶段的 Delete），C 接口需要一个 op_type 数组。
+        // 但 handleReady 只做 Log Append (Put)。
+        // 所以我们默认全部是 Put。
+        
+        batch.Put(key, value);
+    }
+
+    Status s = db->rep->Write(WriteOptions(), &batch);
+    set_error(err, s);
 }
 
 } // extern "C"

@@ -1023,4 +1023,31 @@ void DBImpl::DeleteObsoleteFiles() {
         }
     }
 }
+
+Status DBImpl::Write(const WriteOptions& opt, WriteBatch* batch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // 1. 检查空间
+    Status s = MakeRoomForWrite(false);
+    if (!s.ok()) return s;
+
+    // 2. 遍历 Batch 中的 Entry
+    // 注意：WriteBatch 的迭代器需要自己实现或暴露
+    // 假设 WriteBatch 内部有一个 std::vector<Entry> entries_;
+    for (const auto& entry : batch->entries()) {
+        // 复用 WriteLocked 逻辑
+        // 注意：WriteLocked 是原子的吗？在锁内是原子的。
+        // 但如果我们要保证整个 Batch 原子性（要么全进 WAL，要么全不进），
+        // 我们应该构造一个大的 WAL Record 包含所有 Entry。
+        
+        // Day 4 简化：在锁内循环调用 WriteLocked。
+        // 虽然 WAL 是分条写的，但因为持有锁，外界看来是原子的。
+        ValueType type = (entry.type == kTypeValue) ? kTypeValue : kTypeDeletion;
+        s = WriteLocked(opt, type, entry.key, entry.value);
+        if (!s.ok()) return s;
+    }
+    
+    return Status::OK();
+}
+
 } // namespace titankv

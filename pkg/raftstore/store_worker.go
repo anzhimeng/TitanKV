@@ -1,51 +1,58 @@
 package raftstore
 
 import (
+	"log"
 	"time"
+	"titankv/api/titankvpb"
+	"titankv/pkg/store" // C++ 引擎
 )
 
 const (
-    batchSize = 128 // 一次最多处理多少消息
+	batchSize = 128
 )
 
-type StoreWorker struct {
-	peers    map[uint64]*Peer // 本 Worker 管理的所有 Peer
-	receiver PeerSender       // 接收消息的 Channel
-	router   *Router
-    
-    // 缓存待处理的 Peers，避免每次遍历所有 map
-    pendingPeers map[uint64]*Peer 
+type MsgAddPeer struct {
+	Peer *Peer
 }
 
-func NewStoreWorker(router *Router) *StoreWorker {
+type StoreWorker struct {
+	peers        map[uint64]*Peer
+	receiver     PeerSender
+	router       *Router
+	pendingPeers map[uint64]*Peer
+	store        *store.TitanStore
+	transport    *Transport // 【新增】持有 Transport
+}
+
+func NewStoreWorker(router *Router, trans *Transport, s *store.TitanStore) *StoreWorker {
 	return &StoreWorker{
 		peers:        make(map[uint64]*Peer),
 		receiver:     make(PeerSender, 4096),
 		router:       router,
-        pendingPeers: make(map[uint64]*Peer),
+		pendingPeers: make(map[uint64]*Peer),
+		store:        s,
+		transport:    trans, // 赋值
 	}
 }
 
+func (w *StoreWorker) Receiver() PeerSender {
+	return w.receiver
+}
+
 func (w *StoreWorker) Run() {
-	// 全局 Ticker，驱动所有 Peer 的心跳
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	// 批处理缓冲区
 	msgs := make([]Msg, 0, batchSize)
 
 	for {
-        // 1. 获取第一条消息 (阻塞)
 		select {
 		case msg := <-w.receiver:
 			msgs = append(msgs, msg)
 		case <-ticker.C:
 			w.onTick()
-            // Tick 之后也需要检查 Ready，继续往下走
 		}
 
-		// 2. 尝试获取更多消息 (非阻塞，Batching)
-        // 尽可能多地从 channel 拿数据，直到拿满 batchSize 或者 channel 空了
 		pending := len(w.receiver)
 		if pending > batchSize {
 			pending = batchSize
@@ -54,61 +61,101 @@ func (w *StoreWorker) Run() {
 			msgs = append(msgs, <-w.receiver)
 		}
 
-		// 3. 处理消息批次
 		for _, msg := range msgs {
 			w.processMsg(msg)
 		}
-        
-        // 清空 buffer
-        msgs = msgs[:0]
+		msgs = msgs[:0]
 
-		// 4. 处理 Ready (IO 聚合)
 		w.handleReady()
 	}
 }
 
 func (w *StoreWorker) processMsg(msg Msg) {
-    peer, ok := w.peers[msg.RegionID]
-    if !ok {
-        // 可能是新 Region，或者已移除
-        // 处理 CreateRegion 逻辑...
-        return
-    }
-    
-    // 执行 Raft Step
-    peer.step(msg)
-    
-    // 标记该 Peer 有变动
-    w.pendingPeers[msg.RegionID] = peer
+	peer, ok := w.peers[msg.RegionID]
+	if !ok {
+		return
+	}
+	peer.step(msg)
+	w.pendingPeers[msg.RegionID] = peer
 }
 
 func (w *StoreWorker) onTick() {
-    // 对所有 Peer 进行 Tick
-    // 优化点：不要一次性 Tick 10000 个 Peer，会卡顿
-    // 应该分批 Tick。这里简化处理。
-    for _, peer := range w.peers {
-        peer.step(NewMsgTick())
-        w.pendingPeers[peer.regionID] = peer
-    }
+	for _, peer := range w.peers {
+		peer.step(NewMsgTick())
+		w.pendingPeers[peer.regionID] = peer
+	}
 }
 
-// 核心优化：批量处理 IO
 func (w *StoreWorker) handleReady() {
-    // 1. 遍历所有活跃的 Peer
-    for id, peer := range w.pendingPeers {
-        if !peer.hasReady() {
-            continue
-        }
-        
-        rd := peer.raftGroup.Ready()
-        
-        // 2. 【TODO Week 10 Day 4】收集所有 rd.Entries -> WriteBatch
-        // 3. 【TODO Week 10 Day 4】收集所有 rd.Messages -> Transport
-        
-        // 4. 推进状态
-        peer.raftGroup.Advance(rd)
-    }
-    
-    // 清空活跃列表
-    w.pendingPeers = make(map[uint64]*Peer)
+	var messages []*titankvpb.RaftMessage
+	var readyPeers []*Peer
+	
+	// CGO Batch Write 需要的切片
+	var batchKeys [][]byte
+	var batchValues [][]byte
+
+	for _, peer := range w.pendingPeers {
+		if !peer.hasReady() {
+			continue
+		}
+		
+		rd := peer.raftGroup.Ready()
+		
+		// A. 收集日志和状态 (WAL)
+		// peer.storage.Append 返回 []kvPair
+		kvPairs, err := peer.storage.Append(rd.Entries, &rd.HardState)
+		if err != nil {
+			log.Fatalf("Append failed: %v", err)
+		}
+		
+		// 拆解 kvPair 到两个切片
+		for _, kv := range kvPairs {
+			batchKeys = append(batchKeys, kv.key)
+			batchValues = append(batchValues, kv.value)
+		}
+		
+		// B. 收集网络消息
+		for _, msg := range rd.Messages {
+			data, _ := msg.Marshal()
+			tm := &titankvpb.RaftMessage{
+				RegionId:   peer.regionID,
+				FromPeerId: msg.From,
+				ToPeerId:   msg.To,
+				Data:       data,
+			}
+			messages = append(messages, tm)
+		}
+		
+		readyPeers = append(readyPeers, peer)
+	}
+
+	// 2. 执行阶段：批量写盘 (Atomic & Batch)
+	if len(batchKeys) > 0 {
+		// 调用 CGO BatchPut
+		err := w.store.BatchPut(batchKeys, batchValues)
+		if err != nil {
+			 log.Fatalf("BatchPut failed: %v", err)
+		}
+	}
+
+	// 3. 执行阶段：批量发送
+	if len(messages) > 0 {
+		w.transport.Send(messages)
+	}
+
+	// 4. 后处理阶段：Apply & Advance
+	for _, peer := range readyPeers {
+		rd := peer.raftGroup.Ready()
+		for _, entry := range rd.CommittedEntries {
+			peer.processEntry(entry)
+		}
+		peer.raftGroup.Advance(rd)
+	}
+
+	w.pendingPeers = make(map[uint64]*Peer)
+}
+
+func (w *StoreWorker) AddPeer(p *Peer) {
+	w.peers[p.regionID] = p
+	w.pendingPeers[p.regionID] = p 
 }

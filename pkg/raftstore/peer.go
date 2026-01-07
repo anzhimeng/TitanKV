@@ -1,35 +1,55 @@
 package raftstore
 
 import (
+	"bytes"
+	"errors"
 	"log"
 	"titankv/api/titankvpb"
+	"titankv/pkg/store"
 
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
-var ErrKeyNotInRegion = errors.New("key not in region")
-var ErrEpochNotMatch = errors.New("epoch not match")
+var (
+	ErrKeyNotInRegion = errors.New("key not in region")
+	ErrEpochNotMatch  = errors.New("epoch not match")
+)
 
 type Peer struct {
 	regionID   uint64
 	peerID     uint64
-	raftGroup  *raft.RawNode // 核心：使用的是 RawNode，不是 Node
-	storage    *PeerStorage  // Day 1 实现的
+	raftGroup  *raft.RawNode
+	storage    *PeerStorage
+	region     *titankvpb.Region
 }
 
-func NewPeer(storeID uint64, region *titankvpb.Region) (*Peer, error) {
-	// 1. 初始化 Storage
-	// 需要传入全局 DB 引擎，这里假设外部传入了 engine
-	// ps, err := NewPeerStorage(engine, region) 
-    // 为了简化，构造函数参数先留空，实际集成时补上
-	
-	// 假设 storage 已经准备好了
-	var ps *PeerStorage 
+func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore) (*Peer, error) {
+	// 1. 初始化 PeerStorage
+	ps, err := NewPeerStorage(engine, region)
+	if err != nil {
+		return nil, err
+	}
 
-	// 2. 配置 Raft
+	// 2. 查找 PeerID
+	var peerID uint64
+	found := false
+	for _, p := range region.Peers {
+		if p.StoreId == storeID {
+			peerID = p.Id
+			found = true
+			break
+		}
+	}
+	// Bootstrap hack
+	if !found && len(region.Peers) == 0 {
+		peerID = 1 
+	}
+
+	// 3. 配置 Raft
 	c := &raft.Config{
-		ID:              1, // 需要从 region.Peers 中找到属于当前 store 的 peerID
+		ID:              peerID,
 		ElectionTick:    10,
 		HeartbeatTick:   1,
 		Storage:         ps,
@@ -38,8 +58,7 @@ func NewPeer(storeID uint64, region *titankvpb.Region) (*Peer, error) {
 		CheckQuorum:     true,
 	}
 
-	// 3. 创建 RawNode
-	// 如果是新建 Region (peers==1)，需要 initial peers；如果是重启，不需要
+	// 4. 创建 RawNode (v3.5+ 不需要 peers 参数)
 	rn, err := raft.NewRawNode(c)
 	if err != nil {
 		return nil, err
@@ -47,59 +66,87 @@ func NewPeer(storeID uint64, region *titankvpb.Region) (*Peer, error) {
 
 	return &Peer{
 		regionID:  region.Id,
+		peerID:    peerID,
 		raftGroup: rn,
 		storage:   ps,
+		region:    region,
 	}, nil
 }
 
+// 处理消息
 func (p *Peer) step(msg Msg) {
-    switch msg.Type {
-    case MsgTypeRaftCmd:
-        // 1. 校验 Epoch (Week 9 的逻辑移到这里)
-        // ... (省略 Epoch 检查代码) ...
+	switch msg.Type {
+	case MsgTypeRaftMessage:
+		var rMsg raftpb.Message
+		if err := rMsg.Unmarshal(msg.RaftMessage.Data); err == nil {
+			p.raftGroup.Step(rMsg)
+		}
 
-        // 2. 校验 Key Range
-        // Put/Delete/Get 都需要校验
-        key := msg.RaftCmd.Key
-        if !p.isKeyInRange(key) {
-            if msg.Callback != nil {
-                msg.Callback(ErrKeyNotInRegion)
-            }
-            return
-        }
+	case MsgTypeRaftCmd:
+		// 1. 校验 Key Range
+		key := msg.RaftCmd.Key
+		if !p.isKeyInRange(key) {
+			if msg.Callback != nil {
+				msg.Callback(ErrKeyNotInRegion)
+			}
+			return
+		}
 
-        // 3. 提交给 Raft
-        data, _ := proto.Marshal(msg.RaftCmd)
-        // 这里需要把 Callback 存起来，等 Apply 的时候调用
-        // 这涉及到 "Proposal 追踪"，比较复杂。
-        // Day 3 简化版：我们假设 Propose 成功就是成功 (虽然不严谨)，
-        // 或者直接在这里 callback(nil) 表示 "已提交队列"。
-        // 真正的做法是：ProposalContext 携带一个 UUID，Apply 时根据 UUID 找 Callback。
-        
-        // 为了跑通流程，我们先在这里 callback
-        // Week 10 Day 4 会完善 Apply 流程
-        p.raftGroup.Propose(data)
-        // 注意：Callback 应该在 Apply 后调用，这里先暂存 TODO
-    }
+		// 2. 提交给 Raft
+		data, _ := proto.Marshal(msg.RaftCmd)
+		// 注意：Callback 的处理需要 Proposal 追踪机制，Day 5 简化为立即回调 nil (表示已排队)
+		// 或者留给 Apply 阶段回调 (需更复杂实现)
+		if msg.Callback != nil {
+			msg.Callback(nil) 
+		}
+		p.raftGroup.Propose(data)
+
+	case MsgTypeTick:
+		p.raftGroup.Tick()
+	}
 }
 
-// 辅助：检查 Key 是否在 Region 范围内 [Start, End)
 func (p *Peer) isKeyInRange(key []byte) bool {
-    start := p.region.StartKey
-    end := p.region.EndKey
-    
-    // Start <= Key
-    if len(start) > 0 && bytes.Compare(key, start) < 0 {
-        return false
-    }
-    // Key < End (End 为空表示无穷大)
-    if len(end) > 0 && bytes.Compare(key, end) >= 0 {
-        return false
-    }
-    return true
+	start := p.region.StartKey
+	end := p.region.EndKey
+	if len(start) > 0 && bytes.Compare(key, start) < 0 {
+		return false
+	}
+	if len(end) > 0 && bytes.Compare(key, end) >= 0 {
+		return false
+	}
+	return true
 }
 
-// 检查是否有 Ready
 func (p *Peer) hasReady() bool {
-    return p.raftGroup.HasReady()
+	return p.raftGroup.HasReady()
+}
+
+// 应用日志
+func (p *Peer) processEntry(entry raftpb.Entry) {
+	if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
+		var cmd titankvpb.RaftCommand
+		if err := proto.Unmarshal(entry.Data, &cmd); err != nil {
+			return
+		}
+		p.apply(&cmd)
+	} else if entry.Type == raftpb.EntryConfChange {
+		// Week 12 Day 1 才会用到
+		var cc raftpb.ConfChange
+		cc.Unmarshal(entry.Data)
+		p.raftGroup.ApplyConfChange(cc)
+	}
+}
+
+func (p *Peer) apply(cmd *titankvpb.RaftCommand) {
+	// Key Encoding: z{RegionID}_{UserKey}
+	encodedKey := DataKey(p.regionID, cmd.Key)
+	
+	if cmd.Op == titankvpb.RaftCommand_PUT {
+		p.storage.engine.Put(encodedKey, cmd.Value)
+    		log.Printf("[Apply] Region %d writing key: %x (UserKey: %s)", 
+        		p.regionID, encodedKey, string(cmd.Key))
+	} else if cmd.Op == titankvpb.RaftCommand_DELETE {
+		p.storage.engine.Delete(encodedKey)
+	}
 }

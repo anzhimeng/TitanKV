@@ -52,6 +52,17 @@ void titan_get_statistics(titan_db_t* db, titan_stats_t* stats);
 // 【新增】
 void titan_set_gc_threshold(titan_db_t* db, double threshold);
 
+// 批量写入接口
+// keys: 指针数组，每个指针指向一个 key 字符串
+// klen: 数组，存储每个 key 的长度
+// vals: 指针数组，每个指针指向一个 value 字符串
+// vlen: 数组，存储每个 value 的长度
+// count: 批次中 KV 对的数量
+void titan_batch_write(titan_db_t* db, 
+                       const char** keys, size_t* klen, 
+                       const char** vals, size_t* vlen, 
+                       int count, char** err);
+
 #ifdef __cplusplus
 }
 #endif

@@ -16,7 +16,7 @@ import (
 	_ "net/http/pprof"
 
 	"titankv/api/titankvpb"
-	"titankv/pd/api/pdpb"
+	// "titankv/pd/api/pdpb" // 暂时不用
 	"titankv/pkg/raftstore"
 	"titankv/pkg/service"
 	"titankv/pkg/store"
@@ -24,7 +24,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -77,7 +76,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open db: %v", err)
 	}
-	// 确保在程序退出时关闭 DB
 	defer db.Close()
 
 	// 3. 启动 Metrics 采集
@@ -90,19 +88,16 @@ func main() {
 		}
 	}()
 
-	// 4. 连接 PD
-	pdAddr := "127.0.0.1:9000" // 假设 PD 地址
-	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("Failed to init pd: %v", err)
-	}
-	// pdClient := pdpb.NewPDClient(conn) // 暂时不用，Week 10 后面会用到
-
-	// 5. 初始化 RaftStore (Multi-Raft 核心)
+	// 4. 初始化 RaftStore (Multi-Raft 核心)
 	log.Printf("Starting RaftStore (Node %d)...", *nodeID)
 	
 	router := raftstore.NewRouter()
-	storeWorker := raftstore.NewStoreWorker(router)
+	
+	// 【新增】初始化 Transport
+	trans := raftstore.NewTransport(peers)
+	
+	// 【修改】传入 Transport
+	storeWorker := raftstore.NewStoreWorker(router, trans, db)
 	
 	// 启动 Worker 线程
 	go storeWorker.Run()
@@ -111,33 +106,37 @@ func main() {
 	// 在生产环境中，这里应该从 DB 加载所有 Region
 	// 为了跑通 Day 3，我们手动创建一个
 	initialRegion := &titankvpb.Region{
-		Id: 1, 
+		Id:       1, 
 		StartKey: nil, 
-		EndKey: nil,
-		// Peers 需要包含当前集群的所有节点，且分配好 PeerID
-		// 这里简化：假设 PeerID = NodeID
+		EndKey:   nil,
+		// Peers 需要包含当前集群的所有节点
+		RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1},
 	}
 	for id := range peers {
 		initialRegion.Peers = append(initialRegion.Peers, &titankvpb.Peer{Id: id, StoreId: id})
 	}
 
 	// 创建 Peer 并注册
-	// 注意：NewPeer 需要 engine，我们在 Day 2 留了 TODO，现在传进去
+	// 注意：这里需要根据当前节点的 ID 来创建 Peer
+	// 如果 initialRegion 包含 *nodeID，则创建
+	// (在我们的测试配置中，peers 包含所有节点，所以肯定会创建)
 	peer, err := raftstore.NewPeer(*nodeID, initialRegion, db) 
 	if err != nil {
 		log.Fatalf("Failed to create peer: %v", err)
 	}
 	
+	// 注册到 Router 和 Worker
+	// 注意：Receiver 是一个 Channel，Register 需要的是 chan Msg
 	router.Register(1, storeWorker.Receiver())
-	storeWorker.AddPeer(peer) // 需要去 store_worker.go 加这个方法
+	storeWorker.AddPeer(peer) 
 
-	// 6. 监听端口
+	// 5. 监听端口
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// 7. 启动 HTTP 服务 (Pprof + Metrics)
+	// 6. 启动 HTTP 服务 (Pprof + Metrics)
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID)
@@ -145,15 +144,15 @@ func main() {
 		log.Println(http.ListenAndServe(pprofAddr, nil))
 	}()
 
-	// 8. 创建 gRPC 服务器
+	// 7. 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
 	
-	// 【关键修改】传入 router，不再传 raftNode/batcher
+	// 【修改】NewServer 只需 router 和 db
 	titanServer := service.NewServer(router, db)
 	
 	titankvpb.RegisterTitanKVServer(grpcServer, titanServer)
 
-	// 9. 优雅关闭
+	// 8. 优雅关闭
 	done := make(chan struct{})
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -163,8 +162,8 @@ func main() {
 		log.Println("Shutting down gRPC server...")
 		grpcServer.GracefulStop()
 		
-		// 停止 StoreWorker
-		// storeWorker.Stop() // 可以在 Week 10 Day 5 实现
+		// 停止 Transport
+		trans.Close()
 		
 		close(done)
 	}()

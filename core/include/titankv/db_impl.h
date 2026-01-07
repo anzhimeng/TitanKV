@@ -87,6 +87,8 @@ class DBImpl : public DB {
   // 私有辅助函数声明
   std::string EncodeLogRecord(ValueType type, const Slice& key, const Slice& value);
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
+  // 增加 WriteBatch 支持
+  Status Write(const WriteOptions& options, WriteBatch* batch) override;
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
 
   Status DoCompactionWork(Compaction* c);
