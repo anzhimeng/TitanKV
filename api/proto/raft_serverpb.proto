@@ -1,0 +1,42 @@
+syntax = "proto3";
+package raft_serverpb;
+option go_package = "titankv/api/raft_serverpb";
+
+// 引用 titankv.proto 以使用 Region 定义
+// 注意：编译时 proto_path 需要指向 api/proto 目录
+import "titankv.proto"; 
+
+// 存储 Raft 的 HardState (Term, Vote, Commit)
+// 我们直接把 etcd/raft 的 HardState 字段展开在这里，避免引入外部 proto 依赖
+message RaftLocalState {
+    uint64 term = 1;
+    uint64 vote = 2;
+    uint64 commit = 3;
+    
+    // 记录该 Region 最大的 Log Index
+    uint64 last_index = 4;
+}
+
+// 记录日志截断状态 (Log Compaction)
+message RaftTruncatedState {
+    uint64 index = 1;
+    uint64 term = 2;
+}
+
+// 存储应用状态 (Applied Index)
+message RaftApplyState {
+    uint64 applied_index = 1;
+    RaftTruncatedState truncated_state = 2;
+}
+
+enum PeerState {
+    Normal = 0;
+    Tombstone = 1; // 标记该 Region 正在被销毁/迁移
+}
+
+// Region 本地状态 (包含 Region 元数据和状态)
+// Key: RegionStateKey(region_id) -> Value: RegionLocalState
+message RegionLocalState {
+    PeerState state = 1;
+    titankv.Region region = 2; // 引用 titankv.proto 中的定义
+}

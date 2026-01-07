@@ -26,6 +26,14 @@ message Peer {
     uint64 store_id = 2;
 }
 
+message Region {
+    uint64 id = 1;
+    bytes start_key = 2;
+    bytes end_key = 3;
+    RegionEpoch region_epoch = 4;
+    repeated Peer peers = 5;
+}
+
 message RegionContext {
     uint64 region_id = 1;
     RegionEpoch region_epoch = 2;
