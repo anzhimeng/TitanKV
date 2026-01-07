@@ -7,59 +7,71 @@ import (
 	"titankv/pd/api/pdpb"
 	"titankv/pkg/raft"
 	"titankv/pkg/store" // 用于 Get 直接读
+	"titankv/pkg/raftstore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 type Server struct {
 	titankvpb.UnimplementedTitanKVServer
-	raftNode *raft.TitanRaft // 改用 RaftNode
-	batcher  *raft.Batcher
+	router *raftstore.Router    // 【新增】路由组件
 	store    *store.TitanStore // 保留 store 用于读 (Day 3 暂不实现 ReadIndex)
 }
 
-func NewServer(r *raft.TitanRaft, b *raft.Batcher, s *store.TitanStore) *Server {
-	return &Server{
-		raftNode: r,
-		batcher:  b,
-		store:    s,
-	}
+func NewServer(router *raftstore.Router, s *store.TitanStore) *Server {
+    return &Server{
+        router: router,
+        store:  s,
+    }
 }
 
 func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb.PutResponse, error) {
-    // 1. 检查 Region ID
-    if req.Context != nil && req.Context.RegionId != s.raftNode.ID {
-        // 简单处理：为了测试方便，如果 ID 不对可以报错，但在单 Region 测试中通常 Client 填对就行
+    if len(req.Key) == 0 {
+        return nil, status.Error(codes.InvalidArgument, "empty key")
     }
 
-    // 2. 检查 Epoch 【关键修复】
-    if req.Context != nil {
-        // 使用 toPdpbEpoch 进行类型转换
-        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
-            return nil, status.Error(codes.Aborted, "EpochNotMatch")
-        }
+    // 1. 获取上下文中的 RegionID
+    // (Week 9 我们加上了 Context)
+    if req.Context == nil {
+        return nil, status.Error(codes.InvalidArgument, "missing region context")
+    }
+    regionID := req.Context.RegionId
+
+    // 2. 构造 RaftCmd 消息
+    // 我们需要在 Proto 里定义 RaftCmd (Week 3 定义过，复用)
+    cmd := &titankvpb.RaftCommand{
+        Op:    titankvpb.RaftCommand_PUT,
+        Key:   req.Key,
+        Value: req.Value,
+        // 这里还需要带上 Epoch，供 Worker 校验
     }
 
-    // 1. 检查 Leader
-    if s.raftNode.Node.Status().Lead != s.raftNode.ID {
-        return &titankvpb.PutResponse{
-            ErrCode:  1,
-            LeaderId: s.raftNode.Node.Status().Lead,
-        }, nil
-    }
+    // 3. 通过 Router 发送
+    msg := raftstore.NewMsgRaftCmd(regionID, cmd)
+    // 这里我们需要一个机制来等待结果 (Wait Response)
+    // MsgRaftCmd 需要携带一个 Callback channel
+    // 让我们去修改 message.go 增加 Callback
     
-	cmd := &titankvpb.RaftCommand{
-		Op:    titankvpb.RaftCommand_PUT,
-		Key:   req.Key,
-		Value: req.Value,
-	}
+    waitCh := make(chan error, 1)
+    msg.Callback = waitCh // 需要修改 Msg 结构体
 
-	err := s.batcher.Propose(ctx, cmd)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
+    if !s.router.Send(regionID, msg) {
+        // Region 不在本节点
+        return nil, status.Error(codes.NotFound, "region not found on this store")
+    }
 
-	return &titankvpb.PutResponse{ErrCode: 0}, nil
+    // 4. 等待结果
+    select {
+    case err := <-waitCh:
+        if err != nil {
+            // 这里可能返回 KeyNotInRegion 错误
+            // 需要转换为 gRPC 错误或者自定义 Response
+            return nil, status.Error(codes.Internal, err.Error())
+        }
+        return &titankvpb.PutResponse{}, nil
+    case <-ctx.Done():
+        return nil, ctx.Err()
+    }
 }
 
 func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb.GetResponse, error) {

@@ -5,48 +5,51 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
-	"time" // ✅ 删除：不再需要，Batcher 配置已移至 Raft 内部
-	"net/http"
-     _ "net/http/pprof" // 注册 pprof 路由
+	"time"
+
+	_ "net/http/pprof"
 
 	"titankv/api/titankvpb"
-	"titankv/pkg/raft"
+	"titankv/pd/api/pdpb"
+	"titankv/pkg/raftstore"
 	"titankv/pkg/service"
 	"titankv/pkg/store"
-	"titankv/pd/api/pdpb"
 
-	"google.golang.org/grpc"
-
-	
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-     "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	port    = flag.Int("port", 9090, "The server port")
-	dbPath  = flag.String("db_path", "/tmp/titankv_data", "Path to DB data")
-	nodeID  = flag.Uint64("id", 1, "Raft Node ID")
-	cluster = flag.String("cluster", "1=127.0.0.1:9090", "Cluster configuration")
+	port     = flag.Int("port", 9090, "The server port")
+	dbPath   = flag.String("db_path", "/tmp/titankv_data", "Path to DB data")
+	nodeID   = flag.Uint64("id", 1, "Raft Node ID")
+	cluster  = flag.String("cluster", "1=127.0.0.1:9090", "Cluster configuration")
 	directIO = flag.Bool("direct_io", false, "Enable Direct IO (io_uring)")
+)
+
+// 定义 Metrics
+var (
 	gcRunCounter = prometheus.NewGauge(prometheus.GaugeOpts{
-        Name: "titankv_gc_run_count",
-        Help: "Total number of GC runs",
-     })
-     gcKeysMoved = prometheus.NewGauge(prometheus.GaugeOpts{
-        Name: "titankv_gc_keys_moved",
-        Help: "Total keys moved by GC",
-     })
+		Name: "titankv_gc_run_count",
+		Help: "Total number of GC runs",
+	})
+	gcKeysMoved = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "titankv_gc_keys_moved",
+		Help: "Total keys moved by GC",
+	})
 )
 
 func init() {
-    prometheus.MustRegister(gcRunCounter)
-    prometheus.MustRegister(gcKeysMoved)
+	prometheus.MustRegister(gcRunCounter)
+	prometheus.MustRegister(gcKeysMoved)
 }
 
 func main() {
@@ -66,77 +69,102 @@ func main() {
 		}
 		peers[id] = kv[1]
 	}
-
 	log.Printf("Parsed peers: %v", peers)
 
 	// 2. 初始化 C++ 存储引擎
-	// 建议：为了防止同一台机器开多个节点冲突，可以在路径后追加 ID
-	// 但为了保持和你原有逻辑一致，这里先不做修改
-    log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
-    db, err := store.Open(*dbPath, *directIO)
+	log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
+	db, err := store.Open(*dbPath, *directIO)
 	if err != nil {
 		log.Fatalf("Failed to open db: %v", err)
 	}
+	// 确保在程序退出时关闭 DB
 	defer db.Close()
 
-	// 【新增】启动 Metrics 采集循环
-    go func() {
-        ticker := time.NewTicker(5 * time.Second)
-        for range ticker.C {
-            stats := db.GetStatistics()
-            gcRunCounter.Set(float64(stats.GCRunCount))
-            gcKeysMoved.Set(float64(stats.GCKeysMoved))
-            // log.Printf("GC Stats: Run=%d, Moved=%d", stats.GCRunCount, stats.GCKeysMoved)
-        }
-    }()
+	// 3. 启动 Metrics 采集
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		for range ticker.C {
+			stats := db.GetStatistics()
+			gcRunCounter.Set(float64(stats.GCRunCount))
+			gcKeysMoved.Set(float64(stats.GCKeysMoved))
+		}
+	}()
 
-    // 解析 PD 地址 (假设用 --pd 参数，或者复用 --cluster 的解析逻辑，通常 PD 是独立地址)
-    // 这里简单起见，假设 PD 在本地 9000
-    pdAddr := "127.0.0.1:9000"
-    
-    conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-    if err != nil {
+	// 4. 连接 PD
+	pdAddr := "127.0.0.1:9000" // 假设 PD 地址
+	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
 		log.Fatalf("Failed to init pd: %v", err)
-    }
-    pdClient := pdpb.NewPDClient(conn)
+	}
+	// pdClient := pdpb.NewPDClient(conn) // 暂时不用，Week 10 后面会用到
+
+	// 5. 初始化 RaftStore (Multi-Raft 核心)
+	log.Printf("Starting RaftStore (Node %d)...", *nodeID)
 	
-	// 3. 初始化 Raft 节点
-	// 注意：NewTitanRaft 内部现在会自动初始化 Batcher，不需要外部手动创建了
-	log.Printf("Starting Raft Node %d...", *nodeID)
-	raftNode := raft.NewTitanRaft(*nodeID, peers, db, *dbPath, pdClient)
-	batcher := raft.NewBatcher(raftNode, 500, 10*time.Millisecond)
-	// 4. 监听端口
+	router := raftstore.NewRouter()
+	storeWorker := raftstore.NewStoreWorker(router)
+	
+	// 启动 Worker 线程
+	go storeWorker.Run()
+
+	// 初始化默认 Region (ID=1)
+	// 在生产环境中，这里应该从 DB 加载所有 Region
+	// 为了跑通 Day 3，我们手动创建一个
+	initialRegion := &titankvpb.Region{
+		Id: 1, 
+		StartKey: nil, 
+		EndKey: nil,
+		// Peers 需要包含当前集群的所有节点，且分配好 PeerID
+		// 这里简化：假设 PeerID = NodeID
+	}
+	for id := range peers {
+		initialRegion.Peers = append(initialRegion.Peers, &titankvpb.Peer{Id: id, StoreId: id})
+	}
+
+	// 创建 Peer 并注册
+	// 注意：NewPeer 需要 engine，我们在 Day 2 留了 TODO，现在传进去
+	peer, err := raftstore.NewPeer(*nodeID, initialRegion, db) 
+	if err != nil {
+		log.Fatalf("Failed to create peer: %v", err)
+	}
+	
+	router.Register(1, storeWorker.Receiver())
+	storeWorker.AddPeer(peer) // 需要去 store_worker.go 加这个方法
+
+	// 6. 监听端口
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-    go func() {
-    	   http.Handle("/metrics", promhttp.Handler())
-        pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID) // 避免端口冲突: 6061, 6062...
-        log.Printf("Pprof listening on %s", pprofAddr)
-        log.Println(http.ListenAndServe(pprofAddr, nil))
-    }()
+	// 7. 启动 HTTP 服务 (Pprof + Metrics)
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID)
+		log.Printf("Pprof & Metrics listening on %s", pprofAddr)
+		log.Println(http.ListenAndServe(pprofAddr, nil))
+	}()
 
-	// 5. 创建 gRPC 服务器
+	// 8. 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
-
-	titanServer := service.NewServer(raftNode, batcher, db)
-
+	
+	// 【关键修改】传入 router，不再传 raftNode/batcher
+	titanServer := service.NewServer(router, db)
+	
 	titankvpb.RegisterTitanKVServer(grpcServer, titanServer)
 
-	// 6. 优雅关闭控制
-	// 使用一个 channel 来通知 main 函数可以退出了
+	// 9. 优雅关闭
 	done := make(chan struct{})
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		<-sigCh
+		
 		log.Println("Shutting down gRPC server...")
 		grpcServer.GracefulStop()
-		// 显式停止 Raft 节点
-		log.Println("Stopping Raft Node...")
-		raftNode.Stop() // 需要在 TitanRaft 中实现 Stop
+		
+		// 停止 StoreWorker
+		// storeWorker.Stop() // 可以在 Week 10 Day 5 实现
 		
 		close(done)
 	}()
@@ -146,10 +174,6 @@ func main() {
 		log.Fatalf("Failed to serve: %v", err)
 	}
 
-	// 等待关闭信号完成
 	<-done
-	
-	// defer db.Close() 会在这里执行
-	// 此时 Raft 已经停了，不会再有并发写入，DB 可以安全析构
-    log.Println("TitanKV Server exit.")
+	log.Println("TitanKV Server exit.")
 }

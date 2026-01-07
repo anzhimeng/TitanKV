@@ -8,6 +8,9 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+var ErrKeyNotInRegion = errors.New("key not in region")
+var ErrEpochNotMatch = errors.New("epoch not match")
+
 type Peer struct {
 	regionID   uint64
 	peerID     uint64
@@ -49,23 +52,51 @@ func NewPeer(storeID uint64, region *titankvpb.Region) (*Peer, error) {
 	}, nil
 }
 
-// 处理消息
 func (p *Peer) step(msg Msg) {
-	switch msg.Type {
-	case MsgTypeRaftMessage:
-		// 反序列化 raftpb.Message
-		var rMsg raftpb.Message
-		rMsg.Unmarshal(msg.RaftMessage.Data)
-		p.raftGroup.Step(rMsg)
+    switch msg.Type {
+    case MsgTypeRaftCmd:
+        // 1. 校验 Epoch (Week 9 的逻辑移到这里)
+        // ... (省略 Epoch 检查代码) ...
 
-	case MsgTypeRaftCmd:
-		// Propose
-		// data, _ := proto.Marshal(msg.RaftCmd)
-		// p.raftGroup.Propose(data)
+        // 2. 校验 Key Range
+        // Put/Delete/Get 都需要校验
+        key := msg.RaftCmd.Key
+        if !p.isKeyInRange(key) {
+            if msg.Callback != nil {
+                msg.Callback(ErrKeyNotInRegion)
+            }
+            return
+        }
+
+        // 3. 提交给 Raft
+        data, _ := proto.Marshal(msg.RaftCmd)
+        // 这里需要把 Callback 存起来，等 Apply 的时候调用
+        // 这涉及到 "Proposal 追踪"，比较复杂。
+        // Day 3 简化版：我们假设 Propose 成功就是成功 (虽然不严谨)，
+        // 或者直接在这里 callback(nil) 表示 "已提交队列"。
+        // 真正的做法是：ProposalContext 携带一个 UUID，Apply 时根据 UUID 找 Callback。
         
-    case MsgTypeTick:
-        p.raftGroup.Tick()
-	}
+        // 为了跑通流程，我们先在这里 callback
+        // Week 10 Day 4 会完善 Apply 流程
+        p.raftGroup.Propose(data)
+        // 注意：Callback 应该在 Apply 后调用，这里先暂存 TODO
+    }
+}
+
+// 辅助：检查 Key 是否在 Region 范围内 [Start, End)
+func (p *Peer) isKeyInRange(key []byte) bool {
+    start := p.region.StartKey
+    end := p.region.EndKey
+    
+    // Start <= Key
+    if len(start) > 0 && bytes.Compare(key, start) < 0 {
+        return false
+    }
+    // Key < End (End 为空表示无穷大)
+    if len(end) > 0 && bytes.Compare(key, end) >= 0 {
+        return false
+    }
+    return true
 }
 
 // 检查是否有 Ready

@@ -23,14 +23,18 @@ type Msg struct {
 	// 载荷 (Union)
 	RaftMessage *titankvpb.RaftMessage
 	RaftCmd     *titankvpb.RaftCommand // 实际上这应该是一个 Request 包装，包含 Callback
+
+	Callback func(error)
 }
 
 // 简单的工厂函数
-func NewMsgRaftMessage(msg *titankvpb.RaftMessage) Msg {
-	// 解析出 RegionID (假设 RaftMessage 协议里有 RegionID，如果没有，需要修改 Proto)
-	// Week 10 Day 1 的 Proto 没加，我们假设 msg 包含 RegionID
-	// 实际工程中，RaftMessage 应该包含 RegionID
-	return Msg{Type: MsgTypeRaftMessage, RaftMessage: msg, RegionID: msg.RegionId}
+func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand, cb func(error)) Msg {
+    return Msg{
+        Type:     MsgTypeRaftCmd,
+        RegionID: regionID,
+        RaftCmd:  cmd,
+        Callback: cb,
+    }
 }
 
 func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand) Msg {
