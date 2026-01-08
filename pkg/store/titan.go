@@ -284,3 +284,30 @@ func (s *TitanStore) GetApproximateSizes(startKeys, endKeys [][]byte) []uint64 {
 	}
 	return sizes
 }
+
+// pkg/store/titan.go
+
+func (s *TitanStore) DumpSST(start, end []byte, path string) error {
+    cPath := C.CString(path)
+    defer C.free(unsafe.Pointer(cPath))
+    
+    var cErr *C.char
+    // 调用 C 接口
+    var kStart, kEnd *C.char
+    if len(start) > 0 { kStart = (*C.char)(unsafe.Pointer(&start[0])) }
+    if len(end) > 0 { kEnd = (*C.char)(unsafe.Pointer(&end[0])) }
+
+    C.titan_dump_sst(s.db, kStart, C.size_t(len(start)), 
+                     kEnd, C.size_t(len(end)), cPath, &cErr)
+                     
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return errors.New(C.GoString(cErr))
+    }
+    return nil
+}
+
+func (s *TitanStore) GetSnapDir() string {
+    // 假设 dbPath 是 /tmp/data
+    return filepath.Join(filepath.Dir(s.path), "snap") // 或者 s.path + "/snap"
+}

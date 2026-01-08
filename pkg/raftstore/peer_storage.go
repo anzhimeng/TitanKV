@@ -1,6 +1,10 @@
 package raftstore
 
 import (
+     "io/ioutil"
+     "os"
+     "fmt"
+
 	"titankv/api/titankvpb"
 	"titankv/pkg/store" // C++ Store
 
@@ -206,4 +210,101 @@ func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState
     }
     
     return batch, nil
+}
+
+func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
+    // 1. 生成快照元数据 (Index, Term, ConfState)
+    // 这里的 Index 是 Applied Index
+    index := s.applyState.AppliedIndex
+    term := s.applyState.TruncatedState.Term // 近似值，或者查 Log
+    
+    // 2. 生成数据快照 (SST 文件)
+    // 文件路径: /tmp/titan/snap/region_1_idx_100.sst
+    fname := s.genSnapshotPath(index)
+    
+    // 调用 C++ 导出
+    err := s.engine.DumpSST(s.region.StartKey, s.region.EndKey, fname)
+    if err != nil {
+        return raftpb.Snapshot{}, err
+    }
+    
+    // 3. 返回 Snapshot 对象
+    // Data 字段存放文件名，接收端根据文件名读取文件内容
+    // (etcd/raft 默认 Data 是 []byte，这里我们存路径，或者把文件读进去)
+    // 如果文件很大，应该通过 stream 发送，这里简化为存路径，Transport 层处理文件传输
+    snap := raftpb.Snapshot{
+        Metadata: raftpb.SnapshotMetadata{
+            Index: index,
+            Term:  term,
+            ConfState: s.confState,
+        },
+        Data: []byte(fname), // Hack: 传路径
+    }
+    
+    return snap, nil
+}
+
+func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
+    // 1. 确定快照元数据
+    index := s.applyState.AppliedIndex
+    term := s.applyState.TruncatedState.Term
+    
+    // 如果没有 Term 信息（比如刚启动），尝试从 raftState 获取
+    if term == 0 {
+        term = s.raftState.Term
+    }
+    
+    // 2. 准备 ConfState
+    var cs raftpb.ConfState
+    for _, p := range s.region.Peers {
+        cs.Voters = append(cs.Voters, p.Id)
+    }
+
+    // 3. 生成 SST 文件
+    // 路径：/tmp/titan_data/snap/1_100.sst (region_index)
+    snapDir := s.engine.GetSnapDir() // 需要在 Store 中暴露这个路径
+    if err := os.MkdirAll(snapDir, 0750); err != nil {
+        return raftpb.Snapshot{}, err
+    }
+    
+    fname := filepath.Join(snapDir, fmt.Sprintf("%d_%d.sst", s.region.Id, index))
+    
+    // 调用 CGO 导出
+    // 注意：这里的 StartKey/EndKey 是编码后的 DataKey
+    // 应该传入 DataKey(regionID, StartKey)
+    start := DataKey(s.region.Id, s.region.StartKey)
+    
+    // 处理 EndKey 为空的情况 (无穷大)
+    var end []byte
+    if len(s.region.EndKey) > 0 {
+        end = DataKey(s.region.Id, s.region.EndKey)
+    } else {
+        // 下一个 Region 的 Start
+        end = DataKey(s.region.Id + 1, nil)
+    }
+
+    err := s.engine.DumpSST(start, end, fname)
+    if err != nil {
+        return raftpb.Snapshot{}, err
+    }
+
+    // 4. 读取文件内容放入 Snapshot (适用于小数据量)
+    // 对于大数据量，应该只传 Metadata，文件通过流式传输
+    // 这里采用【直接读入内存】的简化方案 (限制在几十MB以内)
+    data, err := ioutil.ReadFile(fname)
+    if err != nil {
+        return raftpb.Snapshot{}, err
+    }
+
+    // 构造 Snapshot
+    snap := raftpb.Snapshot{
+        Metadata: raftpb.SnapshotMetadata{
+            Index:     index,
+            Term:      term,
+            ConfState: cs,
+        },
+        Data: data, // 放入 SST 文件内容
+    }
+
+    return snap, nil
 }

@@ -91,6 +91,7 @@ class DBImpl : public DB {
   Status Write(const WriteOptions& options, WriteBatch* batch) override;
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   void GetApproximateSizes(const Range* range, int n, uint64_t* sizes);
+  Status DumpSST(const Slice& start, const Slice& end, const std::string& fname, uint64_t seq);
   Status DoCompactionWork(Compaction* c);
 
   // 【新增】辅助函数声明

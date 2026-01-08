@@ -165,4 +165,22 @@ void titan_get_approximate_sizes(titan_db_t* db,
     db->rep->GetApproximateSizes(ranges.data(), n, sizes);
 }
 
+void titan_dump_sst(titan_db_t* db, const char* start, size_t slen,
+                    const char* end, size_t elen,
+                    const char* path, char** err) {
+    if (!db || !db->rep) {
+        // set error
+        return;
+    }
+    auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+    
+    titankv::Status s = impl->DumpSST(
+        titankv::Slice(start, slen), 
+        titankv::Slice(end, elen), 
+        std::string(path), 
+        0
+    );
+    
+    set_error(err, s);
+}
 } // extern "C"

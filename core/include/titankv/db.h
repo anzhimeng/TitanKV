@@ -45,6 +45,12 @@ class DB {
                      std::string* value) = 0;
   virtual Status Write(const WriteOptions& options, WriteBatch* batch) = 0;
   virtual void GetApproximateSizes(const Range* range, int n, uint64_t* sizes) = 0;
+  // 【新增】将范围内的 KV 导出到一个 SST 文件
+  // range_start, range_end: 导出的 Key 范围
+  // file_path: 输出文件路径
+  // snapshot_seq: 使用的快照版本 (0 表示最新)
+  virtual Status DumpSST(const Slice& range_start, const Slice& range_end, 
+                         const std::string& file_path, uint64_t snapshot_seq) = 0;
 };
 
 } // namespace titankv
