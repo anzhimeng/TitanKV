@@ -127,9 +127,22 @@ func (p *Peer) processEntry(entry raftpb.Entry) {
 	if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
 		var cmd titankvpb.RaftCommand
 		if err := proto.Unmarshal(entry.Data, &cmd); err != nil {
+			log.Printf("Failed to unmarshal raft cmd: %v", err)
 			return
 		}
-		p.apply(&cmd)
+
+		// 分发 Normal 和 Admin 请求
+		if cmd.Type == titankvpb.RaftCommand_NORMAL {
+			p.applyNormal(&cmd)
+		} else if cmd.Type == titankvpb.RaftCommand_ADMIN {
+			p.applyAdmin(&cmd, entry.Index, entry.Term)
+		} else {
+            // 兼容旧代码（Week 10 之前没有 Type 字段，默认为 NORMAL）
+            // 如果你之前的 Put/Delete 逻辑没设置 Type，这里会进 else。
+            // 建议：直接视为 Normal。
+            p.applyNormal(&cmd)
+        }
+
 	} else if entry.Type == raftpb.EntryConfChange {
 		// Week 12 Day 1 才会用到
 		var cc raftpb.ConfChange
@@ -138,14 +151,30 @@ func (p *Peer) processEntry(entry raftpb.Entry) {
 	}
 }
 
-func (p *Peer) apply(cmd *titankvpb.RaftCommand) {
+func (p *Peer) applyAdmin(cmd *titankvpb.RaftCommand, index, term uint64) {
+	req := cmd.AdminRequest
+    if req == nil { return }
+
+	switch req.CmdType {
+	case titankvpb.AdminRequest_SPLIT:
+		// Day 3 的重头戏：执行分裂！
+        // 此时 Raft Log 已经提交，所有副本都会走到这里。
+		log.Printf("[Apply] Split command committed! Region: %d, SplitKey: %s, NewRegionID: %d", 
+            p.regionID, string(req.Split.SplitKey), req.Split.NewRegionId)
+        
+        // TODO (Week 11 Day 3): p.execSplit(req.Split)
+        
+	case titankvpb.AdminRequest_COMPACT:
+		// 处理 Log Compaction 请求
+	}
+}
+
+func (p *Peer) applyNormal(cmd *titankvpb.RaftCommand) {
 	// Key Encoding: z{RegionID}_{UserKey}
 	encodedKey := DataKey(p.regionID, cmd.Key)
 	
 	if cmd.Op == titankvpb.RaftCommand_PUT {
 		p.storage.engine.Put(encodedKey, cmd.Value)
-    		log.Printf("[Apply] Region %d writing key: %x (UserKey: %s)", 
-        		p.regionID, encodedKey, string(cmd.Key))
 	} else if cmd.Op == titankvpb.RaftCommand_DELETE {
 		p.storage.engine.Delete(encodedKey)
 	}

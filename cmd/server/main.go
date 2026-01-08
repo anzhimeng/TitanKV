@@ -16,7 +16,7 @@ import (
 	_ "net/http/pprof"
 
 	"titankv/api/titankvpb"
-	// "titankv/pd/api/pdpb" // 暂时不用
+	"titankv/pd/api/pdpb" // 暂时不用
 	"titankv/pkg/raftstore"
 	"titankv/pkg/service"
 	"titankv/pkg/store"
@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -69,7 +70,7 @@ func main() {
 		peers[id] = kv[1]
 	}
 	log.Printf("Parsed peers: %v", peers)
-
+	
 	// 2. 初始化 C++ 存储引擎
 	log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
 	db, err := store.Open(*dbPath, *directIO)
@@ -88,7 +89,21 @@ func main() {
 		}
 	}()
 
-	// 4. 初始化 RaftStore (Multi-Raft 核心)
+		// 4. 连接 PD
+	pdAddr := "127.0.0.1:9000"
+    
+     // 【修改】正确定义 conn
+	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+ 	if err != nil {
+		log.Fatalf("Failed to init pd: %v", err)
+	}
+     // 注意：conn 不要在 main 结束前关闭，或者你可以 defer conn.Close()
+     // 但因为 server 是常驻进程，不关也没事，直到进程退出。
+    
+     pdClient := pdpb.NewPDClient(conn)
+
+
+	// 5. 初始化 RaftStore (Multi-Raft 核心)
 	log.Printf("Starting RaftStore (Node %d)...", *nodeID)
 	
 	router := raftstore.NewRouter()
@@ -97,7 +112,7 @@ func main() {
 	trans := raftstore.NewTransport(peers)
 	
 	// 【修改】传入 Transport
-	storeWorker := raftstore.NewStoreWorker(router, trans, db)
+	storeWorker := raftstore.NewStoreWorker(router, trans, db, pdClient)
 	
 	// 启动 Worker 线程
 	go storeWorker.Run()

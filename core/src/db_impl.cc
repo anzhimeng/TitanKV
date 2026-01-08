@@ -1070,7 +1070,7 @@ void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
 }
 
 // 辅助函数：构造 InternalKey String (需在 db_impl.cc 或 util 中实现)
-std::string EncodeInternalKey(const Slice& user_key, uint64_t seq, ValueType type) {
+std::string DBImpl::EncodeInternalKey(const Slice& user_key, uint64_t seq, ValueType type) {
     std::string s;
     s.append(user_key.data(), user_key.size());
     PutFixed64(&s, PackSequenceAndType(seq, type));

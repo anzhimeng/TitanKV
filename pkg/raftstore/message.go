@@ -13,6 +13,7 @@ const (
 	MsgTypeTick        MsgType = 3 // 全局定时器触发的 Tick
 	MsgTypeSplit       MsgType = 4 // (后续) 分裂请求
 	MsgTypeRegionApproximateSize MsgType = 5 // (后续) 统计大小
+	MsgTypeSplitCheck MsgType = 6 
 )
 
 type Msg struct {
@@ -47,4 +48,8 @@ func NewMsgRaftCmd(regionID uint64, cmd *titankvpb.RaftCommand, cb func(error)) 
 
 func NewMsgTick() Msg {
 	return Msg{Type: MsgTypeTick}
+}
+
+func NewMsgSplitCheck(regionID uint64) Msg {
+    return Msg{Type: MsgTypeSplitCheck, RegionID: regionID}
 }

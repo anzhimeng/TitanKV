@@ -8,7 +8,10 @@
 
 namespace titankv {
 
-
+struct Range {
+  Slice start;
+  Slice limit;
+};
 
 // ==========================================
 // DB: 抽象基类接口

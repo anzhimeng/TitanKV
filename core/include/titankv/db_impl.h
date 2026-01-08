@@ -90,7 +90,7 @@ class DBImpl : public DB {
   // 增加 WriteBatch 支持
   Status Write(const WriteOptions& options, WriteBatch* batch) override;
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
-
+  void GetApproximateSizes(const Range* range, int n, uint64_t* sizes);
   Status DoCompactionWork(Compaction* c);
 
   // 【新增】辅助函数声明
@@ -99,6 +99,8 @@ class DBImpl : public DB {
     
   // 【新增】辅助：完成 GC 回填
   Status FinishGC(const std::vector<GCRecord>& gc_records);
+
+  std::string EncodeInternalKey(const Slice& user_key, uint64_t seq, ValueType type);
   
   DBImpl(const DBImpl&) = delete;
   DBImpl& operator=(const DBImpl&) = delete;

@@ -75,13 +75,42 @@ message DeleteResponse {
 // --- Raft 内部指令 ---
 
 message RaftCommand {
+    enum CmdType {
+        NORMAL = 0; // Put, Delete
+        ADMIN = 1;  // Split, Compact, ConfChange
+    }
+    CmdType type = 1;
+
     enum OpType {
         PUT = 0;
         DELETE = 1;
     }
-    OpType op = 1;
-    bytes key = 2;
-    bytes value = 3;
+    OpType op = 2;
+    bytes key = 3;
+    bytes value = 4;
+    // ----------------
+
+    AdminRequest admin_request = 5;
+}
+
+message AdminRequest {
+    enum AdminCmdType {
+        SPLIT = 0;
+        COMPACT = 1;
+        // CONF_CHANGE ... (使用 etcd 原生 EntryConfChange 处理，这里可以不定义)
+    }
+    AdminCmdType cmd_type = 1;
+    SplitRequest split = 2;
+}
+
+
+message SplitRequest {
+    // 分裂点 Key (Encoded or User Key? 通常用 Encoded Data Key)
+    bytes split_key = 1;
+    // 新分裂出来的 Region ID
+    uint64 new_region_id = 2;
+    // 新 Region 在各个 Store 上的 Peer ID
+    repeated uint64 new_peer_ids = 3; 
 }
 
 message BatchRaftCommand {
