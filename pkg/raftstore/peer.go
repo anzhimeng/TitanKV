@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"fmt"
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
 	"titankv/api/raft_serverpb" 
@@ -86,6 +87,14 @@ func (p *Peer) step(msg Msg) {
 		}
 
 	case MsgTypeRaftCmd:
+	     if msg.RaftCmd.Header != nil {
+            if err := p.checkEpoch(msg.RaftCmd.Header.RegionEpoch); err != nil {
+                if msg.Callback != nil {
+                    msg.Callback(err) // 返回 EpochNotMatch
+                }
+                return
+            }
+          }
 		// 1. 校验 Key Range
 		key := msg.RaftCmd.Key
 		if !p.isKeyInRange(key) {
@@ -268,4 +277,28 @@ func initRaftState(engine *store.TitanStore, region *titankvpb.Region) {
     }
     val2, _ := proto.Marshal(as)
     engine.Put(ApplyStateKey(region.Id), val2)
+}
+
+// 检查 Epoch 是否匹配
+func (p *Peer) checkEpoch(reqEpoch *titankvpb.RegionEpoch) error {
+    // 容错：如果请求没带 Epoch (旧 Client)，或者本地还没初始化好，先放行
+    // 生产环境应该严格拒绝
+    if reqEpoch == nil {
+        return nil 
+    }
+    
+    current := p.region.RegionEpoch
+    
+    // 1. Version (Split/Merge)
+    // 如果请求的版本比我的旧，说明 Client 路由过期
+    if reqEpoch.Version < current.Version {
+        return fmt.Errorf("epoch not match: version %d < %d", reqEpoch.Version, current.Version)
+    }
+    
+    // 2. ConfVer (成员变更)
+    if reqEpoch.ConfVer < current.ConfVer {
+         return fmt.Errorf("epoch not match: conf_ver %d < %d", reqEpoch.ConfVer, current.ConfVer)
+    }
+
+    return nil
 }

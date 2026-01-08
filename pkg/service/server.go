@@ -35,11 +35,17 @@ func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb
 
 	regionID := req.Context.RegionId
 
-	cmd := &titankvpb.RaftCommand{
-		Op:    titankvpb.RaftCommand_PUT,
-		Key:   req.Key,
-		Value: req.Value,
-	}
+    cmd := &titankvpb.RaftCommand{
+        Header: &titankvpb.RaftRequestHeader{
+            RegionId:    regionID,
+            RegionEpoch: req.Context.RegionEpoch,
+            Peer:        req.Context.Peer,
+        },
+        Type:  titankvpb.RaftCommand_NORMAL,
+        Op:    titankvpb.RaftCommand_PUT,
+        Key:   req.Key,
+        Value: req.Value,
+    }
 
     // 创建回调通道
 	waitCh := make(chan error, 1)
@@ -98,8 +104,14 @@ func (s *Server) Delete(ctx context.Context, req *titankvpb.DeleteRequest) (*tit
     regionID := req.Context.RegionId
 
     cmd := &titankvpb.RaftCommand{
-        Op:  titankvpb.RaftCommand_DELETE,
-        Key: req.Key,
+        Header: &titankvpb.RaftRequestHeader{
+            RegionId:    req.Context.RegionId,
+            RegionEpoch: req.Context.RegionEpoch,
+            Peer:        req.Context.Peer,
+        },
+        Type: titankvpb.RaftCommand_NORMAL,
+        Op:   titankvpb.RaftCommand_DELETE,
+        Key:  req.Key,
     }
     
     waitCh := make(chan error, 1)

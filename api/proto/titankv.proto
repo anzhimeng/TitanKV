@@ -74,23 +74,30 @@ message DeleteResponse {
 
 // --- Raft 内部指令 ---
 
+message RaftRequestHeader {
+    uint64 region_id = 1;
+    RegionEpoch region_epoch = 2;
+    Peer peer = 3;
+}
+
 message RaftCommand {
+    RaftRequestHeader header = 1;
     enum CmdType {
         NORMAL = 0; // Put, Delete
         ADMIN = 1;  // Split, Compact, ConfChange
     }
-    CmdType type = 1;
+    CmdType type = 2;
 
     enum OpType {
         PUT = 0;
         DELETE = 1;
     }
-    OpType op = 2;
-    bytes key = 3;
-    bytes value = 4;
+    OpType op = 3;
+    bytes key = 4;
+    bytes value = 5;
     // ----------------
 
-    AdminRequest admin_request = 5;
+    AdminRequest admin_request = 6;
 }
 
 message AdminRequest {
