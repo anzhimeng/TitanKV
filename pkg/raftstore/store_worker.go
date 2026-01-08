@@ -185,7 +185,13 @@ func (w *StoreWorker) handleReady() {
 	for _, peer := range readyPeers {
 		rd := peer.raftGroup.Ready()
 		for _, entry := range rd.CommittedEntries {
-			peer.processEntry(entry)
+            // 【修改】接收返回值
+            newPeer := peer.processEntry(entry)
+            
+            // 如果产生了分裂，注册新 Peer
+            if newPeer != nil {
+                w.registerPeer(newPeer)
+            }
 		}
 		peer.raftGroup.Advance(rd)
 	}
@@ -294,4 +300,13 @@ func (w *StoreWorker) askPDAllocID() (uint64, error) {
         return 0, err
     }
     return resp.Id, nil
+}
+
+func (w *StoreWorker) registerPeer(p *Peer) {
+    w.peers[p.regionID] = p
+    w.router.Register(p.regionID, w.receiver) // 注册路由
+    
+    // 如果新 Peer 也是本 Worker 管理，需要启动心跳吗？
+    // onTick 会遍历 w.peers，所以自动生效
+    log.Printf("Registered new peer for Region %d", p.regionID)
 }

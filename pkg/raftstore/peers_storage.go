@@ -18,6 +18,7 @@ type kvPair struct {
 type PeerStorage struct {
 	engine  *store.TitanStore
 	region  *titankvpb.Region
+
 	
 	// 缓存 RaftLocalState，因为 Raft 频繁访问 Term 和 Index
 	raftState titankvpb.RaftLocalState

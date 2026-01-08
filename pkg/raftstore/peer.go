@@ -6,6 +6,7 @@ import (
 	"log"
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
+	"titankv/api/raft_serverpb" 
 
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -20,6 +21,7 @@ var (
 type Peer struct {
 	regionID   uint64
 	peerID     uint64
+	storeID    uint64
 	raftGroup  *raft.RawNode
 	storage    *PeerStorage
 	region     *titankvpb.Region
@@ -67,6 +69,7 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 	return &Peer{
 		regionID:  region.Id,
 		peerID:    peerID,
+		storeID:   storeID, 
 		raftGroup: rn,
 		storage:   ps,
 		region:    region,
@@ -123,50 +126,44 @@ func (p *Peer) hasReady() bool {
 }
 
 // 应用日志
-func (p *Peer) processEntry(entry raftpb.Entry) {
+func (p *Peer) processEntry(entry raftpb.Entry) *Peer {
 	if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
 		var cmd titankvpb.RaftCommand
 		if err := proto.Unmarshal(entry.Data, &cmd); err != nil {
-			log.Printf("Failed to unmarshal raft cmd: %v", err)
-			return
+			return nil
 		}
-
-		// 分发 Normal 和 Admin 请求
+		
 		if cmd.Type == titankvpb.RaftCommand_NORMAL {
 			p.applyNormal(&cmd)
 		} else if cmd.Type == titankvpb.RaftCommand_ADMIN {
-			p.applyAdmin(&cmd, entry.Index, entry.Term)
-		} else {
-            // 兼容旧代码（Week 10 之前没有 Type 字段，默认为 NORMAL）
-            // 如果你之前的 Put/Delete 逻辑没设置 Type，这里会进 else。
-            // 建议：直接视为 Normal。
-            p.applyNormal(&cmd)
-        }
-
+			// 【修改】调用 applyAdmin 并返回
+			return p.applyAdmin(&cmd, entry.Index, entry.Term)
+		}
 	} else if entry.Type == raftpb.EntryConfChange {
 		// Week 12 Day 1 才会用到
 		var cc raftpb.ConfChange
 		cc.Unmarshal(entry.Data)
 		p.raftGroup.ApplyConfChange(cc)
 	}
+	return nil
 }
 
-func (p *Peer) applyAdmin(cmd *titankvpb.RaftCommand, index, term uint64) {
-	req := cmd.AdminRequest
-    if req == nil { return }
+// 增加 engine 参数 (因为 execSplit 需要写 DB)
+func (p *Peer) applyAdmin(cmd *titankvpb.RaftCommand, index, term uint64) *Peer {
+    req := cmd.AdminRequest
+    if req == nil { return nil }
 
 	switch req.CmdType {
 	case titankvpb.AdminRequest_SPLIT:
-		// Day 3 的重头戏：执行分裂！
-        // 此时 Raft Log 已经提交，所有副本都会走到这里。
-		log.Printf("[Apply] Split command committed! Region: %d, SplitKey: %s, NewRegionID: %d", 
-            p.regionID, string(req.Split.SplitKey), req.Split.NewRegionId)
-        
-        // TODO (Week 11 Day 3): p.execSplit(req.Split)
+        log.Printf("[Apply] Executing Split at %s", string(req.Split.SplitKey))
+        // 【关键】传入 engine (从 p.storage.engine 获取)
+        return p.execSplit(req.Split, p.storage.engine)
         
 	case titankvpb.AdminRequest_COMPACT:
-		// 处理 Log Compaction 请求
+		// Day 3 不需要实现，留空即可
+        return nil
 	}
+    return nil
 }
 
 func (p *Peer) applyNormal(cmd *titankvpb.RaftCommand) {
@@ -178,4 +175,97 @@ func (p *Peer) applyNormal(cmd *titankvpb.RaftCommand) {
 	} else if cmd.Op == titankvpb.RaftCommand_DELETE {
 		p.storage.engine.Delete(encodedKey)
 	}
+}
+
+func (p *Peer) execSplit(req *titankvpb.SplitRequest, engine *store.TitanStore) *Peer {
+    splitKey := req.SplitKey
+    newRegionID := req.NewRegionId
+    
+    // 1. 校验 Key 是否在范围内
+    // 如果 splitKey < StartKey 或 splitKey >= EndKey，说明已经分裂过了，或者包过时
+    if bytes.Compare(splitKey, p.region.StartKey) <= 0 || 
+       (len(p.region.EndKey) > 0 && bytes.Compare(splitKey, p.region.EndKey) >= 0) {
+        log.Printf("Split key %s out of range, ignore", string(splitKey))
+        return nil
+    }
+
+    // 2. 修改当前 Region (Region A)
+    // Copy 一份，防止并发问题
+    regionA := proto.Clone(p.region).(*titankvpb.Region)
+    regionA.RegionEpoch.Version++
+    regionA.EndKey = splitKey
+    
+    // 3. 创建新 Region (Region B)
+    regionB := proto.Clone(p.region).(*titankvpb.Region)
+    regionB.Id = newRegionID
+    regionB.RegionEpoch.Version++
+    regionB.StartKey = splitKey
+    // Peers 需要替换 ID
+    // 假设 req.NewPeerIds 和 region.Peers 顺序一一对应
+    for i, peer := range regionB.Peers {
+        if i < len(req.NewPeerIds) {
+            peer.Id = req.NewPeerIds[i]
+        }
+    }
+    
+    // 4. 持久化 (Meta A & Meta B)
+    // 这里应该用 WriteBatch 原子写入，Day 3 简化为两次 Put
+    // 写入 RegionLocalState
+    writeRegionState(engine, regionA)
+    writeRegionState(engine, regionB)
+    
+    // 初始化 Region B 的 Raft 初始状态 (Term=5, Index=5, etc)
+    // 这样 Region B 启动后不会从 0 开始
+    initRaftState(engine, regionB)
+
+    // 5. 更新内存状态
+    p.region = regionA // 更新自己的 Range
+    
+    // 6. 创建新的 Peer 对象 (Region B)
+    // 找到当前 Store 对应的 PeerID
+    // (逻辑同 NewPeer)
+    newPeer, err := NewPeer(p.storeID, regionB, engine) // PeerStorage storeID 需要存一下
+    if err != nil {
+        log.Fatalf("Failed to create new peer: %v", err)
+    }
+    
+    // 启动新 Peer 的 Raft
+    // 对于 Split 出来的 Region，它是 Follower 还是 Leader？
+    // TiKV 的做法：初始都是 Follower，由原 Leader 发起 Campaign 转移 Leadership。
+    // 这里我们让它作为 Follower 启动，等待选举。
+    
+    log.Printf("Split finish. Region A: [%s, %s), Region B: [%s, %s)", 
+        string(regionA.StartKey), string(regionA.EndKey),
+        string(regionB.StartKey), string(regionB.EndKey))
+        
+    return newPeer
+}
+
+// 辅助：持久化 RegionLocalState
+func writeRegionState(engine *store.TitanStore, region *titankvpb.Region) {
+    state := &raft_serverpb.RegionLocalState{
+        State:  raft_serverpb.PeerState_Normal,
+        Region: region,
+    }
+    val, _ := proto.Marshal(state)
+    key := RegionStateKey(region.Id)
+    engine.Put(key, val)
+}
+
+// 辅助：初始化 Raft 状态 (HardState & ApplyState)
+func initRaftState(engine *store.TitanStore, region *titankvpb.Region) {
+    // HardState
+    hs := &raft_serverpb.RaftLocalState{
+        Term: 5, Commit: 5, LastIndex: 5,
+    }
+    val, _ := proto.Marshal(hs)
+    engine.Put(RaftStateKey(region.Id), val)
+    
+    // ApplyState
+    as := &raft_serverpb.RaftApplyState{
+        AppliedIndex: 5,
+        TruncatedState: &raft_serverpb.RaftTruncatedState{Index: 5, Term: 5},
+    }
+    val2, _ := proto.Marshal(as)
+    engine.Put(ApplyStateKey(region.Id), val2)
 }
