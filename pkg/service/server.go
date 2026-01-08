@@ -163,3 +163,54 @@ func toPdpbEpoch(e *titankvpb.RegionEpoch) *pdpb.RegionEpoch {
     }
     return &pdpb.RegionEpoch{ConfVer: e.ConfVer, Version: e.Version}
 }
+
+func (s *Server) StreamSnapshot(stream titankvpb.TitanKV_StreamSnapshotServer) error {
+    var file *os.File
+    var regionID uint64
+    var raftSnapshot raftpb.Snapshot // 【新增】暂存元数据
+    
+    // 1. 接收 Loop
+    for {
+        chunk, err := stream.Recv()
+        if err == io.EOF {
+            // 传输完成
+            // 把文件路径塞回 Snapshot.Data
+            raftSnapshot.Data = []byte(file.Name())
+            
+            s.finishSnapshot(regionID, &raftSnapshot)
+            return stream.SendAndClose(&titankvpb.RaftResponse{})
+        }
+        if err != nil { return err }
+        
+        if file == nil {
+            regionID = chunk.RegionId
+            file, err = os.CreateTemp("", "snap-*.sst")
+        }
+        file.Write(chunk.Data)
+        
+        // 【新增】如果包含元数据，保存下来
+        if len(chunk.RaftSnapshotData) > 0 {
+            raftSnapshot.Unmarshal(chunk.RaftSnapshotData)
+        }
+    }
+}
+
+func (s *Server) finishSnapshot(regionID uint64, snap *raftpb.Snapshot) {
+    // 构造 MsgSnap 消息
+    // 注意：我们需要把 raftpb.Snapshot 包装进 raftpb.Message
+    rMsg := raftpb.Message{
+        Type: raftpb.MsgSnap,
+        Snapshot: *snap,
+    }
+    data, _ := rMsg.Marshal()
+    
+    msg := raftstore.Msg{
+        Type:     raftstore.MsgTypeRaftMessage, // 当作普通 Raft 消息处理
+        RegionID: regionID,
+        RaftMessage: &titankvpb.RaftMessage{
+            RegionId: regionID,
+            Data:     data,
+        },
+    }
+    s.router.Send(regionID, msg)
+}

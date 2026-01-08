@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TitanKV_Get_FullMethodName          = "/titankv.TitanKV/Get"
-	TitanKV_Put_FullMethodName          = "/titankv.TitanKV/Put"
-	TitanKV_Delete_FullMethodName       = "/titankv.TitanKV/Delete"
-	TitanKV_Raft_FullMethodName         = "/titankv.TitanKV/Raft"
-	TitanKV_UpdateConfig_FullMethodName = "/titankv.TitanKV/UpdateConfig"
+	TitanKV_Get_FullMethodName            = "/titankv.TitanKV/Get"
+	TitanKV_Put_FullMethodName            = "/titankv.TitanKV/Put"
+	TitanKV_Delete_FullMethodName         = "/titankv.TitanKV/Delete"
+	TitanKV_Raft_FullMethodName           = "/titankv.TitanKV/Raft"
+	TitanKV_UpdateConfig_FullMethodName   = "/titankv.TitanKV/UpdateConfig"
+	TitanKV_StreamSnapshot_FullMethodName = "/titankv.TitanKV/StreamSnapshot"
 )
 
 // TitanKVClient is the client API for TitanKV service.
@@ -40,6 +41,7 @@ type TitanKVClient interface {
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftResponse, error)
 	UpdateConfig(ctx context.Context, in *UpdateConfigRequest, opts ...grpc.CallOption) (*UpdateConfigResponse, error)
+	StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error)
 }
 
 type titanKVClient struct {
@@ -100,6 +102,19 @@ func (c *titanKVClient) UpdateConfig(ctx context.Context, in *UpdateConfigReques
 	return out, nil
 }
 
+func (c *titanKVClient) StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TitanKV_ServiceDesc.Streams[0], TitanKV_StreamSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SnapshotChunk, RaftResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TitanKV_StreamSnapshotClient = grpc.ClientStreamingClient[SnapshotChunk, RaftResponse]
+
 // TitanKVServer is the server API for TitanKV service.
 // All implementations must embed UnimplementedTitanKVServer
 // for forward compatibility.
@@ -114,6 +129,7 @@ type TitanKVServer interface {
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(context.Context, *RaftMessage) (*RaftResponse, error)
 	UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error)
+	StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error
 	mustEmbedUnimplementedTitanKVServer()
 }
 
@@ -138,6 +154,9 @@ func (UnimplementedTitanKVServer) Raft(context.Context, *RaftMessage) (*RaftResp
 }
 func (UnimplementedTitanKVServer) UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateConfig not implemented")
+}
+func (UnimplementedTitanKVServer) StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error {
+	return status.Error(codes.Unimplemented, "method StreamSnapshot not implemented")
 }
 func (UnimplementedTitanKVServer) mustEmbedUnimplementedTitanKVServer() {}
 func (UnimplementedTitanKVServer) testEmbeddedByValue()                 {}
@@ -250,6 +269,13 @@ func _TitanKV_UpdateConfig_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitanKV_StreamSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TitanKVServer).StreamSnapshot(&grpc.GenericServerStream[SnapshotChunk, RaftResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TitanKV_StreamSnapshotServer = grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]
+
 // TitanKV_ServiceDesc is the grpc.ServiceDesc for TitanKV service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -278,6 +304,12 @@ var TitanKV_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TitanKV_UpdateConfig_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamSnapshot",
+			Handler:       _TitanKV_StreamSnapshot_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "titankv.proto",
 }

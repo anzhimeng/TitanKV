@@ -51,6 +51,11 @@ class DB {
   // snapshot_seq: 使用的快照版本 (0 表示最新)
   virtual Status DumpSST(const Slice& range_start, const Slice& range_end, 
                          const std::string& file_path, uint64_t snapshot_seq) = 0;
+  // 删除范围内所有数据
+  virtual Status DeleteRange(const WriteOptions& options, const Slice& start, const Slice& end) = 0;
+  
+  // 导入外部 SST 文件
+  virtual Status IngestSST(const std::string& file_path) = 0;
 };
 
 } // namespace titankv

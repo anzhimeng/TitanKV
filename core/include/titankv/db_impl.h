@@ -92,6 +92,11 @@ class DBImpl : public DB {
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   void GetApproximateSizes(const Range* range, int n, uint64_t* sizes);
   Status DumpSST(const Slice& start, const Slice& end, const std::string& fname, uint64_t seq);
+
+    Status DeleteRange(const WriteOptions& options, const Slice& start, const Slice& end);
+  
+  // 导入外部 SST 文件
+  Status IngestSST(const std::string& file_path);
   Status DoCompactionWork(Compaction* c);
 
   // 【新增】辅助函数声明

@@ -378,3 +378,16 @@ func (p *Peer) checkEpoch(reqEpoch *titankvpb.RegionEpoch) error {
 
     return nil
 }
+
+func (p *Peer) applySnapshot(filePath string) {
+    log.Printf("[Snapshot] Ingesting SST: %s", filePath)
+    
+    // 1. 调用 C++ 导入数据 (DeleteRange 已跳过)
+    err := p.storage.engine.IngestSST(filePath)
+    if err != nil {
+        log.Fatalf("Ingest failed: %v", err)
+    }
+    
+    // 2. 删除临时文件
+    os.Remove(filePath)
+}

@@ -1,5 +1,6 @@
 syntax = "proto3";
 
+
 package titankv;
 option go_package = "titankv/api/titankvpb";
 
@@ -14,6 +15,7 @@ service TitanKV {
     // 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
     rpc Raft(RaftMessage) returns (RaftResponse);
     rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+    rpc StreamSnapshot(stream SnapshotChunk) returns (RaftResponse);
 }
 
 message RegionEpoch {
@@ -47,6 +49,20 @@ message RegionContext {
     uint64 region_id = 1;
     RegionEpoch region_epoch = 2;
     Peer peer = 3;
+}
+
+message SnapshotChunk {
+    uint64 region_id = 1;
+    // 整个文件的元数据
+    uint64 file_size = 2;
+    uint64 checksum = 3; // CRC32
+    
+    // 当前块
+    uint64 offset = 4;
+    bytes data = 5;
+    bool is_last = 6; // 是否最后一块
+    
+    bytes raft_snapshot_data = 7; 
 }
 
 // --- 请求/响应定义 ---
@@ -163,5 +179,17 @@ message UpdateConfigRequest {
     // 如果 > 0 则更新，否则忽略
     double gc_threshold = 1;
 }
+
+message RaftSnapshotMetadata {
+    uint64 index = 1;
+    uint64 term = 2;
+    RaftConfState conf_state = 3;
+}
+
+message RaftConfState {
+    repeated uint64 voters = 1;
+    repeated uint64 learners = 2;
+}
+
 
 message UpdateConfigResponse {}

@@ -96,3 +96,53 @@ func (t *Transport) Close() {
         conn.Close()
     }
 }
+
+func (t *Transport) SendSnapshot(msg *titankvpb.RaftMessage) error {
+    // 1. 获取文件路径 (从 msg.Data 反序列化出 Snapshot，再从 Data 获取路径)
+    var snap raftpb.Snapshot
+    proto.Unmarshal(msg.Data, &snap)
+    filePath := string(snap.Data) // Day 2 我们把路径存这里了
+    
+    // 2. 打开文件
+    file, err := os.Open(filePath)
+    if err != nil { return err }
+    defer file.Close()
+    
+    info, _ := file.Stat()
+    
+    // 3. 建立 Stream
+    client, err := t.getClient(msg.ToPeerId)
+    stream, err := client.StreamSnapshot(context.Background())
+    
+    // 4. 发送 Chunk
+    buf := make([]byte, 1024*1024) // 1MB Chunk
+    for {
+        n, err := file.Read(buf)
+        if err == io.EOF { break }
+        
+        chunk := &titankvpb.SnapshotChunk{
+            RegionId: msg.RegionId,
+            FileSize: uint64(info.Size()),
+            Data:     buf[:n],
+            IsLast:   false,
+        }
+        stream.Send(chunk)
+    }
+    
+    // 发送最后一块
+    // 序列化 Snapshot 元数据 (注意：snap.Data 此时是路径，接收端不需要路径，只需要 Metadata)
+    // 我们可以清空 Data 字段只传 Metadata
+    snapToSend := snap
+    snapToSend.Data = nil 
+    snapData, _ := snapToSend.Marshal()
+
+    stream.Send(&titankvpb.SnapshotChunk{
+        RegionId: msg.RegionId,
+        IsLast:   true,
+        RaftSnapshotData: snapData, // 【新增】
+    })
+    
+    
+    _, err = stream.CloseAndRecv()
+    return err
+}

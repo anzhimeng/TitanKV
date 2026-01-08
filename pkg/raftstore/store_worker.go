@@ -141,6 +141,17 @@ func (w *StoreWorker) handleReady() {
 		
 		// A. 收集日志和状态 (WAL)
 		// peer.storage.Append 返回 []kvPair
+		/ 【新增】处理 Snapshot
+          if !raft.IsEmptySnap(rd.Snapshot) {
+          	// 1. 获取文件路径
+          	filePath := string(rd.Snapshot.Data)
+            
+            	// 2. 调用 Peer 导入数据
+            	peer.applySnapshot(filePath)
+            
+            	// 3. 调用 Storage 应用元数据 (Week 4 已有)
+            	peer.storage.ApplySnapshot(rd.Snapshot)
+        	}
 		kvPairs, err := peer.storage.Append(rd.Entries, &rd.HardState)
 		if err != nil {
 			log.Fatalf("Append failed: %v", err)
