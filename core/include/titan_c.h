@@ -62,6 +62,10 @@ void titan_batch_write(titan_db_t* db,
                        const char** keys, size_t* klen, 
                        const char** vals, size_t* vlen, 
                        int count, char** err);
+void titan_get_approximate_sizes(titan_db_t* db, 
+                       const char** start_keys, size_t* start_lens,
+                       const char** end_keys, size_t* end_lens,
+                        int n, uint64_t* sizes)
 
 #ifdef __cplusplus
 }

@@ -746,6 +746,30 @@ Compaction* VersionSet::PickCompaction() {
     return c;
 }
 
+// 估算 Key 在整个 LSM Tree 中的“偏移量”
+// 通过累加所有小于 Key 的文件大小
+uint64_t VersionSet::ApproximateOffsetOf(Version* v, const Slice& key) {
+    uint64_t result = 0;
+    for (int level = 0; level < kNumLevels; level++) {
+        const std::vector<FileMetaData*>& files = v->GetFiles(level);
+        for (const auto* f : files) {
+            if (icmp_.Compare(f->largest, key) <= 0) {
+                // Key 大于整个文件，累加文件大小
+                result += f->file_size;
+            } else if (icmp_.Compare(f->smallest, key) > 0) {
+                // Key 小于整个文件，且文件有序（L1+），后面的文件更大，不用看了
+                if (level > 0) break;
+            } else {
+                // Key 在文件范围内，估算一部分
+                // 简单估算：认为各占一半，或者根据 Key 在 smallest/largest 之间的比例
+                // LevelDB 的实现比较复杂，这里简化：加上一半大小
+                result += (f->file_size / 2);
+            }
+        }
+    }
+    return result;
+}
+
 class LevelFileNumIterator : public Iterator {
  public:
   LevelFileNumIterator(const InternalKeyComparator& icmp,

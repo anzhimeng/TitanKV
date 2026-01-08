@@ -1050,4 +1050,31 @@ Status DBImpl::Write(const WriteOptions& opt, WriteBatch* batch) {
     return Status::OK();
 }
 
+void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Version* v = versions_->current();
+    
+    for (int i = 0; i < n; i++) {
+        // Convert user key to internal key for comparison
+        // Start: Sequence Max (查最新的)
+        // Limit: Sequence Max
+        // 注意：LSM 里的 Key 都是 InternalKey
+        std::string k1 = EncodeInternalKey(range[i].start, kMaxSequenceNumber, kTypeValue);
+        std::string k2 = EncodeInternalKey(range[i].limit, kMaxSequenceNumber, kTypeValue);
+        
+        uint64_t start_offset = versions_->ApproximateOffsetOf(v, k1);
+        uint64_t limit_offset = versions_->ApproximateOffsetOf(v, k2);
+        
+        sizes[i] = (limit_offset >= start_offset) ? (limit_offset - start_offset) : 0;
+    }
+}
+
+// 辅助函数：构造 InternalKey String (需在 db_impl.cc 或 util 中实现)
+std::string EncodeInternalKey(const Slice& user_key, uint64_t seq, ValueType type) {
+    std::string s;
+    s.append(user_key.data(), user_key.size());
+    PutFixed64(&s, PackSequenceAndType(seq, type));
+    return s;
+}
+
 } // namespace titankv

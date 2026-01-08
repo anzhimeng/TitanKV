@@ -236,3 +236,19 @@ func (s *TitanStore) BatchPut(keys [][]byte, values [][]byte) error {
 func (s *TitanStore) SetGCThreshold(threshold float64) {
     C.titan_set_gc_threshold(s.db, C.double(threshold))
 }
+
+func (s *TitanStore) GetApproximateSizes(startKeys, endKeys [][]byte) []uint64 {
+    n := len(startKeys)
+    if n != len(endKeys) || n == 0 { return nil }
+    
+    // 构造 C 数组 (此处略繁琐，为了演示逻辑)
+    // 实际上需要分配 C 内存并拷贝
+    // 简单实现：循环调用单次 Get (C++ 锁开销较大，生产环境应 Batch)
+    // 但为了 Day 1 跑通，我们先循环调用 CGO 接口，或者就在 CGO 层做循环
+    
+    // 假设你已经实现了 titan_get_approximate_sizes 的 CGO 绑定
+    // ...
+    
+    // 返回 mock 值用于测试 (Week 11 Day 1 重点是调度逻辑，C++ 估算可以先 Mock)
+    // return []uint64{100 * 1024 * 1024} // 100MB
+}

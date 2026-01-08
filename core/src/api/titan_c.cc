@@ -152,4 +152,17 @@ void titan_batch_write(titan_db_t* db,
     set_error(err, s);
 }
 
+void titan_get_approximate_sizes(titan_db_t* db, 
+                                 const char** start_keys, size_t* start_lens,
+                                 const char** end_keys, size_t* end_lens,
+                                 int n, uint64_t* sizes) {
+    std::vector<Range> ranges(n);
+    for (int i=0; i<n; ++i) {
+        ranges[i].start = Slice(start_keys[i], start_lens[i]);
+        ranges[i].limit = Slice(end_keys[i], end_lens[i]);
+    }
+    
+    db->rep->GetApproximateSizes(ranges.data(), n, sizes);
+}
+
 } // extern "C"

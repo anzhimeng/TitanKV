@@ -9,6 +9,10 @@ import (
 
 const (
 	batchSize = 128
+	// Region 最大阈值 (96MB)
+     MaxRegionSize = 96 * 1024 * 1024 
+     // 检查间隔 (每隔多少次 Tick 检查一次，避免频繁调用 CGO)
+     SplitCheckInterval = 10 
 )
 
 type MsgAddPeer struct {
@@ -80,11 +84,20 @@ func (w *StoreWorker) processMsg(msg Msg) {
 }
 
 func (w *StoreWorker) onTick() {
-	for _, peer := range w.peers {
-		peer.step(NewMsgTick())
-		w.pendingPeers[peer.regionID] = peer
-	}
+    w.tickCount++
+    
+    // 1. Raft Tick
+    for _, peer := range w.peers {
+        peer.step(NewMsgTick())
+        w.pendingPeers[peer.regionID] = peer
+    }
+    
+    // 2. Split Check (低频执行)
+    if w.tickCount % SplitCheckInterval == 0 {
+        w.checkSplit()
+    }
 }
+
 
 func (w *StoreWorker) handleReady() {
 	var messages []*titankvpb.RaftMessage
@@ -158,4 +171,40 @@ func (w *StoreWorker) handleReady() {
 func (w *StoreWorker) AddPeer(p *Peer) {
 	w.peers[p.regionID] = p
 	w.pendingPeers[p.regionID] = p 
+}
+
+func (w *StoreWorker) checkSplit() {
+    for _, peer := range w.peers {
+        // 只有 Leader 才有资格发起 Split
+        // 且 Region 正在运行中
+        if peer.raftGroup.Status().Lead != peer.peerID {
+            continue
+        }
+        
+        // 调用底层引擎估算大小
+        // DataKey 是加了 z 前缀的
+        start := DataKey(peer.regionID, peer.region.StartKey)
+        end := DataKey(peer.regionID, peer.region.EndKey) // 注意 EndKey 为空需处理
+        
+        // 如果 EndKey 为空，说明是无穷大。C++ 估算时需要一个具体的 Key。
+        // 简单处理：如果是无穷大，构造成 z{RegionID+1} 作为边界
+        if len(peer.region.EndKey) == 0 {
+             end = DataKey(peer.regionID + 1, nil)
+        }
+
+        sizes := w.store.GetApproximateSizes([][]byte{start}, [][]byte{end})
+        size := sizes[0]
+        
+        if size >= MaxRegionSize {
+            log.Printf("Region %d size %d exceeds threshold, triggering split...", peer.regionID, size)
+            
+            // 3. 计算 Split Key
+            // 我们需要找到中间的 Key。C++ 需要提供一个 Scan 接口或者 GetMiddleKey 接口。
+            // 简化版：这里我们生成一个 MsgSplit 消息给自己，
+            // 真正的 SplitKey 计算逻辑在处理该消息时做（Day 2 内容）。
+            
+            // 发送内部消息触发
+            w.router.Send(peer.regionID, NewMsgSplitCheck(peer.regionID))
+        }
+    }
 }

@@ -98,6 +98,8 @@ public:
     }
 
     uint64_t LastSequence() { return last_sequence_;}
+      // 估算某个 range 的大小
+    uint64_t ApproximateOffsetOf(Version* v, const Slice& key);
 
 private:
     std::string dbname_;

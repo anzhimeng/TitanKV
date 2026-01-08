@@ -41,6 +41,7 @@ class DB {
                      const Slice& key,
                      std::string* value) = 0;
   virtual Status Write(const WriteOptions& options, WriteBatch* batch) = 0;
+  virtual void GetApproximateSizes(const Range* range, int n, uint64_t* sizes) = 0;
 };
 
 } // namespace titankv
