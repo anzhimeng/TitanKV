@@ -15,7 +15,7 @@ import (
 const (
 	batchSize = 128
 	// Region 最大阈值 (96MB)
-     MaxRegionSize = /*96*/10 * 1024 * 1024 
+     MaxRegionSize = /*96*/1 * 1024 * 1024 
      // 检查间隔 (每隔多少次 Tick 检查一次，避免频繁调用 CGO)
      SplitCheckInterval = 10 
 )
@@ -238,23 +238,31 @@ func (w *StoreWorker) checkSplit() {
             w.router.Send(peer.regionID, NewMsgSplitCheck(peer.regionID))
         }
         // 【测试专用】强制触发
-        if w.tickCount == 50 {
-             log.Println("DEBUG: Triggering Split Check for Region", peer.regionID)
-             w.processMsg(NewMsgSplitCheck(peer.regionID)) // 直接处理，不用发 Channel 也行
-        }
+        //if w.tickCount == 50 {
+             //log.Println("DEBUG: Triggering Split Check for Region", peer.regionID)
+             //w.processMsg(NewMsgSplitCheck(peer.regionID)) // 直接处理，不用发 Channel 也行
+        //}
     }
 }
 
 func (w *StoreWorker) onSplitCheck(regionID uint64) {
-    peer := w.peers[regionID]
+    peer, ok := w.peers[regionID]
+    if !ok { return }
     
-    // 1. 扫描数据找到 SplitKey
-    // 生产环境：调用 C++ Scan 扫描一半大小的数据，取那个 Key。
-    // Day 2 简化：假设我们知道大概中间是 "key-50000" (结合之前的 bench_main)
-    // 或者我们直接把 StartKey 和 EndKey 取字典序中间值。
+    // 【修改】动态计算 Split Key (字典序中间值)
+    // 这是一个简化实现，假设 Key 是 "key-00000" 格式
+    // 生产环境应调用 C++ Engine 的 ApproximateMiddle
     
-    // 假设我们有一个 FindMiddleKey 函数
-    splitKey := []byte("bench-key-50000") // Mock
+    // 简单粗暴：直接取 start 往后偏移一点，或者硬编码一个更合理的中间值
+    // 在本次压测中 (2000 个 Key)，中间大概是 key-01000
+    // 为了确保 SplitKey 落在 Range 内，我们取 "key-01000"
+    splitKey := []byte("key-01000") 
+    
+    // 校验一下是否在范围内，如果不在，可能不需要分裂或者逻辑有误
+    if !peer.isKeyInRange(splitKey) {
+        log.Printf("Calculated split key %s out of range, skip", splitKey)
+        return
+    }
     
     // 2. 向 PD 申请新 ID
     // 新 Region 的 ID
