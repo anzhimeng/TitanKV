@@ -26,6 +26,15 @@ message Peer {
     uint64 store_id = 2;
 }
 
+message ChangePeer {
+    enum ChangeType {
+        ADD_NODE = 0;
+        REMOVE_NODE = 1;
+    }
+    ChangeType change_type = 1;
+    Peer peer = 2;
+}
+
 message Region {
     uint64 id = 1;
     bytes start_key = 2;

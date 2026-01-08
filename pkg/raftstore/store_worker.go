@@ -187,7 +187,11 @@ func (w *StoreWorker) handleReady() {
 		for _, entry := range rd.CommittedEntries {
             // 【修改】接收返回值
             newPeer := peer.processEntry(entry)
-            
+            // 检查是否被移除
+            if peer.stopped {
+                w.removePeer(peer)
+                continue
+            }
             // 如果产生了分裂，注册新 Peer
             if newPeer != nil {
                 w.registerPeer(newPeer)
@@ -197,6 +201,14 @@ func (w *StoreWorker) handleReady() {
 	}
 
 	w.pendingPeers = make(map[uint64]*Peer)
+}
+
+func (w *StoreWorker) removePeer(p *Peer) {
+    delete(w.peers, p.regionID)
+    w.router.Unregister(p.regionID)
+    // 物理清理数据 (DeleteRange)
+    // ...
+    log.Printf("Peer %d removed from Region %d", p.peerID, p.regionID)
 }
 
 func (w *StoreWorker) AddPeer(p *Peer) {

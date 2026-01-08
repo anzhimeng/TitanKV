@@ -21,6 +21,52 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ChangePeer_ChangeType int32
+
+const (
+	ChangePeer_ADD_NODE    ChangePeer_ChangeType = 0
+	ChangePeer_REMOVE_NODE ChangePeer_ChangeType = 1
+)
+
+// Enum value maps for ChangePeer_ChangeType.
+var (
+	ChangePeer_ChangeType_name = map[int32]string{
+		0: "ADD_NODE",
+		1: "REMOVE_NODE",
+	}
+	ChangePeer_ChangeType_value = map[string]int32{
+		"ADD_NODE":    0,
+		"REMOVE_NODE": 1,
+	}
+)
+
+func (x ChangePeer_ChangeType) Enum() *ChangePeer_ChangeType {
+	p := new(ChangePeer_ChangeType)
+	*p = x
+	return p
+}
+
+func (x ChangePeer_ChangeType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ChangePeer_ChangeType) Descriptor() protoreflect.EnumDescriptor {
+	return file_titankv_proto_enumTypes[0].Descriptor()
+}
+
+func (ChangePeer_ChangeType) Type() protoreflect.EnumType {
+	return &file_titankv_proto_enumTypes[0]
+}
+
+func (x ChangePeer_ChangeType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ChangePeer_ChangeType.Descriptor instead.
+func (ChangePeer_ChangeType) EnumDescriptor() ([]byte, []int) {
+	return file_titankv_proto_rawDescGZIP(), []int{2, 0}
+}
+
 type RaftCommand_CmdType int32
 
 const (
@@ -51,11 +97,11 @@ func (x RaftCommand_CmdType) String() string {
 }
 
 func (RaftCommand_CmdType) Descriptor() protoreflect.EnumDescriptor {
-	return file_titankv_proto_enumTypes[0].Descriptor()
+	return file_titankv_proto_enumTypes[1].Descriptor()
 }
 
 func (RaftCommand_CmdType) Type() protoreflect.EnumType {
-	return &file_titankv_proto_enumTypes[0]
+	return &file_titankv_proto_enumTypes[1]
 }
 
 func (x RaftCommand_CmdType) Number() protoreflect.EnumNumber {
@@ -64,7 +110,7 @@ func (x RaftCommand_CmdType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RaftCommand_CmdType.Descriptor instead.
 func (RaftCommand_CmdType) EnumDescriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{11, 0}
+	return file_titankv_proto_rawDescGZIP(), []int{12, 0}
 }
 
 type RaftCommand_OpType int32
@@ -97,11 +143,11 @@ func (x RaftCommand_OpType) String() string {
 }
 
 func (RaftCommand_OpType) Descriptor() protoreflect.EnumDescriptor {
-	return file_titankv_proto_enumTypes[1].Descriptor()
+	return file_titankv_proto_enumTypes[2].Descriptor()
 }
 
 func (RaftCommand_OpType) Type() protoreflect.EnumType {
-	return &file_titankv_proto_enumTypes[1]
+	return &file_titankv_proto_enumTypes[2]
 }
 
 func (x RaftCommand_OpType) Number() protoreflect.EnumNumber {
@@ -110,7 +156,7 @@ func (x RaftCommand_OpType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RaftCommand_OpType.Descriptor instead.
 func (RaftCommand_OpType) EnumDescriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{11, 1}
+	return file_titankv_proto_rawDescGZIP(), []int{12, 1}
 }
 
 type AdminRequest_AdminCmdType int32
@@ -143,11 +189,11 @@ func (x AdminRequest_AdminCmdType) String() string {
 }
 
 func (AdminRequest_AdminCmdType) Descriptor() protoreflect.EnumDescriptor {
-	return file_titankv_proto_enumTypes[2].Descriptor()
+	return file_titankv_proto_enumTypes[3].Descriptor()
 }
 
 func (AdminRequest_AdminCmdType) Type() protoreflect.EnumType {
-	return &file_titankv_proto_enumTypes[2]
+	return &file_titankv_proto_enumTypes[3]
 }
 
 func (x AdminRequest_AdminCmdType) Number() protoreflect.EnumNumber {
@@ -156,7 +202,7 @@ func (x AdminRequest_AdminCmdType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AdminRequest_AdminCmdType.Descriptor instead.
 func (AdminRequest_AdminCmdType) EnumDescriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{12, 0}
+	return file_titankv_proto_rawDescGZIP(), []int{13, 0}
 }
 
 type RegionEpoch struct {
@@ -263,6 +309,58 @@ func (x *Peer) GetStoreId() uint64 {
 	return 0
 }
 
+type ChangePeer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChangeType    ChangePeer_ChangeType  `protobuf:"varint,1,opt,name=change_type,json=changeType,proto3,enum=titankv.ChangePeer_ChangeType" json:"change_type,omitempty"`
+	Peer          *Peer                  `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangePeer) Reset() {
+	*x = ChangePeer{}
+	mi := &file_titankv_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangePeer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangePeer) ProtoMessage() {}
+
+func (x *ChangePeer) ProtoReflect() protoreflect.Message {
+	mi := &file_titankv_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangePeer.ProtoReflect.Descriptor instead.
+func (*ChangePeer) Descriptor() ([]byte, []int) {
+	return file_titankv_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ChangePeer) GetChangeType() ChangePeer_ChangeType {
+	if x != nil {
+		return x.ChangeType
+	}
+	return ChangePeer_ADD_NODE
+}
+
+func (x *ChangePeer) GetPeer() *Peer {
+	if x != nil {
+		return x.Peer
+	}
+	return nil
+}
+
 type Region struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -276,7 +374,7 @@ type Region struct {
 
 func (x *Region) Reset() {
 	*x = Region{}
-	mi := &file_titankv_proto_msgTypes[2]
+	mi := &file_titankv_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -288,7 +386,7 @@ func (x *Region) String() string {
 func (*Region) ProtoMessage() {}
 
 func (x *Region) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[2]
+	mi := &file_titankv_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -301,7 +399,7 @@ func (x *Region) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Region.ProtoReflect.Descriptor instead.
 func (*Region) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{2}
+	return file_titankv_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Region) GetId() uint64 {
@@ -350,7 +448,7 @@ type RegionContext struct {
 
 func (x *RegionContext) Reset() {
 	*x = RegionContext{}
-	mi := &file_titankv_proto_msgTypes[3]
+	mi := &file_titankv_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -362,7 +460,7 @@ func (x *RegionContext) String() string {
 func (*RegionContext) ProtoMessage() {}
 
 func (x *RegionContext) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[3]
+	mi := &file_titankv_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -375,7 +473,7 @@ func (x *RegionContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegionContext.ProtoReflect.Descriptor instead.
 func (*RegionContext) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{3}
+	return file_titankv_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RegionContext) GetRegionId() uint64 {
@@ -409,7 +507,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_titankv_proto_msgTypes[4]
+	mi := &file_titankv_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +519,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[4]
+	mi := &file_titankv_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +532,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{4}
+	return file_titankv_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetRequest) GetContext() *RegionContext {
@@ -460,7 +558,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_titankv_proto_msgTypes[5]
+	mi := &file_titankv_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -472,7 +570,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[5]
+	mi := &file_titankv_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -485,7 +583,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{5}
+	return file_titankv_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetResponse) GetValue() []byte {
@@ -506,7 +604,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_titankv_proto_msgTypes[6]
+	mi := &file_titankv_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -518,7 +616,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[6]
+	mi := &file_titankv_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -531,7 +629,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{6}
+	return file_titankv_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PutRequest) GetContext() *RegionContext {
@@ -565,7 +663,7 @@ type PutResponse struct {
 
 func (x *PutResponse) Reset() {
 	*x = PutResponse{}
-	mi := &file_titankv_proto_msgTypes[7]
+	mi := &file_titankv_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -577,7 +675,7 @@ func (x *PutResponse) String() string {
 func (*PutResponse) ProtoMessage() {}
 
 func (x *PutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[7]
+	mi := &file_titankv_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -590,7 +688,7 @@ func (x *PutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutResponse.ProtoReflect.Descriptor instead.
 func (*PutResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{7}
+	return file_titankv_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PutResponse) GetErrCode() int32 {
@@ -617,7 +715,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_titankv_proto_msgTypes[8]
+	mi := &file_titankv_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -629,7 +727,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[8]
+	mi := &file_titankv_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -642,7 +740,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{8}
+	return file_titankv_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DeleteRequest) GetContext() *RegionContext {
@@ -669,7 +767,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_titankv_proto_msgTypes[9]
+	mi := &file_titankv_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -681,7 +779,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[9]
+	mi := &file_titankv_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -694,7 +792,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{9}
+	return file_titankv_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DeleteResponse) GetErrCode() int32 {
@@ -722,7 +820,7 @@ type RaftRequestHeader struct {
 
 func (x *RaftRequestHeader) Reset() {
 	*x = RaftRequestHeader{}
-	mi := &file_titankv_proto_msgTypes[10]
+	mi := &file_titankv_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +832,7 @@ func (x *RaftRequestHeader) String() string {
 func (*RaftRequestHeader) ProtoMessage() {}
 
 func (x *RaftRequestHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[10]
+	mi := &file_titankv_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +845,7 @@ func (x *RaftRequestHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftRequestHeader.ProtoReflect.Descriptor instead.
 func (*RaftRequestHeader) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{10}
+	return file_titankv_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RaftRequestHeader) GetRegionId() uint64 {
@@ -785,7 +883,7 @@ type RaftCommand struct {
 
 func (x *RaftCommand) Reset() {
 	*x = RaftCommand{}
-	mi := &file_titankv_proto_msgTypes[11]
+	mi := &file_titankv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -797,7 +895,7 @@ func (x *RaftCommand) String() string {
 func (*RaftCommand) ProtoMessage() {}
 
 func (x *RaftCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[11]
+	mi := &file_titankv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -810,7 +908,7 @@ func (x *RaftCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftCommand.ProtoReflect.Descriptor instead.
 func (*RaftCommand) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{11}
+	return file_titankv_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RaftCommand) GetHeader() *RaftRequestHeader {
@@ -865,7 +963,7 @@ type AdminRequest struct {
 
 func (x *AdminRequest) Reset() {
 	*x = AdminRequest{}
-	mi := &file_titankv_proto_msgTypes[12]
+	mi := &file_titankv_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -877,7 +975,7 @@ func (x *AdminRequest) String() string {
 func (*AdminRequest) ProtoMessage() {}
 
 func (x *AdminRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[12]
+	mi := &file_titankv_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -890,7 +988,7 @@ func (x *AdminRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdminRequest.ProtoReflect.Descriptor instead.
 func (*AdminRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{12}
+	return file_titankv_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AdminRequest) GetCmdType() AdminRequest_AdminCmdType {
@@ -921,7 +1019,7 @@ type SplitRequest struct {
 
 func (x *SplitRequest) Reset() {
 	*x = SplitRequest{}
-	mi := &file_titankv_proto_msgTypes[13]
+	mi := &file_titankv_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -933,7 +1031,7 @@ func (x *SplitRequest) String() string {
 func (*SplitRequest) ProtoMessage() {}
 
 func (x *SplitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[13]
+	mi := &file_titankv_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -946,7 +1044,7 @@ func (x *SplitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SplitRequest.ProtoReflect.Descriptor instead.
 func (*SplitRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{13}
+	return file_titankv_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SplitRequest) GetSplitKey() []byte {
@@ -979,7 +1077,7 @@ type BatchRaftCommand struct {
 
 func (x *BatchRaftCommand) Reset() {
 	*x = BatchRaftCommand{}
-	mi := &file_titankv_proto_msgTypes[14]
+	mi := &file_titankv_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -991,7 +1089,7 @@ func (x *BatchRaftCommand) String() string {
 func (*BatchRaftCommand) ProtoMessage() {}
 
 func (x *BatchRaftCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[14]
+	mi := &file_titankv_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1004,7 +1102,7 @@ func (x *BatchRaftCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchRaftCommand.ProtoReflect.Descriptor instead.
 func (*BatchRaftCommand) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{14}
+	return file_titankv_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BatchRaftCommand) GetCommands() []*RaftCommand {
@@ -1026,7 +1124,7 @@ type RaftMessage struct {
 
 func (x *RaftMessage) Reset() {
 	*x = RaftMessage{}
-	mi := &file_titankv_proto_msgTypes[15]
+	mi := &file_titankv_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1038,7 +1136,7 @@ func (x *RaftMessage) String() string {
 func (*RaftMessage) ProtoMessage() {}
 
 func (x *RaftMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[15]
+	mi := &file_titankv_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1051,7 +1149,7 @@ func (x *RaftMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftMessage.ProtoReflect.Descriptor instead.
 func (*RaftMessage) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{15}
+	return file_titankv_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RaftMessage) GetRegionId() uint64 {
@@ -1090,7 +1188,7 @@ type RaftResponse struct {
 
 func (x *RaftResponse) Reset() {
 	*x = RaftResponse{}
-	mi := &file_titankv_proto_msgTypes[16]
+	mi := &file_titankv_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1102,7 +1200,7 @@ func (x *RaftResponse) String() string {
 func (*RaftResponse) ProtoMessage() {}
 
 func (x *RaftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[16]
+	mi := &file_titankv_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1115,7 +1213,7 @@ func (x *RaftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftResponse.ProtoReflect.Descriptor instead.
 func (*RaftResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{16}
+	return file_titankv_proto_rawDescGZIP(), []int{17}
 }
 
 type RaftLocalState struct {
@@ -1130,7 +1228,7 @@ type RaftLocalState struct {
 
 func (x *RaftLocalState) Reset() {
 	*x = RaftLocalState{}
-	mi := &file_titankv_proto_msgTypes[17]
+	mi := &file_titankv_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1142,7 +1240,7 @@ func (x *RaftLocalState) String() string {
 func (*RaftLocalState) ProtoMessage() {}
 
 func (x *RaftLocalState) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[17]
+	mi := &file_titankv_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1155,7 +1253,7 @@ func (x *RaftLocalState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftLocalState.ProtoReflect.Descriptor instead.
 func (*RaftLocalState) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{17}
+	return file_titankv_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RaftLocalState) GetTerm() uint64 {
@@ -1197,7 +1295,7 @@ type RaftApplyState struct {
 
 func (x *RaftApplyState) Reset() {
 	*x = RaftApplyState{}
-	mi := &file_titankv_proto_msgTypes[18]
+	mi := &file_titankv_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1209,7 +1307,7 @@ func (x *RaftApplyState) String() string {
 func (*RaftApplyState) ProtoMessage() {}
 
 func (x *RaftApplyState) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[18]
+	mi := &file_titankv_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1222,7 +1320,7 @@ func (x *RaftApplyState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftApplyState.ProtoReflect.Descriptor instead.
 func (*RaftApplyState) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{18}
+	return file_titankv_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RaftApplyState) GetAppliedIndex() uint64 {
@@ -1249,7 +1347,7 @@ type RaftTruncatedState struct {
 
 func (x *RaftTruncatedState) Reset() {
 	*x = RaftTruncatedState{}
-	mi := &file_titankv_proto_msgTypes[19]
+	mi := &file_titankv_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1261,7 +1359,7 @@ func (x *RaftTruncatedState) String() string {
 func (*RaftTruncatedState) ProtoMessage() {}
 
 func (x *RaftTruncatedState) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[19]
+	mi := &file_titankv_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1274,7 +1372,7 @@ func (x *RaftTruncatedState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftTruncatedState.ProtoReflect.Descriptor instead.
 func (*RaftTruncatedState) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{19}
+	return file_titankv_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RaftTruncatedState) GetIndex() uint64 {
@@ -1301,7 +1399,7 @@ type UpdateConfigRequest struct {
 
 func (x *UpdateConfigRequest) Reset() {
 	*x = UpdateConfigRequest{}
-	mi := &file_titankv_proto_msgTypes[20]
+	mi := &file_titankv_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1313,7 +1411,7 @@ func (x *UpdateConfigRequest) String() string {
 func (*UpdateConfigRequest) ProtoMessage() {}
 
 func (x *UpdateConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[20]
+	mi := &file_titankv_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1326,7 +1424,7 @@ func (x *UpdateConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateConfigRequest.ProtoReflect.Descriptor instead.
 func (*UpdateConfigRequest) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{20}
+	return file_titankv_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *UpdateConfigRequest) GetGcThreshold() float64 {
@@ -1344,7 +1442,7 @@ type UpdateConfigResponse struct {
 
 func (x *UpdateConfigResponse) Reset() {
 	*x = UpdateConfigResponse{}
-	mi := &file_titankv_proto_msgTypes[21]
+	mi := &file_titankv_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1356,7 +1454,7 @@ func (x *UpdateConfigResponse) String() string {
 func (*UpdateConfigResponse) ProtoMessage() {}
 
 func (x *UpdateConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_titankv_proto_msgTypes[21]
+	mi := &file_titankv_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1369,7 +1467,7 @@ func (x *UpdateConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateConfigResponse.ProtoReflect.Descriptor instead.
 func (*UpdateConfigResponse) Descriptor() ([]byte, []int) {
-	return file_titankv_proto_rawDescGZIP(), []int{21}
+	return file_titankv_proto_rawDescGZIP(), []int{22}
 }
 
 var File_titankv_proto protoreflect.FileDescriptor
@@ -1382,7 +1480,16 @@ const file_titankv_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\x04R\aversion\"1\n" +
 	"\x04Peer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x19\n" +
-	"\bstore_id\x18\x02 \x01(\x04R\astoreId\"\xac\x01\n" +
+	"\bstore_id\x18\x02 \x01(\x04R\astoreId\"\x9d\x01\n" +
+	"\n" +
+	"ChangePeer\x12?\n" +
+	"\vchange_type\x18\x01 \x01(\x0e2\x1e.titankv.ChangePeer.ChangeTypeR\n" +
+	"changeType\x12!\n" +
+	"\x04peer\x18\x02 \x01(\v2\r.titankv.PeerR\x04peer\"+\n" +
+	"\n" +
+	"ChangeType\x12\f\n" +
+	"\bADD_NODE\x10\x00\x12\x0f\n" +
+	"\vREMOVE_NODE\x10\x01\"\xac\x01\n" +
 	"\x06Region\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x1b\n" +
 	"\tstart_key\x18\x02 \x01(\fR\bstartKey\x12\x17\n" +
@@ -1487,68 +1594,72 @@ func file_titankv_proto_rawDescGZIP() []byte {
 	return file_titankv_proto_rawDescData
 }
 
-var file_titankv_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_titankv_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_titankv_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_titankv_proto_goTypes = []any{
-	(RaftCommand_CmdType)(0),       // 0: titankv.RaftCommand.CmdType
-	(RaftCommand_OpType)(0),        // 1: titankv.RaftCommand.OpType
-	(AdminRequest_AdminCmdType)(0), // 2: titankv.AdminRequest.AdminCmdType
-	(*RegionEpoch)(nil),            // 3: titankv.RegionEpoch
-	(*Peer)(nil),                   // 4: titankv.Peer
-	(*Region)(nil),                 // 5: titankv.Region
-	(*RegionContext)(nil),          // 6: titankv.RegionContext
-	(*GetRequest)(nil),             // 7: titankv.GetRequest
-	(*GetResponse)(nil),            // 8: titankv.GetResponse
-	(*PutRequest)(nil),             // 9: titankv.PutRequest
-	(*PutResponse)(nil),            // 10: titankv.PutResponse
-	(*DeleteRequest)(nil),          // 11: titankv.DeleteRequest
-	(*DeleteResponse)(nil),         // 12: titankv.DeleteResponse
-	(*RaftRequestHeader)(nil),      // 13: titankv.RaftRequestHeader
-	(*RaftCommand)(nil),            // 14: titankv.RaftCommand
-	(*AdminRequest)(nil),           // 15: titankv.AdminRequest
-	(*SplitRequest)(nil),           // 16: titankv.SplitRequest
-	(*BatchRaftCommand)(nil),       // 17: titankv.BatchRaftCommand
-	(*RaftMessage)(nil),            // 18: titankv.RaftMessage
-	(*RaftResponse)(nil),           // 19: titankv.RaftResponse
-	(*RaftLocalState)(nil),         // 20: titankv.RaftLocalState
-	(*RaftApplyState)(nil),         // 21: titankv.RaftApplyState
-	(*RaftTruncatedState)(nil),     // 22: titankv.RaftTruncatedState
-	(*UpdateConfigRequest)(nil),    // 23: titankv.UpdateConfigRequest
-	(*UpdateConfigResponse)(nil),   // 24: titankv.UpdateConfigResponse
+	(ChangePeer_ChangeType)(0),     // 0: titankv.ChangePeer.ChangeType
+	(RaftCommand_CmdType)(0),       // 1: titankv.RaftCommand.CmdType
+	(RaftCommand_OpType)(0),        // 2: titankv.RaftCommand.OpType
+	(AdminRequest_AdminCmdType)(0), // 3: titankv.AdminRequest.AdminCmdType
+	(*RegionEpoch)(nil),            // 4: titankv.RegionEpoch
+	(*Peer)(nil),                   // 5: titankv.Peer
+	(*ChangePeer)(nil),             // 6: titankv.ChangePeer
+	(*Region)(nil),                 // 7: titankv.Region
+	(*RegionContext)(nil),          // 8: titankv.RegionContext
+	(*GetRequest)(nil),             // 9: titankv.GetRequest
+	(*GetResponse)(nil),            // 10: titankv.GetResponse
+	(*PutRequest)(nil),             // 11: titankv.PutRequest
+	(*PutResponse)(nil),            // 12: titankv.PutResponse
+	(*DeleteRequest)(nil),          // 13: titankv.DeleteRequest
+	(*DeleteResponse)(nil),         // 14: titankv.DeleteResponse
+	(*RaftRequestHeader)(nil),      // 15: titankv.RaftRequestHeader
+	(*RaftCommand)(nil),            // 16: titankv.RaftCommand
+	(*AdminRequest)(nil),           // 17: titankv.AdminRequest
+	(*SplitRequest)(nil),           // 18: titankv.SplitRequest
+	(*BatchRaftCommand)(nil),       // 19: titankv.BatchRaftCommand
+	(*RaftMessage)(nil),            // 20: titankv.RaftMessage
+	(*RaftResponse)(nil),           // 21: titankv.RaftResponse
+	(*RaftLocalState)(nil),         // 22: titankv.RaftLocalState
+	(*RaftApplyState)(nil),         // 23: titankv.RaftApplyState
+	(*RaftTruncatedState)(nil),     // 24: titankv.RaftTruncatedState
+	(*UpdateConfigRequest)(nil),    // 25: titankv.UpdateConfigRequest
+	(*UpdateConfigResponse)(nil),   // 26: titankv.UpdateConfigResponse
 }
 var file_titankv_proto_depIdxs = []int32{
-	3,  // 0: titankv.Region.region_epoch:type_name -> titankv.RegionEpoch
-	4,  // 1: titankv.Region.peers:type_name -> titankv.Peer
-	3,  // 2: titankv.RegionContext.region_epoch:type_name -> titankv.RegionEpoch
-	4,  // 3: titankv.RegionContext.peer:type_name -> titankv.Peer
-	6,  // 4: titankv.GetRequest.context:type_name -> titankv.RegionContext
-	6,  // 5: titankv.PutRequest.context:type_name -> titankv.RegionContext
-	6,  // 6: titankv.DeleteRequest.context:type_name -> titankv.RegionContext
-	3,  // 7: titankv.RaftRequestHeader.region_epoch:type_name -> titankv.RegionEpoch
-	4,  // 8: titankv.RaftRequestHeader.peer:type_name -> titankv.Peer
-	13, // 9: titankv.RaftCommand.header:type_name -> titankv.RaftRequestHeader
-	0,  // 10: titankv.RaftCommand.type:type_name -> titankv.RaftCommand.CmdType
-	1,  // 11: titankv.RaftCommand.op:type_name -> titankv.RaftCommand.OpType
-	15, // 12: titankv.RaftCommand.admin_request:type_name -> titankv.AdminRequest
-	2,  // 13: titankv.AdminRequest.cmd_type:type_name -> titankv.AdminRequest.AdminCmdType
-	16, // 14: titankv.AdminRequest.split:type_name -> titankv.SplitRequest
-	14, // 15: titankv.BatchRaftCommand.commands:type_name -> titankv.RaftCommand
-	22, // 16: titankv.RaftApplyState.truncated_state:type_name -> titankv.RaftTruncatedState
-	7,  // 17: titankv.TitanKV.Get:input_type -> titankv.GetRequest
-	9,  // 18: titankv.TitanKV.Put:input_type -> titankv.PutRequest
-	11, // 19: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
-	18, // 20: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
-	23, // 21: titankv.TitanKV.UpdateConfig:input_type -> titankv.UpdateConfigRequest
-	8,  // 22: titankv.TitanKV.Get:output_type -> titankv.GetResponse
-	10, // 23: titankv.TitanKV.Put:output_type -> titankv.PutResponse
-	12, // 24: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
-	19, // 25: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
-	24, // 26: titankv.TitanKV.UpdateConfig:output_type -> titankv.UpdateConfigResponse
-	22, // [22:27] is the sub-list for method output_type
-	17, // [17:22] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	0,  // 0: titankv.ChangePeer.change_type:type_name -> titankv.ChangePeer.ChangeType
+	5,  // 1: titankv.ChangePeer.peer:type_name -> titankv.Peer
+	4,  // 2: titankv.Region.region_epoch:type_name -> titankv.RegionEpoch
+	5,  // 3: titankv.Region.peers:type_name -> titankv.Peer
+	4,  // 4: titankv.RegionContext.region_epoch:type_name -> titankv.RegionEpoch
+	5,  // 5: titankv.RegionContext.peer:type_name -> titankv.Peer
+	8,  // 6: titankv.GetRequest.context:type_name -> titankv.RegionContext
+	8,  // 7: titankv.PutRequest.context:type_name -> titankv.RegionContext
+	8,  // 8: titankv.DeleteRequest.context:type_name -> titankv.RegionContext
+	4,  // 9: titankv.RaftRequestHeader.region_epoch:type_name -> titankv.RegionEpoch
+	5,  // 10: titankv.RaftRequestHeader.peer:type_name -> titankv.Peer
+	15, // 11: titankv.RaftCommand.header:type_name -> titankv.RaftRequestHeader
+	1,  // 12: titankv.RaftCommand.type:type_name -> titankv.RaftCommand.CmdType
+	2,  // 13: titankv.RaftCommand.op:type_name -> titankv.RaftCommand.OpType
+	17, // 14: titankv.RaftCommand.admin_request:type_name -> titankv.AdminRequest
+	3,  // 15: titankv.AdminRequest.cmd_type:type_name -> titankv.AdminRequest.AdminCmdType
+	18, // 16: titankv.AdminRequest.split:type_name -> titankv.SplitRequest
+	16, // 17: titankv.BatchRaftCommand.commands:type_name -> titankv.RaftCommand
+	24, // 18: titankv.RaftApplyState.truncated_state:type_name -> titankv.RaftTruncatedState
+	9,  // 19: titankv.TitanKV.Get:input_type -> titankv.GetRequest
+	11, // 20: titankv.TitanKV.Put:input_type -> titankv.PutRequest
+	13, // 21: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
+	20, // 22: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
+	25, // 23: titankv.TitanKV.UpdateConfig:input_type -> titankv.UpdateConfigRequest
+	10, // 24: titankv.TitanKV.Get:output_type -> titankv.GetResponse
+	12, // 25: titankv.TitanKV.Put:output_type -> titankv.PutResponse
+	14, // 26: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
+	21, // 27: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
+	26, // 28: titankv.TitanKV.UpdateConfig:output_type -> titankv.UpdateConfigResponse
+	24, // [24:29] is the sub-list for method output_type
+	19, // [19:24] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_titankv_proto_init() }
@@ -1561,8 +1672,8 @@ func file_titankv_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_titankv_proto_rawDesc), len(file_titankv_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   22,
+			NumEnums:      4,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

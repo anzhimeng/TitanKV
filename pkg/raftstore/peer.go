@@ -87,6 +87,14 @@ func (p *Peer) step(msg Msg) {
 		}
 
 	case MsgTypeRaftCmd:
+		if msg.RaftCmd.AdminRequest != nil {
+			req := msg.RaftCmd.AdminRequest
+			if req.CmdType == titankvpb.AdminRequest_CONF_CHANGE {
+				p.proposeConfChange(req.ChangePeer)
+				if msg.Callback != nil { msg.Callback(nil) }
+				return
+			}
+		}
 	     if msg.RaftCmd.Header != nil {
             if err := p.checkEpoch(msg.RaftCmd.Header.RegionEpoch); err != nil {
                 if msg.Callback != nil {
@@ -96,12 +104,14 @@ func (p *Peer) step(msg Msg) {
             }
           }
 		// 1. 校验 Key Range
-		key := msg.RaftCmd.Key
-		if !p.isKeyInRange(key) {
-			if msg.Callback != nil {
-				msg.Callback(ErrKeyNotInRegion)
+		if msg.RaftCmd.Op == titankvpb.RaftCommand_PUT || msg.RaftCmd.Op == titankvpb.RaftCommand_DELETE {
+			key := msg.RaftCmd.Key
+			if !p.isKeyInRange(key) {
+				if msg.Callback != nil {
+					msg.Callback(ErrKeyNotInRegion)
+				}
+				return
 			}
-			return
 		}
 
 		// 2. 提交给 Raft
@@ -117,6 +127,25 @@ func (p *Peer) step(msg Msg) {
 		p.raftGroup.Tick()
 	}
 }
+
+func (p *Peer) proposeConfChange(cp *titankvpb.ChangePeer) {
+    var cc raftpb.ConfChange
+    cc.Type = raftpb.ConfChangeAddNode
+    if cp.ChangeType == titankvpb.ChangePeer_REMOVE_NODE {
+        cc.Type = raftpb.ConfChangeRemoveNode
+    }
+    cc.NodeID = cp.Peer.Id
+    // 将 Peer 信息存入 Context，以便 Apply 时能读出来更新元数据
+    data, _ := proto.Marshal(cp.Peer)
+    cc.Context = data
+
+    // etcd/raft 限制：一次只能有一个 pending conf change
+    if p.raftGroup.Status().PendingConfIndex > 0 {
+        return 
+    }
+    p.raftGroup.ProposeConfChange(cc)
+}
+
 
 func (p *Peer) isKeyInRange(key []byte) bool {
 	start := p.region.StartKey
@@ -149,12 +178,59 @@ func (p *Peer) processEntry(entry raftpb.Entry) *Peer {
 			return p.applyAdmin(&cmd, entry.Index, entry.Term)
 		}
 	} else if entry.Type == raftpb.EntryConfChange {
-		// Week 12 Day 1 才会用到
+		// Week 12 Day 1: 处理 ConfChange Apply
 		var cc raftpb.ConfChange
 		cc.Unmarshal(entry.Data)
+		
+		// 1. 更新 Raft 内部状态
 		p.raftGroup.ApplyConfChange(cc)
+		
+		// 2. 执行实际变更 (更新元数据)
+		return p.applyConfChange(cc)
 	}
 	return nil
+}
+
+// 处理 ConfChange Apply (Week 12 新增)
+func (p *Peer) applyConfChange(cc raftpb.ConfChange) *Peer {
+    var peer titankvpb.Peer
+    proto.Unmarshal(cc.Context, &peer)
+
+    region := p.region
+    
+    // 1. 更新 Region 元数据 (ConfVer++)
+    region.RegionEpoch.ConfVer++
+    
+    // 2. 更新 Peers 列表
+    if cc.Type == raftpb.ConfChangeAddNode {
+        exists := false
+        for _, existing := range region.Peers {
+            if existing.Id == peer.Id { exists = true; break }
+        }
+        if !exists {
+            region.Peers = append(region.Peers, &peer)
+        }
+    } else if cc.Type == raftpb.ConfChangeRemoveNode {
+        var newPeers []*titankvpb.Peer
+        for _, existing := range region.Peers {
+            if existing.Id != peer.Id {
+                newPeers = append(newPeers, existing)
+            }
+        }
+        region.Peers = newPeers
+    }
+    
+    // 3. 持久化 RegionLocalState
+    writeRegionState(p.storage.engine, region)
+    
+    // 4. 如果我是被移除的节点 -> 标记停止
+    if cc.Type == raftpb.ConfChangeRemoveNode && peer.Id == p.peerID {
+        log.Printf("Peer %d removed from Region %d", p.peerID, p.regionID)
+        p.stopped = true
+        return nil
+    }
+
+    return nil
 }
 
 // 增加 engine 参数 (因为 execSplit 需要写 DB)
