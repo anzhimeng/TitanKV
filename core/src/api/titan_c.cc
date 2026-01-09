@@ -177,6 +177,17 @@ void titan_ingest_sst(titan_db_t* db, const char* path, char** err) {
     set_error(err, s);
 }
 
+void titan_delete_range(titan_db_t* db, const char* start, size_t slen, 
+                        const char* end, size_t elen, char** err) {
+    if (!db || !db->rep) return;
+    auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+    
+    titankv::Status s = impl->DeleteRange(titankv::WriteOptions(), 
+                                          titankv::Slice(start, slen), 
+                                          titankv::Slice(end, elen));
+    set_error(err, s);
+}
+
 void titan_dump_sst(titan_db_t* db, const char* start, size_t slen,
                     const char* end, size_t elen,
                     const char* path, char** err) {

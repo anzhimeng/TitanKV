@@ -11,8 +11,9 @@ type Router struct {
 	mu      sync.RWMutex
 	// RegionID -> Worker Channel
 	// 为什么是 Map？因为可能有多个 StoreWorker (线程池模式)，
-    // 我们需要把同一个 Region 的消息总是发给同一个 Worker 以保证顺序。
+     // 我们需要把同一个 Region 的消息总是发给同一个 Worker 以保证顺序。
 	regions map[uint64]PeerSender
+	peers sync.Map
 }
 
 func NewRouter() *Router {
@@ -21,16 +22,22 @@ func NewRouter() *Router {
 	}
 }
 
-func (r *Router) Register(regionID uint64, sender PeerSender) {
+func (r *Router) Register(regionID uint64, sender PeerSender, peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.regions[regionID] = sender
+
+	// 【新增】存入缓存
+	r.peers.Store(regionID, peer)
 }
 
 func (r *Router) Unregister(regionID uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.regions, regionID)
+
+	// 【新增】删除缓存
+	r.peers.Delete(regionID)
 }
 
 func (r *Router) Send(regionID uint64, msg Msg) bool {
@@ -49,4 +56,15 @@ func (r *Router) Send(regionID uint64, msg Msg) bool {
 	default:
 		return false // 队列满
 	}
+}
+
+type PeerStateReader interface {
+    GetAppliedIndex() uint64
+}
+
+func (r *Router) GetLocalPeer(regionID uint64) PeerStateReader {
+    if v, ok := r.peers.Load(regionID); ok {
+        return v.(*Peer)
+    }
+    return nil
 }

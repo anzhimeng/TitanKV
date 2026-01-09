@@ -4,6 +4,7 @@ import (
 	"log"
 	"time"
 	"context"
+	"encoding/binary"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -125,6 +126,7 @@ func (w *StoreWorker) onTick() {
     w.tickCount++
     
     for _, peer := range w.peers {
+    	   if peer == nil { continue }
         // 1. Raft Tick
         peer.step(NewMsgTick())
         w.pendingPeers[peer.regionID] = peer
@@ -154,12 +156,17 @@ func (w *StoreWorker) handleReady() {
 	var batchValues [][]byte
 
 	for _, peer := range w.pendingPeers {
+	     if peer == nil { 
+            continue 
+          }
 		if !peer.hasReady() {
 			continue
 		}
 		
 		rd := peer.raftGroup.Ready()
-		
+		if len(rd.ReadStates) > 0 {
+            peer.handleReadStates(rd.ReadStates)
+        	}
 		// A. 收集日志和状态 (WAL)
 		// peer.storage.Append 返回 []kvPair
 		// 【新增】处理 Snapshot
@@ -232,32 +239,102 @@ func (w *StoreWorker) handleReady() {
 
 	// 4. 后处理阶段：Apply & Advance
 	for _, peer := range readyPeers {
+	     if peer == nil {
+             log.Printf("Create panic: readyPeers contains nil")
+             continue
+          }
 		rd := peer.raftGroup.Ready()
 		for _, entry := range rd.CommittedEntries {
             // 【修改】接收返回值
             newPeer := peer.processEntry(entry)
+            if peer != nil {
+                if entry.Index > peer.GetAppliedIndex() {
+                    peer.SetAppliedIndex(entry.Index)
+                }
+            }
             // 检查是否被移除
             if peer.stopped {
                 w.removePeer(peer)
-                continue
+                break 
             }
             // 如果产生了分裂，注册新 Peer
+            // log.Printf("Updating applied index for region %d", peer.regionID)
+            if peer == nil {
+                log.Printf("!!! PANIC ALERT !!! peer became nil in loop!")
+                break
+            }
             if newPeer != nil {
                 w.registerPeer(newPeer)
             }
 		}
-		peer.raftGroup.Advance(rd)
+		if !peer.stopped {
+            peer.raftGroup.Advance(rd)
+        	}
 	}
 
 	w.pendingPeers = make(map[uint64]*Peer)
 }
 
 func (w *StoreWorker) removePeer(p *Peer) {
-    delete(w.peers, p.regionID)
-    w.router.Unregister(p.regionID)
-    // 物理清理数据 (DeleteRange)
-    // ...
-    log.Printf("Peer %d removed from Region %d", p.peerID, p.regionID)
+	// 1. 从内存移除 (停止服务)
+	delete(w.peers, p.regionID)
+	delete(w.pendingPeers, p.regionID)
+	w.router.Unregister(p.regionID)
+
+	// 2. 异步执行物理清理 (避免阻塞 Worker 主循环)
+	// 我们需要清理两部分数据：
+	// A. Data (z{RegionID}...)
+	// B. Raft Log/State (r{RegionID}...)
+	
+	// 为了在 goroutine 中使用，拷贝需要的数据
+	store := w.store
+	regionID := p.regionID
+	startKey := p.region.StartKey
+	endKey := p.region.EndKey
+
+	go func() {
+		log.Printf("[GC] Clearing data for removed Region %d...", regionID)
+
+		// --- 清理 Data ---
+		// 构造物理范围
+		dataStart := DataKey(regionID, startKey)
+		var dataEnd []byte
+		if len(endKey) > 0 {
+			dataEnd = DataKey(regionID, endKey)
+		} else {
+			// 如果 EndKey 无穷大，物理上是下一个 RegionID 的开始
+			// DataKey 编码规则: 'z' + RegionID(8B) + UserKey
+			// 所以下一个 Region 的前缀是 'z' + (RegionID+1)
+			dataEnd = DataKey(regionID+1, nil)
+		}
+
+		if err := store.DeleteRange(dataStart, dataEnd); err != nil {
+			log.Printf("[GC] Failed to delete data range: %v", err)
+		}
+
+		// --- 清理 Raft Meta (Log, HardState, ApplyState) ---
+		// Raft Key 编码规则: 'r' + RegionID(8B) + Suffix
+		// 我们可以删除 'r' + RegionID 到 'r' + (RegionID+1) 之间的所有 Key
+
+		// raftStart := RaftLogKey(regionID, 0) 
+		
+		// 保留手动构造的部分：
+		raftPrefixStart := make([]byte, 9)
+		raftPrefixStart[0] = 'r'
+		binary.BigEndian.PutUint64(raftPrefixStart[1:], regionID)
+				
+		raftPrefixEnd := make([]byte, 9)
+		raftPrefixEnd[0] = 'r'
+		binary.BigEndian.PutUint64(raftPrefixEnd[1:], regionID+1)
+		
+		if err := store.DeleteRange(raftPrefixStart, raftPrefixEnd); err != nil {
+			log.Printf("[GC] Failed to delete raft meta: %v", err)
+		}
+
+		log.Printf("[GC] Region %d cleanup finished.", regionID)
+	}()
+
+	log.Printf("Peer %d removed from Region %d (scheduled for GC)", p.peerID, p.regionID)
 }
 
 func (w *StoreWorker) AddPeer(p *Peer) {
@@ -267,7 +344,7 @@ func (w *StoreWorker) AddPeer(p *Peer) {
 
 func (w *StoreWorker) registerPeer(p *Peer) {
     w.peers[p.regionID] = p
-    w.router.Register(p.regionID, w.receiver) // 注册路由
+    w.router.Register(p.regionID, w.receiver, p) // 注册路由
     
     // 如果新 Peer 也是本 Worker 管理，需要启动心跳吗？
     // onTick 会遍历 w.peers，所以自动生效

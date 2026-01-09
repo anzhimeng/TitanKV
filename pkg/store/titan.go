@@ -330,3 +330,20 @@ func (s *TitanStore) IngestSST(path string) error {
 func (s *TitanStore) GetSnapDir() string {
 	return filepath.Join(s.path, "snap")
 }
+
+func (s *TitanStore) DeleteRange(start, end []byte) error {
+    var cErr *C.char
+    
+    var kStart, kEnd *C.char
+    if len(start) > 0 { kStart = (*C.char)(unsafe.Pointer(&start[0])) }
+    if len(end) > 0 { kEnd = (*C.char)(unsafe.Pointer(&end[0])) }
+
+    C.titan_delete_range(s.db, kStart, C.size_t(len(start)), 
+                         kEnd, C.size_t(len(end)), &cErr)
+
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return errors.New(C.GoString(cErr))
+    }
+    return nil
+}

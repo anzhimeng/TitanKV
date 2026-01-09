@@ -14,6 +14,7 @@ const (
 	MsgTypeSplit       MsgType = 4 // (后续) 分裂请求
 	MsgTypeRegionApproximateSize MsgType = 5 // (后续) 统计大小
 	MsgTypeSplitCheck MsgType = 6 
+	MsgTypeReadIndex MsgType = 7
 )
 
 type Msg struct {
@@ -23,6 +24,9 @@ type Msg struct {
 	// 载荷 (Union)
 	RaftMessage *titankvpb.RaftMessage
 	RaftCmd     *titankvpb.RaftCommand // 实际上这应该是一个 Request 包装，包含 Callback
+    // 【新增】ReadIndex 专用字段
+    ReadIndexRet chan uint64 // 成功时返回 index
+
 
 	Callback func(error)
 }
@@ -52,4 +56,12 @@ func NewMsgTick() Msg {
 
 func NewMsgSplitCheck(regionID uint64) Msg {
     return Msg{Type: MsgTypeSplitCheck, RegionID: regionID}
+}
+
+func NewMsgReadIndex(regionID uint64, retCh chan uint64) Msg {
+    return Msg{
+        Type:         MsgTypeReadIndex,
+        RegionID:     regionID,
+        ReadIndexRet: retCh,
+    }
 }

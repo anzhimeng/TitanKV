@@ -178,7 +178,7 @@ func main() {
 		log.Fatalf("Failed to create peer: %v", err)
 	}
 	
-	router.Register(1, storeWorker.Receiver())
+	router.Register(1, storeWorker.Receiver(), peer)
 	storeWorker.AddPeer(peer) 
     } else {
         log.Printf("Node %d is a new node, waiting for scheduling...", *nodeID)

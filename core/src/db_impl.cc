@@ -5,6 +5,7 @@
 #include "lsm/version_edit.h"
 #include "lsm/table.h"          
 #include "lsm/merging_iterator.h" 
+#include "lsm/table_cache.h"
 #include "lsm/compaction.h"
 #include "util/filename.h"
 #include "util/cache.h"
@@ -1175,31 +1176,89 @@ Status DBImpl::DumpSST(const Slice& start, const Slice& end,
 }
 
 Status DBImpl::DeleteRange(const WriteOptions& opt, const Slice& start, const Slice& end) {
-    // 1. 扫描范围内的所有 Key
-    // 注意：这里需要一个 InternalIterator
-    // 简化：复用 DumpSST 的扫描逻辑，但只记录 Key
-    
     std::vector<std::string> keys_to_delete;
+
+    // 1. 构建全量迭代器 (需要在锁内获取 Version 引用)
+    Iterator* iter = nullptr;
+    Version* current = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current = versions_->current();
+        current->Ref();
+
+        // 构造迭代器列表
+        std::vector<Iterator*> iters;
+        // MemTable
+        iters.push_back(mem_->NewIterator());
+        // Immutable
+        if (imm_) iters.push_back(imm_->NewIterator());
+        // SSTables
+        for (int level = 0; level <kNumLevels; level++) {
+            const auto& files = current->GetFiles(level);
+            if (!files.empty()) {
+                if (level == 0) {
+                     for (auto* f : files) {
+                         iters.push_back(table_cache_->NewIterator(ReadOptions(), f->file_number, f->file_size));
+                     }
+                } else {
+                     iters.push_back(NewLevelIterator(*versions_->icmp(), table_cache_, files, ReadOptions()));
+                }
+            }
+        }
+        InternalKeyComparator icmp; // 临时构造
+        iter = NewMergingIterator(&icmp, iters.data(), iters.size());
+    }
+
+    // 2. 扫描范围 (耗时操作，建议在锁外进行？)
+    // 注意：如果在扫描过程中数据变了怎么办？
+    // LSM 的 Iterator 是 Snapshot Isolation 的。
+    // 但是，我们在扫描过程中并没有持有锁，这意味着在此期间新写入的数据可能不会被扫描到。
+    // 对于 DeleteRange 来说，通常我们要删除的是“过去的数据”，所以这没问题。
+    // 真正的问题是：如果我们在扫描的同时，其他线程也在 Delete 这些 Key，会不会冲突？
+    // WriteLocked 会处理并发写入，所以 Delete 操作本身是安全的。
+
+    // 构造查找 Key (Start)
+    // 这里的 start/end 是编码后的 DataKey (User Key)
+    // 我们需要构造 Internal Key 用于 Seek
+    LookupKey lkey(start, kMaxSequenceNumber);
+    iter->Seek(lkey.internal_key());
+
+    while (iter->Valid()) {
+        Slice key = iter->key();
+        Slice user_key = ExtractUserKey(key);
+
+        // 检查是否超出 End
+        if (user_key.compare(end) >= 0) {
+            break;
+        }
+
+        // 收集 Key (深拷贝)
+        keys_to_delete.push_back(user_key.ToString());
+        
+        iter->Next();
+    }
     
-    // ... (构建 Iterator) ...
-    // iter->Seek(start);
-    // while (iter->Valid() && iter->key() < end) {
-    //    keys_to_delete.push_back(iter->user_key());
-    //    iter->Next();
-    // }
+    delete iter;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current->Unref();
+    }
+
+    // 3. 执行批量删除
+    // 为了防止一次 WriteBatch 太大，可以分批删
+    const size_t kBatchSize = 1000;
+    for (size_t i = 0; i < keys_to_delete.size(); i += kBatchSize) {
+        WriteBatch batch;
+        for (size_t j = i; j < i + kBatchSize && j < keys_to_delete.size(); ++j) {
+            batch.Delete(keys_to_delete[j]);
+        }
+        // 调用 Write (会自动加锁)
+        // 这里的 opt 可以复用传入的，或者强制 sync=false 提高性能
+        Status s = Write(opt, &batch);
+        if (!s.ok()) return s;
+    }
     
-    // 2. 批量删除
-    // for (const auto& k : keys_to_delete) {
-    //     Delete(opt, k);
-    // }
-    
-    // 上述逻辑性能极差。真正的实现需要 RangeTombstone 支持。
-    // 鉴于时间，我们假设接收快照是在一个“干净”的 Peer 上（通常是新加的），
-    // 或者是落后太多的（数据会被快照覆盖）。
-    // 在 LSM 中，新写入的数据（快照里的）SeqNum 更大，会自动覆盖旧数据。
-    // 所以，**只要我们保证快照数据的 SeqNum 比 DB 里现有的都大，DeleteRange 其实不是必须的！**
-    
-    // 结论：Day 3 可以跳过 DeleteRange，依赖 MVCC 覆盖。
+    fprintf(stderr, "[DeleteRange] Deleted %lu keys in range.\n", keys_to_delete.size());
     return Status::OK();
 }
 

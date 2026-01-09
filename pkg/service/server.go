@@ -4,6 +4,7 @@ import (
  	"context"
      "io"
      "os"
+     "time"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -87,6 +88,47 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
     if req.Context == nil {
         return nil, status.Error(codes.InvalidArgument, "missing region context")
     }
+
+        regionID := req.Context.RegionId
+    
+    // 1. 构造响应通道
+    retCh := make(chan uint64, 1)
+    
+    // 2. 发送 MsgReadIndex
+    msg := raftstore.NewMsgReadIndex(regionID, retCh)
+    if !s.router.Send(regionID, msg) {
+        return nil, status.Error(codes.NotFound, "region not found")
+    }
+    
+    // 3. 等待 Raft 确认 (ReadIndex)
+    var safeIndex uint64
+    select {
+    case idx := <-retCh:
+        safeIndex = idx
+    case <-ctx.Done():
+        return nil, status.Error(codes.DeadlineExceeded, "read index timeout")
+    }
+    
+    // 4. 等待状态机追赶 (Wait Applied)
+    // 这里我们直接轮询 Router 里的 Peer 状态
+    // (更优雅的方式是使用 sync.Cond，但那需要 Peer 暴露 Cond，这里用 sleep 简单模拟)
+    peer := s.router.GetLocalPeer(regionID) // 假设 Router 暴露了这个
+    if peer == nil {
+        return nil, status.Error(codes.NotFound, "region lost during read")
+    }
+    
+    ticker := time.NewTicker(time.Millisecond) // 1ms 轮询
+    defer ticker.Stop()
+    
+    for peer.GetAppliedIndex() < safeIndex {
+        select {
+        case <-ctx.Done():
+            return nil, status.Error(codes.DeadlineExceeded, "wait applied timeout")
+        case <-ticker.C:
+            // continue polling
+        }
+    }
+    
     
     // 编码 Key
     encodedKey := raftstore.DataKey(req.Context.RegionId, req.Key)

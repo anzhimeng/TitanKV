@@ -6,6 +6,9 @@ import (
 	"log"
 	"fmt"
 	"os"
+	"encoding/binary"
+	"sync/atomic"
+	
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
 	"titankv/api/raft_serverpb" 
@@ -28,6 +31,14 @@ type Peer struct {
 	storage    *PeerStorage
 	region     *titankvpb.Region
 	stopped bool
+	// 【新增】ReadIndex 状态维护
+     // key: requestCtx (string), value: callback channel
+     pendingReads map[string]chan uint64
+     readSeq      uint64 // 用于生成唯一 ctx
+    
+     // 【新增】Applied Index (原子变量，供 Server 检查)
+     // 注意：etcd/raft 内部没有这个，我们需要自己维护
+     appliedIndex uint64 
 }
 
 func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore) (*Peer, error) {
@@ -76,6 +87,7 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 		raftGroup: rn,
 		storage:   ps,
 		region:    region,
+		pendingReads: make(map[string]chan uint64),
 	}, nil
 }
 
@@ -127,6 +139,8 @@ func (p *Peer) step(msg Msg) {
 
 	case MsgTypeTick:
 		p.raftGroup.Tick()
+	case MsgTypeReadIndex:
+     	p.handleReadIndex(msg)
 	}
 }
 
@@ -390,3 +404,40 @@ func (p *Peer) applySnapshot(filePath string) {
     os.Remove(filePath)
 }
 
+
+// 处理 MsgReadIndex
+func (p *Peer) handleReadIndex(msg Msg) {
+    // 1. 生成唯一 Context
+    seq := atomic.AddUint64(&p.readSeq, 1)
+    ctxBytes := make([]byte, 8)
+    binary.BigEndian.PutUint64(ctxBytes, seq)
+    
+    // 2. 记录回调
+    p.pendingReads[string(ctxBytes)] = msg.ReadIndexRet
+    
+    // 3. 发给 Raft
+    p.raftGroup.ReadIndex(ctxBytes)
+}
+
+// 处理 Raft Ready 中的 ReadStates
+func (p *Peer) handleReadStates(states []raft.ReadState) {
+    for _, rs := range states {
+        ctxStr := string(rs.RequestCtx)
+        if ch, ok := p.pendingReads[ctxStr]; ok {
+            // 通知 Server: 这个 Index 安全了
+            ch <- rs.Index
+            delete(p.pendingReads, ctxStr)
+            close(ch) // 关闭 channel 表示一次性通知
+        }
+    }
+}
+
+// 获取当前的 AppliedIndex (原子读)
+func (p *Peer) GetAppliedIndex() uint64 {
+    return atomic.LoadUint64(&p.appliedIndex)
+}
+
+// 设置 AppliedIndex (原子写)
+func (p *Peer) SetAppliedIndex(idx uint64) {
+    atomic.StoreUint64(&p.appliedIndex, idx)
+}
