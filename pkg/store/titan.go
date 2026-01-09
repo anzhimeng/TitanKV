@@ -10,6 +10,7 @@ import "C"
 import (
 	"errors"
 	"unsafe"
+	"path/filepath"
 	"strings"
 )
 
@@ -38,6 +39,7 @@ func (s *TitanStore) GetStatistics() *Statistics {
 
 type TitanStore struct {
 	db *C.titan_db_t
+	path string
 }
 
 // 修改 Open 函数，增加 directIO 参数
@@ -60,7 +62,10 @@ func Open(path string, useDirectIO bool) (*TitanStore, error) {
 		return nil, errors.New(C.GoString(cErr))
 	}
 
-	return &TitanStore{db: db}, nil
+	return &TitanStore{
+		db:   db,
+		path: path, // 【修复】赋值
+	}, nil
 }
 
 func (s *TitanStore) Close() {
@@ -285,8 +290,6 @@ func (s *TitanStore) GetApproximateSizes(startKeys, endKeys [][]byte) []uint64 {
 	return sizes
 }
 
-// pkg/store/titan.go
-
 func (s *TitanStore) DumpSST(start, end []byte, path string) error {
     cPath := C.CString(path)
     defer C.free(unsafe.Pointer(cPath))
@@ -307,7 +310,23 @@ func (s *TitanStore) DumpSST(start, end []byte, path string) error {
     return nil
 }
 
+func (s *TitanStore) IngestSST(path string) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var cErr *C.char
+    
+    // 【修改】调用 C 接口
+	C.titan_ingest_sst(s.db, cPath, &cErr)
+
+	if cErr != nil {
+		defer C.titan_free(unsafe.Pointer(cErr))
+		return errors.New(C.GoString(cErr))
+	}
+	return nil
+}
+
+// 【修复】获取快照目录
 func (s *TitanStore) GetSnapDir() string {
-    // 假设 dbPath 是 /tmp/data
-    return filepath.Join(filepath.Dir(s.path), "snap") // 或者 s.path + "/snap"
+	return filepath.Join(s.path, "snap")
 }

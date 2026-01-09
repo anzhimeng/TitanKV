@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"fmt"
+	"time"
 	"titankv/pd/api/pdpb"
 )
 
@@ -72,6 +73,7 @@ type Operator struct {
 	Kind     string // e.g., "balance-leader", "balance-region"
 	Steps    []OpStep
 	Current  int // 当前执行到第几步
+	CreationTime time.Time
 }
 
 func NewOperator(regionID uint64, kind string, steps ...OpStep) *Operator {
@@ -80,6 +82,7 @@ func NewOperator(regionID uint64, kind string, steps ...OpStep) *Operator {
 		Kind:     kind,
 		Steps:    steps,
 		Current:  0,
+		CreationTime: time.Now(),
 	}
 }
 
@@ -97,4 +100,12 @@ func (o *Operator) Check(region *pdpb.Region, leader *pdpb.Peer) bool {
 		o.Current++
 	}
 	return o.Current >= len(o.Steps)
+}
+
+// 【新增】检查是否超时 (例如 5分钟)
+func (o *Operator) IsTimeout() bool {
+    if o == nil {
+        return false // 或者根据业务逻辑返回合适的值
+    }
+    return time.Since(o.CreationTime) > 5*time.Minute
 }

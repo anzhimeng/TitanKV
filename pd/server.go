@@ -111,6 +111,8 @@ func (s *Server) Run() error {
 	// 【关键修复 2】传入 s.idAllocator
 	s.coordinator.AddScheduler(schedulers.NewBalanceRegionScheduler(s.idAllocator))
 
+	s.coordinator.AddScheduler(schedulers.NewReplicaScheduler(s.idAllocator))
+
 	// 6. 启动竞选
 	go s.campaignLoop()
 
@@ -283,7 +285,8 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	resp := &pdpb.RegionHeartbeatResponse{}
+	resp := &pdpb.RegionHeartbeatResponse{
+	}
 
 	// 检查是否有调度指令 (Operator)
 	op := s.coordinator.GetOperator(req.Region.Id)
@@ -311,6 +314,7 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 						}
 					}
 				case *schedule.AddPeer:
+					log.Printf("[PD] Operator addpeer: %s", op.String())
 					resp.ChangePeer = &pdpb.ChangePeer{
 						ChangeType: pdpb.ChangePeer_ADD_NODE,
 						Peer:       &pdpb.Peer{Id: step.PeerID, StoreId: step.ToStore},
@@ -331,4 +335,21 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 	}
 
 	return resp, nil
+}
+
+
+func (s *Server) GetStore(ctx context.Context, req *pdpb.GetStoreRequest) (*pdpb.GetStoreResponse, error) {
+	if !s.IsLeader() {
+		return nil, status.Error(codes.Unavailable, "not leader")
+	}
+
+    // 【修改】调用 GetStoreInfoByID
+	storeInfo := s.cluster.GetStoreInfoByID(req.StoreId)
+	if storeInfo == nil {
+		return nil, status.Error(codes.NotFound, fmt.Sprintf("store %d not found", req.StoreId))
+	}
+
+	return &pdpb.GetStoreResponse{
+		Store: storeInfo.Meta, // storeInfo 已经是 Clone 过的副本，可以直接取 Meta
+	}, nil
 }

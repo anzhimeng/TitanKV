@@ -12,6 +12,7 @@ service PD {
     
     rpc GetRegion(GetRegionRequest) returns (GetRegionResponse);
     rpc RegionHeartbeat(RegionHeartbeatRequest) returns (RegionHeartbeatResponse);
+    rpc GetStore(GetStoreRequest) returns (GetStoreResponse);
 }
 
 
@@ -162,5 +163,13 @@ message GetRequest {
 message DeleteRequest {
     RegionContext context = 1; // 【新增】
     bytes key = 2;
+}
+
+message GetStoreRequest {
+    uint64 store_id = 1;
+}
+
+message GetStoreResponse {
+    MetaStore store = 1;
 }
 

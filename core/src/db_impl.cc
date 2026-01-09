@@ -3,6 +3,8 @@
 #include "util/coding.h"
 #include "lsm/table_builder.h"
 #include "lsm/version_edit.h"
+#include "lsm/table.h"          
+#include "lsm/merging_iterator.h" 
 #include "lsm/compaction.h"
 #include "util/filename.h"
 #include "util/cache.h"
@@ -1105,10 +1107,10 @@ Status DBImpl::DumpSST(const Slice& start, const Slice& end,
     }
     // L1+ (每层一个 LevelIterator)
     // Week 8 Day 4 实现了 NewLevelIterator
-    for (int level = 1; level < config::kNumLevels; level++) {
+    for (int level = 1; level < kNumLevels; level++) {
         const auto& files = v->GetFiles(level);
         if (!files.empty()) {
-            iters.push_back(NewLevelIterator(vset_->icmp(), table_cache_, files, ReadOptions()));
+            iters.push_back(NewLevelIterator(*versions_->icmp(), table_cache_, files, ReadOptions()));
         }
     }
     
@@ -1210,6 +1212,7 @@ Status DBImpl::IngestSST(const std::string& fname) {
     uint64_t fsize = std::filesystem::file_size(fname);
     Table* table;
     s = Table::Open(options_, file.release(), 0, fsize, &table);
+    if (!s.ok()) return s;
     
     // 2. 遍历并写入
     Iterator* iter = table->NewIterator(ReadOptions());

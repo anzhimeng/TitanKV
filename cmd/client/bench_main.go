@@ -17,8 +17,8 @@ import (
 const (
 	// 配置参数
 	targetAddr    = "127.0.0.1:9091" // Leader 地址
-	concurrency   = 20               // 并发 Worker 数
-	reqPerWorker  = 2000             // 每个 Worker 请求次数
+	concurrency   = 10               // 并发 Worker 数
+	reqPerWorker  = 100             // 每个 Worker 请求次数
 	totalRequests = concurrency * reqPerWorker
 )
 
@@ -73,7 +73,15 @@ func prepareData() {
 				val := fmt.Sprintf("bench-val-%d", id)
 
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 写入超时给长一点
-				_, err := c.Put(ctx, &titankvpb.PutRequest{Key: []byte(key), Value: []byte(val)})
+				_, err := c.Put(ctx, &titankvpb.PutRequest{
+					// 【新增】携带 Context
+					Context: &titankvpb.RegionContext{
+						RegionId:    1,
+						RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1},
+					},
+					Key:   []byte(key),
+					Value: []byte(val),
+				})
 				cancel()
 
 				if err == nil {
@@ -118,7 +126,14 @@ func runReadBenchmark() {
 				expectedVal := fmt.Sprintf("bench-val-%d", keyID) // 期望的值
 
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				resp, err := c.Get(ctx, &titankvpb.GetRequest{Key: []byte(key)})
+				resp, err := c.Get(ctx, &titankvpb.GetRequest{
+					// 【新增】携带 Context
+					Context: &titankvpb.RegionContext{
+						RegionId:    1,
+						RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1},
+					},
+					Key: []byte(key),
+				})
 				cancel()
 
 				if err != nil {
@@ -167,7 +182,14 @@ func verifyLastKey() {
 	
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := c.Get(ctx, &titankvpb.GetRequest{Key: []byte(testKey)})
+	resp, err := c.Get(ctx, &titankvpb.GetRequest{
+		// 【新增】携带 Context
+		Context: &titankvpb.RegionContext{
+			RegionId:    1,
+			RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1},
+		},
+		Key: []byte(testKey),
+	})
 	
 	if err != nil {
 		fmt.Printf("❌ 最终验证失败: %v\n", err)

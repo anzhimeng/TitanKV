@@ -10,6 +10,7 @@ import (
 	"titankv/pkg/store" // C++ 引擎
 
 	"google.golang.org/protobuf/proto"
+	"go.etcd.io/etcd/raft/v3"
 )
 
 const (
@@ -18,6 +19,7 @@ const (
      MaxRegionSize = /*96*/1 * 1024 * 1024 
      // 检查间隔 (每隔多少次 Tick 检查一次，避免频繁调用 CGO)
      SplitCheckInterval = 10 
+     PDHeartbeatTickInterval = 50
 )
 
 type MsgAddPeer struct {
@@ -35,9 +37,12 @@ type StoreWorker struct {
 	pdClient pdpb.PDClient
 	
 	tickCount uint64
+	ctx    context.Context
+     cancel context.CancelFunc
 }
 
 func NewStoreWorker(router *Router, trans *Transport, s *store.TitanStore, client pdpb.PDClient) *StoreWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &StoreWorker{
 		peers:        make(map[uint64]*Peer),
 		receiver:     make(PeerSender, 4096),
@@ -46,7 +51,13 @@ func NewStoreWorker(router *Router, trans *Transport, s *store.TitanStore, clien
 		store:        s,
 		transport:    trans, // 赋值
 		pdClient:     client, // 赋值
+		ctx:    ctx,
+          cancel: cancel,
 	}
+}
+
+func (w *StoreWorker) Stop() {
+    w.cancel()
 }
 
 func (w *StoreWorker) Receiver() PeerSender {
@@ -65,6 +76,8 @@ func (w *StoreWorker) Run() {
 			msgs = append(msgs, msg)
 		case <-ticker.C:
 			w.onTick()
+		case <-w.ctx.Done(): // 【新增】退出信号
+            return
 		}
 
 		pending := len(w.receiver)
@@ -110,13 +123,21 @@ func (w *StoreWorker) processMsg(msg Msg) {
 }
 func (w *StoreWorker) onTick() {
     w.tickCount++
-
-    // 1. Raft Tick
+    
     for _, peer := range w.peers {
+        // 1. Raft Tick
         peer.step(NewMsgTick())
         w.pendingPeers[peer.regionID] = peer
+
+        // 2. 【新增】PD Heartbeat
+        // 只有 Leader 发心跳
+        if peer.raftGroup.Status().Lead == peer.peerID {
+            // 使用简单的取模来决定发送频率
+            if w.tickCount % PDHeartbeatTickInterval == 0 {
+                w.sendRegionHeartbeat(peer)
+            }
+        }
     }
-    
     // 2. Split Check (低频执行)
     if w.tickCount % SplitCheckInterval == 0 {
         w.checkSplit()
@@ -141,7 +162,7 @@ func (w *StoreWorker) handleReady() {
 		
 		// A. 收集日志和状态 (WAL)
 		// peer.storage.Append 返回 []kvPair
-		/ 【新增】处理 Snapshot
+		// 【新增】处理 Snapshot
           if !raft.IsEmptySnap(rd.Snapshot) {
           	// 1. 获取文件路径
           	filePath := string(rd.Snapshot.Data)
@@ -165,13 +186,30 @@ func (w *StoreWorker) handleReady() {
 		
 		// B. 收集网络消息
 		for _, msg := range rd.Messages {
+			// 查找目标 Peer 的 StoreID
+	          toStoreId := uint64(0)
+	          for _, p := range peer.region.Peers {
+	              if p.Id == msg.To {
+	                  toStoreId = p.StoreId
+	                  break
+	              }
+	          }
+	          // 如果找不到（可能是发给正在 Remove 的节点，或者是新加入的节点还未更新 Peers），
+	          // 这种情况下通常忽略，或者尝试广播（不推荐）。
+	          // 对于 AddPeer，我们在 ConfChange 时已经把新 Peer 加到 Region.Peers 了，所以能找到。
+	          if toStoreId == 0 {
+	              // log.Printf("Peer %d not found in region %d", msg.To, peer.regionID)
+	              continue 
+	          }
 			data, _ := msg.Marshal()
 			tm := &titankvpb.RaftMessage{
 				RegionId:   peer.regionID,
 				FromPeerId: msg.From,
 				ToPeerId:   msg.To,
+				ToStoreId:  toStoreId,
 				Data:       data,
 			}
+
 			messages = append(messages, tm)
 		}
 		
@@ -227,44 +265,42 @@ func (w *StoreWorker) AddPeer(p *Peer) {
 	w.pendingPeers[p.regionID] = p 
 }
 
+func (w *StoreWorker) registerPeer(p *Peer) {
+    w.peers[p.regionID] = p
+    w.router.Register(p.regionID, w.receiver) // 注册路由
+    
+    // 如果新 Peer 也是本 Worker 管理，需要启动心跳吗？
+    // onTick 会遍历 w.peers，所以自动生效
+    log.Printf("Registered new peer for Region %d", p.regionID)
+}
+
 func (w *StoreWorker) checkSplit() {
     for _, peer := range w.peers {
-        // 只有 Leader 才有资格发起 Split
-        // 且 Region 正在运行中
         if peer.raftGroup.Status().Lead != peer.peerID {
             continue
         }
         
-        // 调用底层引擎估算大小
-        // DataKey 是加了 z 前缀的
+        // 【修复】去掉 raftstore. 前缀，直接调用 DataKey
         start := DataKey(peer.regionID, peer.region.StartKey)
-        end := DataKey(peer.regionID, peer.region.EndKey) // 注意 EndKey 为空需处理
         
-        // 如果 EndKey 为空，说明是无穷大。C++ 估算时需要一个具体的 Key。
-        // 简单处理：如果是无穷大，构造成 z{RegionID+1} 作为边界
-        if len(peer.region.EndKey) == 0 {
-             end = DataKey(peer.regionID + 1, nil)
+        var end []byte
+        if len(peer.region.EndKey) > 0 {
+            end = DataKey(peer.regionID, peer.region.EndKey)
+        } else {
+            end = DataKey(peer.regionID + 1, nil)
         }
 
+        // 【修复】构造成切片 [][]byte
         sizes := w.store.GetApproximateSizes([][]byte{start}, [][]byte{end})
+        if len(sizes) == 0 { continue }
+        
         size := sizes[0]
         
         if size >= MaxRegionSize {
             log.Printf("Region %d size %d exceeds threshold, triggering split...", peer.regionID, size)
-            
-            // 3. 计算 Split Key
-            // 我们需要找到中间的 Key。C++ 需要提供一个 Scan 接口或者 GetMiddleKey 接口。
-            // 简化版：这里我们生成一个 MsgSplit 消息给自己，
-            // 真正的 SplitKey 计算逻辑在处理该消息时做（Day 2 内容）。
-            
-            // 发送内部消息触发
-            w.router.Send(peer.regionID, NewMsgSplitCheck(peer.regionID))
+            // 【修复】去掉 raftstore. 前缀
+            w.processMsg(NewMsgSplitCheck(peer.regionID))
         }
-        // 【测试专用】强制触发
-        //if w.tickCount == 50 {
-             //log.Println("DEBUG: Triggering Split Check for Region", peer.regionID)
-             //w.processMsg(NewMsgSplitCheck(peer.regionID)) // 直接处理，不用发 Channel 也行
-        //}
     }
 }
 
@@ -280,6 +316,7 @@ func (w *StoreWorker) onSplitCheck(regionID uint64) {
     // 在本次压测中 (2000 个 Key)，中间大概是 key-01000
     // 为了确保 SplitKey 落在 Range 内，我们取 "key-01000"
     splitKey := []byte("key-01000") 
+
     
     // 校验一下是否在范围内，如果不在，可能不需要分裂或者逻辑有误
     if !peer.isKeyInRange(splitKey) {
@@ -333,11 +370,89 @@ func (w *StoreWorker) askPDAllocID() (uint64, error) {
     return resp.Id, nil
 }
 
-func (w *StoreWorker) registerPeer(p *Peer) {
-    w.peers[p.regionID] = p
-    w.router.Register(p.regionID, w.receiver) // 注册路由
-    
-    // 如果新 Peer 也是本 Worker 管理，需要启动心跳吗？
-    // onTick 会遍历 w.peers，所以自动生效
-    log.Printf("Registered new peer for Region %d", p.regionID)
+
+func (w *StoreWorker) sendRegionHeartbeat(p *Peer) {
+	// 1. 转换 Region (titankvpb -> pdpb)
+    // 这一步必须深拷贝所有字段
+	region := &pdpb.Region{
+		Id:       p.region.Id,
+		StartKey: p.region.StartKey,
+		EndKey:   p.region.EndKey,
+	}
+    if p.region.RegionEpoch != nil {
+        region.RegionEpoch = &pdpb.RegionEpoch{
+            ConfVer: p.region.RegionEpoch.ConfVer,
+            Version: p.region.RegionEpoch.Version,
+        }
+    }
+    for _, peer := range p.region.Peers {
+        region.Peers = append(region.Peers, &pdpb.Peer{
+            Id: peer.Id, 
+            StoreId: peer.StoreId,
+        })
+    }
+
+	// 2. 转换 Leader Peer (titankvpb -> pdpb)
+	leaderPeer := &pdpb.Peer{
+		Id:      p.peerID,
+		StoreId: p.storeID,
+	}
+
+	approxSize := uint64(100) 
+    approxKeys := uint64(10000)
+
+	go func() {
+		req := &pdpb.RegionHeartbeatRequest{
+			Region:          region,
+			Leader:          leaderPeer,
+			ApproximateSize: approxSize,
+			ApproximateKeys: approxKeys,
+		}
+
+		ctx, cancel := context.WithTimeout(w.ctx, 3*time.Second)
+		defer cancel()
+
+		resp, err := w.pdClient.RegionHeartbeat(ctx, req)
+		if err != nil {
+			log.Printf("Failed to send region heartbeat: %v", err)
+			return
+		}
+		// 【调试点】打印接收到的 Response
+          log.Printf("[DEBUG] Recv Heartbeat Resp: %v", resp)
+
+		if resp.TransferLeader != nil {
+			log.Printf("[Schedule] Received TransferLeader to peer %d", resp.TransferLeader.PeerId)
+            // 简单实现：直接调用 RawNode
+            p.raftGroup.TransferLeader(resp.TransferLeader.PeerId)
+		} else if resp.ChangePeer != nil {
+			cp := resp.ChangePeer
+            
+            // 3. 转换 ChangePeer (pdpb -> titankvpb)
+            tkChangeType := titankvpb.ChangePeer_ADD_NODE
+            if cp.ChangeType == pdpb.ChangePeer_REMOVE_NODE {
+                tkChangeType = titankvpb.ChangePeer_REMOVE_NODE
+            }
+            
+            tkPeer := &titankvpb.Peer{
+                Id: cp.Peer.Id,
+                StoreId: cp.Peer.StoreId,
+            }
+
+			adminReq := &titankvpb.AdminRequest{
+				CmdType: titankvpb.AdminRequest_CONF_CHANGE,
+				ChangePeer: &titankvpb.ChangePeer{
+					ChangeType: tkChangeType, // 使用转换后的类型
+					Peer:       tkPeer,       // 使用转换后的 Peer
+				},
+			}
+			
+			cmd := &titankvpb.RaftCommand{
+				Type:         titankvpb.RaftCommand_ADMIN,
+				AdminRequest: adminReq,
+			}
+			
+            // NewMsgRaftCmd 需要传入 regionID
+			w.router.Send(p.regionID, NewMsgRaftCmd(p.regionID, cmd, nil))
+		}
+	}()
 }

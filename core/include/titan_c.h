@@ -66,6 +66,7 @@ void titan_get_approximate_sizes(titan_db_t* db,
                        const char** start_keys, size_t* start_lens,
                        const char** end_keys, size_t* end_lens,
                         int n, uint64_t* sizes);
+void titan_ingest_sst(titan_db_t* db, const char* path, char** err);
 void titan_dump_sst(titan_db_t* db, const char* start, size_t slen,
                     const char* end, size_t elen,
                     const char* path, char** err);                        

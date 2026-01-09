@@ -73,16 +73,16 @@ func (s *balanceRegionScheduler) Schedule(c *cluster.RaftCluster) *schedule.Oper
     // 5. 生成 Operator (MovePeer = Add + Remove)
     // 我们需要为新 Peer 分配一个 ID (这里暂时 Mock，Day 5 结合 AllocID 完善)
     // 假设我们直接用 target store id 作为 peer id 的基底 (仅演示，实际必须 AllocID)
-    // newPeerID := target.Meta.Id * 1000 + region.Meta.Id 
+    // newPeerID := target.Meta.Id 
     // 正确做法：应该在 Schedule 接口传入 ID Allocator，或者 Operator 执行时分配。
     // 5. 生成 Operator
     // 【关键修复】分配真正的 PeerID
     newPeerID, err := s.alloc.Alloc(context.Background())
+    newPeerID += 100
     if err != nil {
         log.Printf("Failed to alloc peer id: %v", err)
         return nil
     }
-
 	return schedule.NewOperator(
 		region.Meta.Id,
 		"balance-region",

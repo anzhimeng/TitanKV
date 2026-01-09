@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"fmt"
+	"os"
 	"titankv/api/titankvpb"
 	"titankv/pkg/store"
 	"titankv/api/raft_serverpb" 
@@ -26,6 +27,7 @@ type Peer struct {
 	raftGroup  *raft.RawNode
 	storage    *PeerStorage
 	region     *titankvpb.Region
+	stopped bool
 }
 
 func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore) (*Peer, error) {
@@ -139,10 +141,6 @@ func (p *Peer) proposeConfChange(cp *titankvpb.ChangePeer) {
     data, _ := proto.Marshal(cp.Peer)
     cc.Context = data
 
-    // etcd/raft 限制：一次只能有一个 pending conf change
-    if p.raftGroup.Status().PendingConfIndex > 0 {
-        return 
-    }
     p.raftGroup.ProposeConfChange(cc)
 }
 
@@ -391,3 +389,4 @@ func (p *Peer) applySnapshot(filePath string) {
     // 2. 删除临时文件
     os.Remove(filePath)
 }
+

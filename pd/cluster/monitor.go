@@ -35,8 +35,7 @@ func (c *RaftCluster) checkStores() {
 	for _, s := range stores {
 		status := s.GetStatus()
 		if status == StoreStatusDown {
-			log.Printf("[Alert] Store %d is DOWN! Last heartbeat: %v", s.Meta.Id, s.LastHeartbeat)
-			// TODO: Week 9 在这里触发调度逻辑 (补副本)
+			log.Printf("[Monitor] Store %d Down. ReplicaScheduler will handle it.", s.Meta.Id)
 		} else if status == StoreStatusDisconnected {
 			log.Printf("[Warn] Store %d is Disconnected.", s.Meta.Id)
 		}

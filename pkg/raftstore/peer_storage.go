@@ -4,6 +4,7 @@ import (
      "io/ioutil"
      "os"
      "fmt"
+     "path/filepath"
 
 	"titankv/api/titankvpb"
 	"titankv/pkg/store" // C++ Store
@@ -164,13 +165,6 @@ func (s *PeerStorage) FirstIndex() (uint64, error) {
 	return s.applyState.TruncatedState.Index + 1, nil
 }
 
-func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
-	// Multi-Raft 的 Snapshot 生成比较复杂，需要 Scan 整个 Region 的数据
-	// Day 1 暂时留空或返回 ErrSnapshotTemporarilyUnavailable
-	return raftpb.Snapshot{}, raft.ErrSnapshotTemporarilyUnavailable
-}
-
-
 // pkg/raftstore/peers_storage.go
 
 func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) ([]kvPair, error) {
@@ -210,38 +204,6 @@ func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState
     }
     
     return batch, nil
-}
-
-func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
-    // 1. 生成快照元数据 (Index, Term, ConfState)
-    // 这里的 Index 是 Applied Index
-    index := s.applyState.AppliedIndex
-    term := s.applyState.TruncatedState.Term // 近似值，或者查 Log
-    
-    // 2. 生成数据快照 (SST 文件)
-    // 文件路径: /tmp/titan/snap/region_1_idx_100.sst
-    fname := s.genSnapshotPath(index)
-    
-    // 调用 C++ 导出
-    err := s.engine.DumpSST(s.region.StartKey, s.region.EndKey, fname)
-    if err != nil {
-        return raftpb.Snapshot{}, err
-    }
-    
-    // 3. 返回 Snapshot 对象
-    // Data 字段存放文件名，接收端根据文件名读取文件内容
-    // (etcd/raft 默认 Data 是 []byte，这里我们存路径，或者把文件读进去)
-    // 如果文件很大，应该通过 stream 发送，这里简化为存路径，Transport 层处理文件传输
-    snap := raftpb.Snapshot{
-        Metadata: raftpb.SnapshotMetadata{
-            Index: index,
-            Term:  term,
-            ConfState: s.confState,
-        },
-        Data: []byte(fname), // Hack: 传路径
-    }
-    
-    return snap, nil
 }
 
 func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
@@ -307,4 +269,20 @@ func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
     }
 
     return snap, nil
+}
+
+// ApplySnapshot 持久化快照元数据 (更新 ApplyState)
+func (s *PeerStorage) ApplySnapshot(snap raftpb.Snapshot) error {
+    s.applyState.AppliedIndex = snap.Metadata.Index
+    s.applyState.TruncatedState = &titankvpb.RaftTruncatedState{
+        Index: snap.Metadata.Index,
+        Term:  snap.Metadata.Term,
+    }
+    s.raftState.Term = snap.Metadata.Term
+    s.raftState.Commit = snap.Metadata.Index
+    
+    // 保存到 DB (RegionLocalState 也需要更新，通常由上层逻辑处理)
+    key := ApplyStateKey(s.region.Id)
+    val, _ := proto.Marshal(&s.applyState)
+    return s.engine.Put(key, val)
 }

@@ -52,6 +52,27 @@ func (c *Coordinator) runSchedulers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+    // 1. 清理阶段：检查现有的 Operator
+    // ==========================================
+    // Go 允许在 range map 的过程中安全地 delete key
+    for regionID, op := range c.operators {
+        // 检查超时
+        if op.IsTimeout() {
+            log.Printf("[Coordinator] Operator timeout, removing: %s", op.String())
+            delete(c.operators, regionID)
+            continue
+        }
+
+        // 检查是否完成
+        // 注意：通常 Operator 的推进是在 HandleHeartbeat 中进行的
+        // 但这里也可以做一个兜底检查，防止已完成的 Operator 滞留在 map 中
+        if op.Current >= len(op.Steps) {
+            log.Printf("[Coordinator] Operator finished, removing: %s", op.String())
+            delete(c.operators, regionID)
+            continue
+        }
+    }
+
 	// 轮询每一个调度器
 	for _, sched := range c.schedulers {
 		// 调用调度器逻辑
@@ -70,7 +91,6 @@ func (c *Coordinator) runSchedulers() {
 		}
 	}
 	
-	// TODO: 清理已完成或超时的 Operator (Day 5 完善)
 }
 
 // 获取并移除（消费）Operator 的第一个步骤

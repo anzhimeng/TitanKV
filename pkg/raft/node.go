@@ -186,7 +186,7 @@ func NewTitanRaft(id uint64, peers map[uint64]string, fsm *store.TitanStore, dbP
 		atomic.StoreUint64(&tr.lastApplied, snapshot.Metadata.Index)
 	}
 
-	go tr.run()
+	//go tr.run()
 	return tr
 }
 
@@ -322,6 +322,13 @@ func (tr *TitanRaft) updateLease() {
 }
 
 func (tr *TitanRaft) run() {
+    defer func() {
+        if r := recover(); r != nil {
+            log.Printf("Raft run loop PANIC: %v", r)
+        }
+        log.Printf("Raft run loop EXITING")
+    }()
+	log.Printf("Raft run loop started for Node %d", tr.ID)
 	go func() {
 		ticker := time.NewTicker(time.Duration(tickMs) * time.Millisecond)
 		defer ticker.Stop()
@@ -335,15 +342,16 @@ func (tr *TitanRaft) run() {
 
     pdHeartbeatTicker := time.NewTicker(5 * time.Second)
     defer pdHeartbeatTicker.Stop()
-    storeHeartbeatTicker := time.NewTicker(10 * time.Second)
-    defer storeHeartbeatTicker.Stop()
+    //storeHeartbeatTicker := time.NewTicker(10 * time.Second)
+    //defer storeHeartbeatTicker.Stop()
 
 	for {
 		select {
           case <-pdHeartbeatTicker.C:
+             log.Println("Triggering PD Heartbeat...") 
              tr.sendPDHeartbeat()
-          case <-storeHeartbeatTicker.C:
-            tr.sendStoreHeartbeat()
+          //case <-storeHeartbeatTicker.C:
+            //tr.sendStoreHeartbeat()
 		case rd := <-tr.Node.Ready():
 			if len(rd.ReadStates) > 0 {
 				tr.readMu.Lock()

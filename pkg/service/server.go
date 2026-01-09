@@ -1,7 +1,10 @@
 package service
 
 import (
-	"context"
+ 	"context"
+     "io"
+     "os"
+	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
 	"titankv/pkg/raftstore"
@@ -9,6 +12,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type Server struct {
@@ -213,4 +217,22 @@ func (s *Server) finishSnapshot(regionID uint64, snap *raftpb.Snapshot) {
         },
     }
     s.router.Send(regionID, msg)
+}
+
+func (s *Server) BatchRaft(stream titankvpb.TitanKV_BatchRaftServer) error {
+    for {
+        batch, err := stream.Recv()
+        if err != nil {
+            return err
+        }
+        
+        for _, msg := range batch.Msgs {
+            // 分发逻辑同 Raft 接口
+            raftMsg := raftstore.NewMsgRaftMessage(msg)
+            s.router.Send(msg.RegionId, raftMsg)
+        }
+        
+        // 也可以不回包，或者定期回一个 ACK
+        // stream.Send(&titankvpb.RaftResponse{})
+    }
 }

@@ -24,6 +24,7 @@ const (
 	TitanKV_Delete_FullMethodName         = "/titankv.TitanKV/Delete"
 	TitanKV_Raft_FullMethodName           = "/titankv.TitanKV/Raft"
 	TitanKV_UpdateConfig_FullMethodName   = "/titankv.TitanKV/UpdateConfig"
+	TitanKV_BatchRaft_FullMethodName      = "/titankv.TitanKV/BatchRaft"
 	TitanKV_StreamSnapshot_FullMethodName = "/titankv.TitanKV/StreamSnapshot"
 )
 
@@ -41,6 +42,8 @@ type TitanKVClient interface {
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*RaftResponse, error)
 	UpdateConfig(ctx context.Context, in *UpdateConfigRequest, opts ...grpc.CallOption) (*UpdateConfigResponse, error)
+	// 双向流：Client 发 Batch，Server 回 Response (可以不回)
+	BatchRaft(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BatchRaftMessage, RaftResponse], error)
 	StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error)
 }
 
@@ -102,9 +105,22 @@ func (c *titanKVClient) UpdateConfig(ctx context.Context, in *UpdateConfigReques
 	return out, nil
 }
 
+func (c *titanKVClient) BatchRaft(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BatchRaftMessage, RaftResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TitanKV_ServiceDesc.Streams[0], TitanKV_BatchRaft_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[BatchRaftMessage, RaftResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TitanKV_BatchRaftClient = grpc.BidiStreamingClient[BatchRaftMessage, RaftResponse]
+
 func (c *titanKVClient) StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &TitanKV_ServiceDesc.Streams[0], TitanKV_StreamSnapshot_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &TitanKV_ServiceDesc.Streams[1], TitanKV_StreamSnapshot_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +145,8 @@ type TitanKVServer interface {
 	// 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
 	Raft(context.Context, *RaftMessage) (*RaftResponse, error)
 	UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error)
+	// 双向流：Client 发 Batch，Server 回 Response (可以不回)
+	BatchRaft(grpc.BidiStreamingServer[BatchRaftMessage, RaftResponse]) error
 	StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error
 	mustEmbedUnimplementedTitanKVServer()
 }
@@ -154,6 +172,9 @@ func (UnimplementedTitanKVServer) Raft(context.Context, *RaftMessage) (*RaftResp
 }
 func (UnimplementedTitanKVServer) UpdateConfig(context.Context, *UpdateConfigRequest) (*UpdateConfigResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateConfig not implemented")
+}
+func (UnimplementedTitanKVServer) BatchRaft(grpc.BidiStreamingServer[BatchRaftMessage, RaftResponse]) error {
+	return status.Error(codes.Unimplemented, "method BatchRaft not implemented")
 }
 func (UnimplementedTitanKVServer) StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamSnapshot not implemented")
@@ -269,6 +290,13 @@ func _TitanKV_UpdateConfig_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitanKV_BatchRaft_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TitanKVServer).BatchRaft(&grpc.GenericServerStream[BatchRaftMessage, RaftResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TitanKV_BatchRaftServer = grpc.BidiStreamingServer[BatchRaftMessage, RaftResponse]
+
 func _TitanKV_StreamSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(TitanKVServer).StreamSnapshot(&grpc.GenericServerStream[SnapshotChunk, RaftResponse]{ServerStream: stream})
 }
@@ -305,6 +333,12 @@ var TitanKV_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "BatchRaft",
+			Handler:       _TitanKV_BatchRaft_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
 		{
 			StreamName:    "StreamSnapshot",
 			Handler:       _TitanKV_StreamSnapshot_Handler,

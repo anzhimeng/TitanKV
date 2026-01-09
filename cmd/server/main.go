@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"context"
 
 	_ "net/http/pprof"
 
@@ -70,7 +71,7 @@ func main() {
 		peers[id] = kv[1]
 	}
 	log.Printf("Parsed peers: %v", peers)
-	
+
 	// 2. 初始化 C++ 存储引擎
 	log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
 	db, err := store.Open(*dbPath, *directIO)
@@ -89,69 +90,108 @@ func main() {
 		}
 	}()
 
-		// 4. 连接 PD
+	// 4. 连接 PD 并注册 Store
 	pdAddr := "127.0.0.1:9000"
-    
-     // 【修改】正确定义 conn
 	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
- 	if err != nil {
-		log.Fatalf("Failed to init pd: %v", err)
+	if err != nil {
+		log.Fatalf("Failed to connect pd: %v", err)
 	}
-     // 注意：conn 不要在 main 结束前关闭，或者你可以 defer conn.Close()
-     // 但因为 server 是常驻进程，不关也没事，直到进程退出。
-    
-     pdClient := pdpb.NewPDClient(conn)
+	// 不关闭 conn，因为它需要一直存活
+	pdClient := pdpb.NewPDClient(conn)
+	defer conn.Close()
 
+	// 【新增】注册 Store
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = pdClient.PutStore(ctx, &pdpb.PutStoreRequest{
+		Store: &pdpb.MetaStore{
+			Id:      *nodeID,
+			Address: peers[*nodeID], // 自己的地址
+			State:   pdpb.StoreState_UP,
+			Version: "v1.0.0",
+		},
+	})
+	cancel()
+	if err != nil {
+		// 如果 PD 没启动，这里会报错，但我们可以选择只打印日志继续运行 (软依赖)
+		log.Printf("WARNING: Failed to register store to PD: %v", err)
+	} else {
+		log.Printf("Successfully registered store %d to PD", *nodeID)
+	}
+	
+	// 【可选】启动 Store 心跳 (Week 9 的内容，这里加上更完整)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// 简单的 stats
+			used := uint64(0)
+			if *nodeID <= 3 {
+			    used = 50 * 1024 * 1024 * 1024 // 50GB Used
+			}
+			_, err := pdClient.StoreHeartbeat(ctx, &pdpb.StoreHeartbeatRequest{
+				StoreId: *nodeID,
+				Stats: &pdpb.StoreStats{
+					Capacity:  100 * 1024 * 1024 * 1024,
+	                    Available: 100*1024*1024*1024 - used,
+	                    RegionCount: uint32(used / (96 * 1024 * 1024)),
+				},
+			})
+			cancel()
+			if err != nil {
+				log.Printf("Store heartbeat failed: %v", err)
+			}
+		}
+	}()
 
 	// 5. 初始化 RaftStore (Multi-Raft 核心)
 	log.Printf("Starting RaftStore (Node %d)...", *nodeID)
 	
 	router := raftstore.NewRouter()
+	// 初始化 Transport
+	trans := raftstore.NewTransport(peers, pdClient)
 	
-	// 【新增】初始化 Transport
-	trans := raftstore.NewTransport(peers)
-	
-	// 【修改】传入 Transport
+	// 传入 Transport 和 PDClient
 	storeWorker := raftstore.NewStoreWorker(router, trans, db, pdClient)
 	
 	// 启动 Worker 线程
 	go storeWorker.Run()
 
+    if *nodeID <= 3 { // 假设 ID 1-3 是初始节点
+     log.Printf("Bootstrapping initial region for node %d", *nodeID)
 	// 初始化默认 Region (ID=1)
-	// 在生产环境中，这里应该从 DB 加载所有 Region
-	// 为了跑通 Day 3，我们手动创建一个
 	initialRegion := &titankvpb.Region{
 		Id:       1, 
 		StartKey: nil, 
 		EndKey:   nil,
-		// Peers 需要包含当前集群的所有节点
 		RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1},
 	}
-	for id := range peers {
-		initialRegion.Peers = append(initialRegion.Peers, &titankvpb.Peer{Id: id, StoreId: id})
-	}
+        for id := range peers {
+             // 只有 1, 2, 3 才是初始成员
+             if id <= 3 {
+                 initialRegion.Peers = append(initialRegion.Peers, &titankvpb.Peer{Id: id, StoreId: id})
+             }
+        }
 
 	// 创建 Peer 并注册
-	// 注意：这里需要根据当前节点的 ID 来创建 Peer
-	// 如果 initialRegion 包含 *nodeID，则创建
-	// (在我们的测试配置中，peers 包含所有节点，所以肯定会创建)
 	peer, err := raftstore.NewPeer(*nodeID, initialRegion, db) 
 	if err != nil {
 		log.Fatalf("Failed to create peer: %v", err)
 	}
 	
-	// 注册到 Router 和 Worker
-	// 注意：Receiver 是一个 Channel，Register 需要的是 chan Msg
 	router.Register(1, storeWorker.Receiver())
 	storeWorker.AddPeer(peer) 
+    } else {
+        log.Printf("Node %d is a new node, waiting for scheduling...", *nodeID)
+    }
 
-	// 5. 监听端口
+
+	// 6. 监听端口
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// 6. 启动 HTTP 服务 (Pprof + Metrics)
+	// 7. 启动 HTTP 服务 (Pprof + Metrics)
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		pprofAddr := fmt.Sprintf("0.0.0.0:%d", 6060+*nodeID)
@@ -159,26 +199,49 @@ func main() {
 		log.Println(http.ListenAndServe(pprofAddr, nil))
 	}()
 
-	// 7. 创建 gRPC 服务器
+	// 8. 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
 	
-	// 【修改】NewServer 只需 router 和 db
 	titanServer := service.NewServer(router, db)
 	
 	titankvpb.RegisterTitanKVServer(grpcServer, titanServer)
 
-	// 8. 优雅关闭
+	// 9. 优雅关闭
 	done := make(chan struct{})
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		<-sigCh
 		
-		log.Println("Shutting down gRPC server...")
-		grpcServer.GracefulStop()
+		log.Println("Received shutdown signal...")
 		
-		// 停止 Transport
+		// 1. 先停止业务层 (Worker & Transport)
+		// 这会切断 Client 端的 Stream，理应触发 Server 端的 Recv 错误
+		log.Println("Stopping StoreWorker...")
+		storeWorker.Stop()
+		
+		log.Println("Closing Transport...")
 		trans.Close()
+		
+		// 2. 关闭 PD 连接
+		// conn.Close() // 如果有的话
+
+		// 3. 尝试优雅关闭 gRPC，带超时
+		log.Println("Stopping gRPC server (Graceful)...")
+		
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(stopped)
+		}()
+		
+		select {
+		case <-stopped:
+			log.Println("gRPC server stopped gracefully.")
+		case <-time.After(5 * time.Second):
+			log.Println("Graceful stop timed out, forcing Stop.")
+			grpcServer.Stop()
+		}
 		
 		close(done)
 	}()

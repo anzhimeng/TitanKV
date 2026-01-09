@@ -81,7 +81,9 @@ func (c *RaftCluster) loadRegionsLocked(ctx context.Context) error {
 		// 更新内存 Map
 		c.regions[region.Id] = info
 		// 更新内存 B-Tree
-		c.regionsTree.Update(info)
+		c.regionsTree.Update(info)       
+		// 【关键修复】重建倒排索引 (Store -> Regions)
+         c.updateStoreRegionIndex(region.Id, nil, region.Peers)
 	}
 	log.Printf("Loaded %d regions from Etcd", len(resp.Kvs))
 	return nil
@@ -261,9 +263,11 @@ func (c *RaftCluster) RandRegionOnStore(storeID uint64, excludeStoreID uint64) *
 
 	// 1. 直接获取该 Store 上的 Region 集合
 	regionSet, ok := c.storeRegions[storeID]
-	if !ok || len(regionSet) == 0 {
-		return nil
-	}
+    if !ok || len(regionSet) == 0 {
+        // 【调试】
+        // log.Printf("Store %d has no regions in index", storeID)
+        return nil
+    }
 
 	// 2. 利用 Go map 遍历的随机性来选取
 	// 我们遍历这个集合，直到找到一个符合条件的
@@ -344,7 +348,7 @@ func (c *RaftCluster) saveRegion(ctx context.Context, region *pdpb.Region) error
 	return nil
 }
 
-// 供 Week 9 Day 1 调度器使用：获取所有 Region
+// 获取所有 Region
 func (c *RaftCluster) GetRegions() []*RegionInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -362,4 +366,14 @@ func (c *RaftCluster) SetStoreLeaderCountForTest(id uint64, count int) {
 	if s, ok := c.stores[id]; ok {
 		s.LeaderCount = count
 	}
+}
+
+func (c *RaftCluster) GetStoreInfoByID(id uint64) *StoreInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+    if store, ok := c.stores[id]; ok {
+        return store.Clone() // 返回副本，线程安全
+    }
+	return nil
 }

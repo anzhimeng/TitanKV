@@ -1233,6 +1233,318 @@ func (x *ChangePeer) GetPeer() *Peer {
 	return nil
 }
 
+type RegionContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RegionId      uint64                 `protobuf:"varint,1,opt,name=region_id,json=regionId,proto3" json:"region_id,omitempty"`
+	RegionEpoch   *RegionEpoch           `protobuf:"bytes,2,opt,name=region_epoch,json=regionEpoch,proto3" json:"region_epoch,omitempty"` // 客户端持有的版本号
+	Peer          *Peer                  `protobuf:"bytes,3,opt,name=peer,proto3" json:"peer,omitempty"`                                  // 客户端认为自己正在发给谁
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionContext) Reset() {
+	*x = RegionContext{}
+	mi := &file_pdpb_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionContext) ProtoMessage() {}
+
+func (x *RegionContext) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionContext.ProtoReflect.Descriptor instead.
+func (*RegionContext) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *RegionContext) GetRegionId() uint64 {
+	if x != nil {
+		return x.RegionId
+	}
+	return 0
+}
+
+func (x *RegionContext) GetRegionEpoch() *RegionEpoch {
+	if x != nil {
+		return x.RegionEpoch
+	}
+	return nil
+}
+
+func (x *RegionContext) GetPeer() *Peer {
+	if x != nil {
+		return x.Peer
+	}
+	return nil
+}
+
+type PutRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RegionContext         `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"` // 【新增】
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Value         []byte                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutRequest) Reset() {
+	*x = PutRequest{}
+	mi := &file_pdpb_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutRequest) ProtoMessage() {}
+
+func (x *PutRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
+func (*PutRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *PutRequest) GetContext() *RegionContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *PutRequest) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *PutRequest) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+type GetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RegionContext         `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"` // 【新增】
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRequest) Reset() {
+	*x = GetRequest{}
+	mi := &file_pdpb_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRequest) ProtoMessage() {}
+
+func (x *GetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
+func (*GetRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *GetRequest) GetContext() *RegionContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *GetRequest) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+type DeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RegionContext         `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"` // 【新增】
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRequest) Reset() {
+	*x = DeleteRequest{}
+	mi := &file_pdpb_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRequest) ProtoMessage() {}
+
+func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *DeleteRequest) GetContext() *RegionContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *DeleteRequest) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+type GetStoreRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StoreId       uint64                 `protobuf:"varint,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStoreRequest) Reset() {
+	*x = GetStoreRequest{}
+	mi := &file_pdpb_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStoreRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStoreRequest) ProtoMessage() {}
+
+func (x *GetStoreRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStoreRequest.ProtoReflect.Descriptor instead.
+func (*GetStoreRequest) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *GetStoreRequest) GetStoreId() uint64 {
+	if x != nil {
+		return x.StoreId
+	}
+	return 0
+}
+
+type GetStoreResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Store         *MetaStore             `protobuf:"bytes,1,opt,name=store,proto3" json:"store,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStoreResponse) Reset() {
+	*x = GetStoreResponse{}
+	mi := &file_pdpb_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStoreResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStoreResponse) ProtoMessage() {}
+
+func (x *GetStoreResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pdpb_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStoreResponse.ProtoReflect.Descriptor instead.
+func (*GetStoreResponse) Descriptor() ([]byte, []int) {
+	return file_pdpb_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *GetStoreResponse) GetStore() *MetaStore {
+	if x != nil {
+		return x.Store
+	}
+	return nil
+}
+
 var File_pdpb_proto protoreflect.FileDescriptor
 
 const file_pdpb_proto_rawDesc = "" +
@@ -1316,19 +1628,41 @@ const file_pdpb_proto_rawDesc = "" +
 	"\n" +
 	"ChangeType\x12\f\n" +
 	"\bADD_NODE\x10\x00\x12\x0f\n" +
-	"\vREMOVE_NODE\x10\x01*0\n" +
+	"\vREMOVE_NODE\x10\x01\"\x82\x01\n" +
+	"\rRegionContext\x12\x1b\n" +
+	"\tregion_id\x18\x01 \x01(\x04R\bregionId\x124\n" +
+	"\fregion_epoch\x18\x02 \x01(\v2\x11.pdpb.RegionEpochR\vregionEpoch\x12\x1e\n" +
+	"\x04peer\x18\x03 \x01(\v2\n" +
+	".pdpb.PeerR\x04peer\"c\n" +
+	"\n" +
+	"PutRequest\x12-\n" +
+	"\acontext\x18\x01 \x01(\v2\x13.pdpb.RegionContextR\acontext\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\fR\x05value\"M\n" +
+	"\n" +
+	"GetRequest\x12-\n" +
+	"\acontext\x18\x01 \x01(\v2\x13.pdpb.RegionContextR\acontext\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\"P\n" +
+	"\rDeleteRequest\x12-\n" +
+	"\acontext\x18\x01 \x01(\v2\x13.pdpb.RegionContextR\acontext\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\",\n" +
+	"\x0fGetStoreRequest\x12\x19\n" +
+	"\bstore_id\x18\x01 \x01(\x04R\astoreId\"9\n" +
+	"\x10GetStoreResponse\x12%\n" +
+	"\x05store\x18\x01 \x01(\v2\x0f.pdpb.MetaStoreR\x05store*0\n" +
 	"\n" +
 	"StoreState\x12\x06\n" +
 	"\x02UP\x10\x00\x12\v\n" +
 	"\aOFFLINE\x10\x01\x12\r\n" +
-	"\tTOMBSTONE\x10\x022\x84\x03\n" +
+	"\tTOMBSTONE\x10\x022\xbf\x03\n" +
 	"\x02PD\x120\n" +
 	"\x05GetTS\x12\x12.pdpb.GetTSRequest\x1a\x13.pdpb.GetTSResponse\x129\n" +
 	"\bPutStore\x12\x15.pdpb.PutStoreRequest\x1a\x16.pdpb.PutStoreResponse\x12K\n" +
 	"\x0eStoreHeartbeat\x12\x1b.pdpb.StoreHeartbeatRequest\x1a\x1c.pdpb.StoreHeartbeatResponse\x126\n" +
 	"\aAllocID\x12\x14.pdpb.AllocIDRequest\x1a\x15.pdpb.AllocIDResponse\x12<\n" +
 	"\tGetRegion\x12\x16.pdpb.GetRegionRequest\x1a\x17.pdpb.GetRegionResponse\x12N\n" +
-	"\x0fRegionHeartbeat\x12\x1c.pdpb.RegionHeartbeatRequest\x1a\x1d.pdpb.RegionHeartbeatResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
+	"\x0fRegionHeartbeat\x12\x1c.pdpb.RegionHeartbeatRequest\x1a\x1d.pdpb.RegionHeartbeatResponse\x129\n" +
+	"\bGetStore\x12\x15.pdpb.GetStoreRequest\x1a\x16.pdpb.GetStoreResponseB\x15Z\x13titankv/pd/api/pdpbb\x06proto3"
 
 var (
 	file_pdpb_proto_rawDescOnce sync.Once
@@ -1343,7 +1677,7 @@ func file_pdpb_proto_rawDescGZIP() []byte {
 }
 
 var file_pdpb_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_pdpb_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_pdpb_proto_goTypes = []any{
 	(StoreState)(0),                 // 0: pdpb.StoreState
 	(ChangePeer_ChangeType)(0),      // 1: pdpb.ChangePeer.ChangeType
@@ -1368,6 +1702,12 @@ var file_pdpb_proto_goTypes = []any{
 	(*TransferLeader)(nil),          // 20: pdpb.TransferLeader
 	(*RegionHeartbeatResponse)(nil), // 21: pdpb.RegionHeartbeatResponse
 	(*ChangePeer)(nil),              // 22: pdpb.ChangePeer
+	(*RegionContext)(nil),           // 23: pdpb.RegionContext
+	(*PutRequest)(nil),              // 24: pdpb.PutRequest
+	(*GetRequest)(nil),              // 25: pdpb.GetRequest
+	(*DeleteRequest)(nil),           // 26: pdpb.DeleteRequest
+	(*GetStoreRequest)(nil),         // 27: pdpb.GetStoreRequest
+	(*GetStoreResponse)(nil),        // 28: pdpb.GetStoreResponse
 }
 var file_pdpb_proto_depIdxs = []int32{
 	0,  // 0: pdpb.MetaStore.state:type_name -> pdpb.StoreState
@@ -1385,23 +1725,31 @@ var file_pdpb_proto_depIdxs = []int32{
 	22, // 12: pdpb.RegionHeartbeatResponse.change_peer:type_name -> pdpb.ChangePeer
 	1,  // 13: pdpb.ChangePeer.change_type:type_name -> pdpb.ChangePeer.ChangeType
 	15, // 14: pdpb.ChangePeer.peer:type_name -> pdpb.Peer
-	11, // 15: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
-	7,  // 16: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
-	9,  // 17: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
-	2,  // 18: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
-	17, // 19: pdpb.PD.GetRegion:input_type -> pdpb.GetRegionRequest
-	19, // 20: pdpb.PD.RegionHeartbeat:input_type -> pdpb.RegionHeartbeatRequest
-	13, // 21: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
-	8,  // 22: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
-	10, // 23: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
-	3,  // 24: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
-	18, // 25: pdpb.PD.GetRegion:output_type -> pdpb.GetRegionResponse
-	21, // 26: pdpb.PD.RegionHeartbeat:output_type -> pdpb.RegionHeartbeatResponse
-	21, // [21:27] is the sub-list for method output_type
-	15, // [15:21] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	16, // 15: pdpb.RegionContext.region_epoch:type_name -> pdpb.RegionEpoch
+	15, // 16: pdpb.RegionContext.peer:type_name -> pdpb.Peer
+	23, // 17: pdpb.PutRequest.context:type_name -> pdpb.RegionContext
+	23, // 18: pdpb.GetRequest.context:type_name -> pdpb.RegionContext
+	23, // 19: pdpb.DeleteRequest.context:type_name -> pdpb.RegionContext
+	4,  // 20: pdpb.GetStoreResponse.store:type_name -> pdpb.MetaStore
+	11, // 21: pdpb.PD.GetTS:input_type -> pdpb.GetTSRequest
+	7,  // 22: pdpb.PD.PutStore:input_type -> pdpb.PutStoreRequest
+	9,  // 23: pdpb.PD.StoreHeartbeat:input_type -> pdpb.StoreHeartbeatRequest
+	2,  // 24: pdpb.PD.AllocID:input_type -> pdpb.AllocIDRequest
+	17, // 25: pdpb.PD.GetRegion:input_type -> pdpb.GetRegionRequest
+	19, // 26: pdpb.PD.RegionHeartbeat:input_type -> pdpb.RegionHeartbeatRequest
+	27, // 27: pdpb.PD.GetStore:input_type -> pdpb.GetStoreRequest
+	13, // 28: pdpb.PD.GetTS:output_type -> pdpb.GetTSResponse
+	8,  // 29: pdpb.PD.PutStore:output_type -> pdpb.PutStoreResponse
+	10, // 30: pdpb.PD.StoreHeartbeat:output_type -> pdpb.StoreHeartbeatResponse
+	3,  // 31: pdpb.PD.AllocID:output_type -> pdpb.AllocIDResponse
+	18, // 32: pdpb.PD.GetRegion:output_type -> pdpb.GetRegionResponse
+	21, // 33: pdpb.PD.RegionHeartbeat:output_type -> pdpb.RegionHeartbeatResponse
+	28, // 34: pdpb.PD.GetStore:output_type -> pdpb.GetStoreResponse
+	28, // [28:35] is the sub-list for method output_type
+	21, // [21:28] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_pdpb_proto_init() }
@@ -1415,7 +1763,7 @@ func file_pdpb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pdpb_proto_rawDesc), len(file_pdpb_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

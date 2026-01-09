@@ -38,6 +38,12 @@ class DBImpl : public DB {
   void SetGCThreshold(double threshold) {
   	blob_store_->SetGCThreshold(threshold);
   }
+  void GetApproximateSizes(const Range* range, int n, uint64_t* sizes);
+  // 导入外部 SST 文件
+  Status IngestSST(const std::string& file_path);
+  Status DumpSST(const Slice& start, const Slice& end, const std::string& fname, uint64_t seq);
+
+  Status DeleteRange(const WriteOptions& options, const Slice& start, const Slice& end);
 
  private:
   friend class DB;
@@ -90,13 +96,7 @@ class DBImpl : public DB {
   // 增加 WriteBatch 支持
   Status Write(const WriteOptions& options, WriteBatch* batch) override;
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
-  void GetApproximateSizes(const Range* range, int n, uint64_t* sizes);
-  Status DumpSST(const Slice& start, const Slice& end, const std::string& fname, uint64_t seq);
 
-    Status DeleteRange(const WriteOptions& options, const Slice& start, const Slice& end);
-  
-  // 导入外部 SST 文件
-  Status IngestSST(const std::string& file_path);
   Status DoCompactionWork(Compaction* c);
 
   // 【新增】辅助函数声明
