@@ -286,4 +286,31 @@ int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
     return -1; // NotFound
 }
 
+void titan_mvcc_commit(titan_db_t* db, const char** keys, size_t* klens, int count,
+                       uint64_t start_ts, uint64_t commit_ts, char** err) {
+    std::vector<std::string> cpp_keys;
+    for (int i = 0; i < count; ++i) {
+        cpp_keys.emplace_back(keys[i], klens[i]);
+    }
+    
+    titankv::Status s = db->rep->MvccCommit(cpp_keys, start_ts, commit_ts);
+    set_error(err, s);
+}
+
+void titan_mvcc_get(titan_db_t* db, const char* key, size_t klen, uint64_t start_ts,
+                    char** val, size_t* vlen, char** err) {
+    std::string result;
+    titankv::Status s = db->rep->MvccGet(titankv::Slice(key, klen), start_ts, &result);
+    if (s.ok()) {
+        *vlen = result.size();
+        *val = static_cast<char*>(malloc(result.size()));
+        memcpy(*val, result.data(), result.size());
+        *err = nullptr;
+    } else {
+        *val = nullptr;
+        *vlen = 0;
+        set_error(err, s);
+    }
+}
+
 } // extern "C"

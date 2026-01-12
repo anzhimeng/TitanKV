@@ -184,6 +184,68 @@ func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (
 	return titankvpb.NewTitanKVClient(conn).Commit(ctx, req)
 }
 
+func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
+    for i := 0; i < 3; i++ { // 重试 3 次
+        // 1. 定位路由
+        addr, err := c.LocateLeader(ctx, key)
+        if err != nil {
+            addr = "127.0.0.1:9091" // Fallback for test
+        }
+
+        conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+        if err != nil { return nil, err }
+        kvClient := titankvpb.NewTitanKVClient(conn)
+
+        // 2. 构造请求
+        // 填充 RegionContext
+        region, _ := c.cache.Search(key)
+        var context *titankvpb.RegionContext
+        if region != nil {
+            context = &titankvpb.RegionContext{
+                RegionId:    region.Id,
+                RegionEpoch: region.RegionEpoch,
+            }
+        } else {
+             context = &titankvpb.RegionContext{RegionId: 1} // Fallback
+        }
+        
+        req := &titankvpb.GetRequest{
+            Context: context,
+            Key:     key,
+            StartTs: ts, // 【关键】传入事务开始时间
+        }
+
+        // 3. 发送请求
+        resp, err := kvClient.Get(ctx, req)
+        conn.Close()
+
+        if err != nil {
+            // 处理错误
+            st, _ := status.FromError(err)
+            if st.Code() == codes.NotFound {
+                return nil, nil // Key 不存在，返回 nil, nil (符合 Go 习惯)
+            }
+            if st.Code() == codes.Aborted && st.Message() == "KeyLocked" {
+                // 遇到锁，需要 Backoff 重试 (Day 4 内容)
+                // 这里暂时直接返回错误，让上层 Transaction 处理
+                return nil, fmt.Errorf("key is locked")
+            }
+            if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
+                c.cache.Invalidate(key)
+                time.Sleep(50 * time.Millisecond)
+                continue
+            }
+            
+            // 网络错误等
+            time.Sleep(50 * time.Millisecond)
+            continue
+        }
+        
+        return resp.Value, nil
+    }
+    return nil, fmt.Errorf("snapshot get max retries exceeded")
+}
+
 func (c *Client) GetRegionCache() *RegionCache {
     return c.cache
 }

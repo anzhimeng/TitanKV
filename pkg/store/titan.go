@@ -459,3 +459,48 @@ func (s *TitanStore) Prewrite(mutations []*titankvpb.Mutation, primary []byte, s
     }
     return nil
 }
+
+func (s *TitanStore) Commit(keys [][]byte, startTS, commitTS uint64) error {
+    count := len(keys)
+    if count == 0 { return nil }
+
+    // 构造 C 数组
+    cKeys := make([]*C.char, count)
+    cLens := make([]C.size_t, count)
+    for i, k := range keys {
+        cKeys[i] = (*C.char)(unsafe.Pointer(&k[0]))
+        cLens[i] = C.size_t(len(k))
+    }
+
+    var cErr *C.char
+    C.titan_mvcc_commit(s.db, &cKeys[0], &cLens[0], C.int(count),
+                        C.uint64_t(startTS), C.uint64_t(commitTS), &cErr)
+
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return errors.New(C.GoString(cErr))
+    }
+    return nil
+}
+
+func (s *TitanStore) MvccGet(key []byte, startTS uint64) ([]byte, error) {
+    var cVal *C.char
+    var cLen C.size_t
+    var cErr *C.char
+    
+    kPtr := (*C.char)(unsafe.Pointer(&key[0]))
+    
+    C.titan_mvcc_get(s.db, kPtr, C.size_t(len(key)), C.uint64_t(startTS), &cVal, &cLen, &cErr)
+    
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return nil, errors.New(C.GoString(cErr))
+    }
+    
+    if cVal != nil {
+        val := C.GoBytes(unsafe.Pointer(cVal), C.int(cLen))
+        C.titan_free(unsafe.Pointer(cVal))
+        return val, nil
+    }
+    return nil, nil // Should not happen if err is nil
+}

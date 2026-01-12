@@ -88,26 +88,22 @@ func (txn *Transaction) Get(ctx context.Context, key []byte) ([]byte, error) {
 	k := string(key)
 	
 	// 1. 查 Buffer (Read-Your-Writes)
+    // 必须先查自己的写缓冲，否则刚刚 Set 的数据读不到
 	if val, ok := txn.buffer[k]; ok {
+		// 如果 buffer 里是 nil，说明被删除了
 		if val == nil {
-			return nil, errors.New("key not found (deleted in txn)")
+			return nil, nil // 或者返回 ErrKeyNotFound
 		}
 		return val, nil
 	}
 
 	// 2. 查 Storage (Snapshot Read)
-	// 我们需要调用 Server 的 SnapshotRead 接口
-	// (Server 端接口将在 Week 14 实现，这里先定义 Client 逻辑)
-	
-	// 假设 Client 有一个 SnapshotGet 方法，传入 Key 和 StartTS
+	// 调用 Client 的 SnapshotGet
+    // 如果返回 nil, nil 说明数据库里也没这个 Key
 	val, err := txn.client.SnapshotGet(ctx, key, txn.StartTS)
 	if err != nil {
 		return nil, err
 	}
-	
-	// 3. 将读到的数据缓存到 Buffer 吗？
-	// 通常不需要，除非是为了 Repeatable Read 的校验。
-	// Percolator 模型在 Prewrite 阶段会检查 Write Conflict，所以这里不需要缓存读集。
 	
 	return val, nil
 }

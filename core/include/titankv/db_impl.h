@@ -40,6 +40,14 @@ class DBImpl : public DB {
                               const std::string& primary,
                               uint64_t start_ts, 
                               uint64_t ttl) override;
+                              // MVCC Commit
+  // keys: 需要提交的 Key 列表
+  // start_ts: 事务开始时间
+  // commit_ts: 事务提交时间
+  Status MvccCommit(const std::vector<std::string>& keys, 
+                            uint64_t start_ts, 
+                            uint64_t commit_ts) override;
+  Status MvccGet(const Slice& key, uint64_t start_ts, std::string* value) override;
   
   // 【新增】创建指定 CF 的迭代器
  Iterator* NewIterator(const ReadOptions& options, CFType cf) override;

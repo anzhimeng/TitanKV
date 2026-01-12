@@ -20,6 +20,7 @@ service TitanKV {
     rpc StreamSnapshot(stream SnapshotChunk) returns (RaftResponse);
 }
 
+
 message RegionEpoch {
     uint64 conf_ver = 1;
     uint64 version = 2;
@@ -69,9 +70,22 @@ message SnapshotChunk {
 
 // --- 请求/响应定义 ---
 
+
+message CommitRequest {
+    RegionContext context = 1;
+    uint64 start_ts = 2;
+    uint64 commit_ts = 3;
+    repeated bytes keys = 4;
+}
+
+message CommitResponse {
+    string error = 1;
+}
+
 message GetRequest {
     RegionContext context = 1; // 【新增】
     bytes key = 2;
+    uint64 start_ts = 3;
 }
 
 message GetResponse {

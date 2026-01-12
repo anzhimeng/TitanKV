@@ -1433,4 +1433,97 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
     return Write(WriteOptions(), &batch);
 }
 
+Status DBImpl::MvccCommit(const std::vector<std::string>& keys, 
+                          uint64_t start_ts, 
+                          uint64_t commit_ts) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    WriteBatch batch;
+
+    for (const auto& key : keys) {
+        // 1. 检查 Lock
+        std::string lock_val;
+        Status s = GetCF(kCFLock, key, &lock_val, 0);
+        if (!s.ok()) {
+            // 锁不存在？
+            // 可能性 A: 事务已经提交过 (幂等性检查: 查 Write CF)
+            // 可能性 B: 锁被 TTL 清理或 Rollback
+            // 这里我们需要查 Write CF 确认是否重复提交。
+            // 简单实现：如果是 Secondary，且 Primary 已提交，则视为成功。
+            // 但在这个原子 Batch 里，如果任意一个 Key 没锁，通常意味着出问题了。
+            // 为了 Day 2 简单：直接报错 "Lock not found" (让上层处理重试或回滚)
+            return Status::NotFound("Lock not found for key: " + key);
+        }
+
+        // 检查 Lock 的 StartTS 是否匹配
+        // LockValue 格式: "primary|start_ts|ttl" (我们在 Day 1 定义的)
+        // 解析 LockValue... (需实现简单解析)
+        // 假设我们能解析出 lock_start_ts
+        // if (lock_start_ts != start_ts) return Status::Aborted("Lock ts mismatch");
+
+        // 2. 写入 Write CF
+        // Key: w{key}{commit_ts}
+        // Value: {start_ts, type=Put} (类型应该从 Lock 中获取，或者由上层传下来)
+        // 简化：假设都是 Put
+        std::string write_val = std::to_string(start_ts) + "|Put"; // 简单序列化
+        
+        // Batch 写入 Write CF
+        batch.PutCF(kCFWrite, key, write_val, commit_ts);
+
+        // 3. 删除 Lock CF
+        batch.DeleteCF(kCFLock, key, 0);
+    }
+
+    return Write(WriteOptions(), &batch);
+}
+
+Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) {
+    // 读操作可以不加互斥锁 (LSM 的 MemTable 是无锁读的，VersionSet 引用计数保护)
+    // 但为了使用 MvccReader 和 Iterator，我们需要一个 Reader 对象
+    
+    // 1. 检查 Lock
+    std::string lock_val;
+    Status s = GetCF(kCFLock, key, &lock_val, 0); // Lock CF 无需 TS
+    if (s.ok()) {
+        // 解析 Lock 信息 (假设格式: "primary|start_ts|ttl")
+        // 这里简化：假设我们能解析出 lock_start_ts
+        // uint64_t lock_start_ts = ParseLockTs(lock_val);
+        
+        // 简化 Hack: 为了 Day 3 跑通，先假设锁的 StartTS 就是字符串的前几位？
+        // 或者我们暂时悲观一点：只要有锁就冲突。
+        return Status::Aborted("Key is locked");
+    }
+
+    // 2. 查找 Write
+    MvccReader reader(this, start_ts);
+    uint64_t commit_ts;
+    std::string write_info;
+    
+    s = reader.SeekWrite(key, &commit_ts, &write_info);
+    if (!s.ok()) {
+        return s; // NotFound (Key 不存在或已删除)
+    }
+
+    // 解析 Write Info (假设格式: "start_ts|type")
+    // size_t sep = write_info.find('|');
+    // uint64_t data_start_ts = std::stoull(write_info.substr(0, sep));
+    // char type = write_info[sep+1]; // 'P' or 'D'
+    
+    // 简化 Hack: 假设 write_info 直接就是 start_ts (Week 14 Day 2 实现时可能简化了)
+    // 让我们回顾 Day 2 的 Commit 实现：
+    // std::string write_val = std::to_string(start_ts) + "|Put";
+    
+    size_t sep = write_info.find('|');
+    if (sep == std::string::npos) return Status::Corruption("Bad write info");
+    
+    uint64_t data_start_ts = std::stoull(write_info.substr(0, sep));
+    std::string type_str = write_info.substr(sep + 1);
+
+    if (type_str == "Delete") {
+        return Status::NotFound("Key deleted");
+    }
+
+    // 3. 读取 Data
+    return reader.GetValue(key, data_start_ts, value);
+}
+
 } // namespace titankv

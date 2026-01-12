@@ -78,6 +78,18 @@ class DB {
                               const std::string& primary,
                               uint64_t start_ts, 
                               uint64_t ttl) = 0;
+                              // MVCC Commit
+  // keys: 需要提交的 Key 列表
+  // start_ts: 事务开始时间
+  // commit_ts: 事务提交时间
+  virtual Status MvccCommit(const std::vector<std::string>& keys, 
+                            uint64_t start_ts, 
+                            uint64_t commit_ts) = 0;
+  // MVCC Get
+  // key: 用户 Key
+  // start_ts: 事务 StartTS
+  // value: 输出参数
+  virtual Status MvccGet(const Slice& key, uint64_t start_ts, std::string* value) = 0;
 };
 
 } // namespace titankv

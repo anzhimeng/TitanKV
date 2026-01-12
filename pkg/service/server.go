@@ -79,28 +79,33 @@ func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb
 }
 
 func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb.GetResponse, error) {
-    // Week 10: 暂时直接读 Store，Linearizable Read 需后续适配
-    // key 需要编码吗？
-    // 注意：Store 里的 key 是编码后的 (z{RegionID}_{UserKey})
-    // 这是一个大坑！如果 Client 传的是 UserKey，我们需要知道 RegionID 才能读到数据。
-    // 所以 Get 请求也必须带 RegionContext。
-    
+    if len(req.Key) == 0 {
+        return nil, status.Error(codes.InvalidArgument, "key cannot be empty")
+    }
     if req.Context == nil {
         return nil, status.Error(codes.InvalidArgument, "missing region context")
     }
+    if req.StartTs == 0 {
+        return nil, status.Error(codes.InvalidArgument, "missing start_ts")
+    }
 
-        regionID := req.Context.RegionId
+    regionID := req.Context.RegionId
+
+    // =========================================================
+    // Phase 1: Linearizability Check (ReadIndex)
+    // 确保我们读到的是最新的数据状态 (防止脑裂读旧数据)
+    // =========================================================
     
-    // 1. 构造响应通道
+    // 1.1 构造响应通道
     retCh := make(chan uint64, 1)
     
-    // 2. 发送 MsgReadIndex
+    // 1.2 发送 MsgReadIndex
     msg := raftstore.NewMsgReadIndex(regionID, retCh)
     if !s.router.Send(regionID, msg) {
         return nil, status.Error(codes.NotFound, "region not found")
     }
     
-    // 3. 等待 Raft 确认 (ReadIndex)
+    // 1.3 等待 Raft 确认 (ReadIndex)
     var safeIndex uint64
     select {
     case idx := <-retCh:
@@ -109,15 +114,13 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
         return nil, status.Error(codes.DeadlineExceeded, "read index timeout")
     }
     
-    // 4. 等待状态机追赶 (Wait Applied)
-    // 这里我们直接轮询 Router 里的 Peer 状态
-    // (更优雅的方式是使用 sync.Cond，但那需要 Peer 暴露 Cond，这里用 sleep 简单模拟)
-    peer := s.router.GetLocalPeer(regionID) // 假设 Router 暴露了这个
+    // 1.4 等待状态机追赶 (Wait Applied)
+    peer := s.router.GetLocalPeer(regionID)
     if peer == nil {
         return nil, status.Error(codes.NotFound, "region lost during read")
     }
     
-    ticker := time.NewTicker(time.Millisecond) // 1ms 轮询
+    ticker := time.NewTicker(time.Millisecond)
     defer ticker.Stop()
     
     for peer.GetAppliedIndex() < safeIndex {
@@ -128,19 +131,42 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
             // continue polling
         }
     }
+
+    // =========================================================
+    // Phase 2: MVCC Read (Snapshot Read)
+    // 在本地引擎中，根据 StartTS 读取可见版本
+    // =========================================================
+
+    // 注意：Store 里的 Key 不需要再加 z{RegionID} 前缀了！
+    // 为什么？因为我们在 C++ 层实现的 PutCF/GetCF 会自动处理 MVCC 编码。
+    // 但是！C++ 层的 MVCC Key 是基于 User Key 的。
+    // 如果我们想支持 Multi-Raft，底层的 Key 应该是 z{RegionID}_{MvccKey}。
+    // 这涉及到 C++ 层的改造。
+    // 
+    // 【关键回顾】：Week 13 Day 1 我们实现的 EncodeMvccKey 是： Prefix(1) + UserKey + TS(8)。
+    // 它并没有包含 RegionID！
+    // 这意味着目前的 MVCC 实现是单机版的，不支持 Multi-Raft 数据隔离。
+    //
+    // 为了 Week 14 能跑通，我们需要做一个适配：
+    // 将 z{RegionID}_{UserKey} 作为一个整体，当作 MVCC 的 "User Key" 传给 C++。
+    // 这样 C++ 编码后就是：Prefix(1) + z{RegionID}_{UserKey} + TS(8)。
+    // 虽然多了一层前缀，但逻辑是完全正确的，且实现了隔离。
     
+    encodedKey := raftstore.DataKey(regionID, req.Key)
     
-    // 编码 Key
-    encodedKey := raftstore.DataKey(req.Context.RegionId, req.Key)
-    
-	val, err := s.store.Get(encodedKey)
-	if err != nil {
-		if err.Error() == "key not found" {
-			return nil, status.Error(codes.NotFound, "key not found")
-		}
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	return &titankvpb.GetResponse{Value: val}, nil
+    // 调用 MvccGet
+    val, err := s.store.MvccGet(encodedKey, req.StartTs)
+    if err != nil {
+        if err.Error() == "Key is locked" {
+             return nil, status.Error(codes.Aborted, "KeyLocked")
+        }
+        if err.Error() == "Key deleted" || err.Error() == "key not found" {
+             return nil, status.Error(codes.NotFound, "key not found")
+        }
+        return nil, status.Error(codes.Internal, err.Error())
+    }
+
+    return &titankvpb.GetResponse{Value: val}, nil
 }
 
 func (s *Server) Delete(ctx context.Context, req *titankvpb.DeleteRequest) (*titankvpb.DeleteResponse, error) {
@@ -284,11 +310,32 @@ func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (
     if len(req.Mutations) == 0 {
         return &titankvpb.PrewriteResponse{}, nil
     }
-
-    // 2. 转换 Mutations
-    // (需要调用 CGO，但为了 Week 14 的进度，我们暂时跳过繁琐的 CGO 结构体转换，
-    //  假设 store 有一个 Prewrite 接口接收 Go 切片)
     
+    if req.Context != nil {
+        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+            return nil, status.Error(codes.Aborted, "EpochNotMatch")
+        }
+    }
+
+    regionID := req.Context.RegionId
+
+    // 【关键】对所有 Key 进行 Region 编码
+    // 我们不能直接修改 req.Mutations (会影响原数据)，需要拷贝一份
+    var encodedMutations []*titankvpb.Mutation
+    
+    for _, m := range req.Mutations {
+        // DataKey = z{RegionID}_{UserKey}
+        encKey := raftstore.DataKey(regionID, m.Key)
+        
+        encodedMutations = append(encodedMutations, &titankvpb.Mutation{
+            Op:    m.Op,
+            Key:   encKey, // 传入编码后的 Key
+            Value: m.Value,
+        })
+    }
+    
+    // Primary Key 也要编码
+    encPrimary := raftstore.DataKey(regionID, req.PrimaryKey)
     // 3. 调用 Store
     err := s.store.Prewrite(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl)
     
@@ -299,4 +346,29 @@ func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (
     }
 
     return &titankvpb.PrewriteResponse{}, nil
+}
+
+func (s *Server) Commit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
+    // 1. 路由检查 (Epoch)
+    if req.Context != nil {
+        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+            return nil, status.Error(codes.Aborted, "EpochNotMatch")
+        }
+    }
+    regionID := req.Context.RegionId
+
+    // 【关键】对 Key 进行 Region 编码
+    var encodedKeys [][]byte
+    for _, k := range req.Keys {
+        encodedKeys = append(encodedKeys, raftstore.DataKey(regionID, k))
+    }
+    // 2. 调用 Store
+    err := s.store.Commit(req.Keys, req.StartTs, req.CommitTs)
+    if err != nil {
+        // 如果是 LockNotFound，可能需要特殊处理（Retryable?）
+        // 暂时直接返回 Error
+        return &titankvpb.CommitResponse{Error: err.Error()}, nil
+    }
+
+    return &titankvpb.CommitResponse{}, nil
 }

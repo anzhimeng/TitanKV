@@ -102,7 +102,11 @@ int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
                                  
 void titan_mvcc_prewrite(titan_db_t* db, const titan_mutation_t* mutations, int count,
                          const char* primary, size_t plen, uint64_t start_ts, uint64_t ttl, char** err);
-                                       
+void titan_mvcc_commit(titan_db_t* db, const char** keys, size_t* klens, int count,
+                       uint64_t start_ts, uint64_t commit_ts, char** err);
+                       
+void titan_mvcc_get(titan_db_t* db, const char* key, size_t klen, uint64_t start_ts,
+                    char** val, size_t* vlen, char** err);
 
 #ifdef __cplusplus
 }
