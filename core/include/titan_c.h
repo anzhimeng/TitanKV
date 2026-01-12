@@ -16,6 +16,12 @@ typedef struct {
     bool use_direct_io; // 【新增】
 } titan_options_t;
 
+typedef enum {
+    CF_DEFAULT = 0, // 'd'
+    CF_LOCK    = 1, // 'l'
+    CF_WRITE   = 2  // 'w'
+} titan_cf_t;
+
 // 修改 open 接口，接收 options
 titan_db_t* titan_open(const char* name, const titan_options_t* options, char** err);
 
@@ -71,7 +77,21 @@ void titan_delete_range(titan_db_t* db, const char* start, size_t slen,
                         const char* end, size_t elen, char** err);
 void titan_dump_sst(titan_db_t* db, const char* start, size_t slen,
                     const char* end, size_t elen,
-                    const char* path, char** err);                        
+                    const char* path, char** err);
+                    
+void titan_put_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, 
+                  const char* val, size_t vlen, uint64_t ts, char** err);
+
+void titan_delete_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, uint64_t ts, char** err);
+
+void titan_get_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, uint64_t ts,
+                  char** val, size_t* vlen, char** err);    
+
+void* titan_mvcc_reader_create(titan_db_t* db, uint64_t snapshot);
+void titan_mvcc_reader_destroy(void* reader);
+int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
+                                 uint64_t* commit_ts, char** val, size_t* vlen);
+                                       
 
 #ifdef __cplusplus
 }

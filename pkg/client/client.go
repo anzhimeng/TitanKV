@@ -116,3 +116,25 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 	}
 	return fmt.Errorf("max retries exceeded")
 }
+
+// pkg/client/client.go
+
+// 获取 TSO
+func (c *Client) GetTS(ctx context.Context) (uint64, error) {
+    req := &pdpb.GetTSRequest{Count: 1}
+    resp, err := c.pdClient.GetTS(ctx, req)
+    if err != nil {
+        return 0, err
+    }
+    // 组合 Physical + Logical
+    ts := uint64(resp.Timestamp.Physical) << 18 | uint64(resp.Timestamp.Logical)
+    return ts, nil
+}
+
+// 快照读 (Week 14 Server 端实现后才能真正跑通)
+func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
+    // 构造请求，带上 TS
+    // ...
+    // 这里先 Mock 或者留空，等待 Week 14
+    return nil, fmt.Errorf("SnapshotGet not implemented yet")
+}

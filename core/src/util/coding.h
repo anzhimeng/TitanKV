@@ -5,6 +5,17 @@
 
 namespace titankv {
 
+	// MVCC Key 编码辅助
+	// 编码后的 Key 格式: [Prefix(1B)] [UserKey] [TS_Desc(8B)]
+	// 对于 Lock CF，没有 TS 后缀
+	enum CFType : char {
+	    kCFDefault = 'd',
+	    kCFLock    = 'l',
+	    kCFWrite   = 'w'
+	};
+
+
+
     // --- Fixed-length encoding (定长编码) ---
     // // 用于磁盘 Header，速度快，易于解析
 
@@ -47,6 +58,19 @@ namespace titankv {
     // 格式: [Varint32 Length] [Data...]
     // 成功返回 true 并更新 input 指针；失败返回 false
     bool GetLengthPrefixedSlice(Slice* input, Slice* result);
+
+
+    void PutFixed64BigEndian(std::string* dst, uint64_t value);
+    uint64_t DecodeFixed64BigEndian(const char* ptr);
+    // 编码带 TS 的 Key (Default/Write CF)
+    std::string EncodeMvccKey(char cf, const Slice& key, uint64_t ts);
+	
+    // 编码不带 TS 的 Key (Lock CF)
+    std::string EncodeLockKey(const Slice& key);
+	
+    // 解码 (提取 UserKey 和 TS)
+    // 返回 UserKey 部分，ts 输出参数
+    Slice DecodeMvccKey(const Slice& internal_key, uint64_t* ts);
 
     
 }   // namespace titankv

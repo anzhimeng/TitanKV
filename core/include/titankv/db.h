@@ -5,8 +5,11 @@
 #include "titankv/slice.h"
 #include "titankv/options.h"
 #include "titankv/write_batch.h"
+#include "util/coding.h"
+#include "lsm/block.h"
 
 namespace titankv {
+
 
 struct Range {
   Slice start;
@@ -56,6 +59,15 @@ class DB {
   
   // 导入外部 SST 文件
   virtual Status IngestSST(const std::string& file_path) = 0;
+
+  // 【新增】多列族接口
+  // ts: 事务时间戳。如果是 Lock CF，该参数会被忽略（或传 0）
+  virtual Status PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0) = 0;
+  virtual Status DeleteCF(CFType cf, const Slice& key, uint64_t ts = 0) = 0;
+  virtual Status GetCF(CFType cf, const Slice& key, std::string* value, uint64_t ts = 0) = 0;
+  
+  // 【新增】创建指定 CF 的迭代器
+  virtual Iterator* NewIterator(const ReadOptions& options, CFType cf) = 0;
 };
 
 } // namespace titankv

@@ -28,6 +28,13 @@ class DBImpl : public DB {
   Status Delete(const WriteOptions& options, const Slice& key) override;
   Status Get(const ReadOptions& options, const Slice& key, std::string* value) override;
 
+  Status PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0) override;
+  Status DeleteCF(CFType cf, const Slice& key, uint64_t ts = 0) override;
+  Status GetCF(CFType cf, const Slice& key, std::string* value, uint64_t ts = 0) override;
+  
+  // 【新增】创建指定 CF 的迭代器
+ Iterator* NewIterator(const ReadOptions& options, CFType cf) override;
+
   Status Recover();
 
   // 【新增】手动触发 GC (Day 3 入口)

@@ -16,6 +16,14 @@ import (
 
 var ErrKeyNotFound = errors.New("key not found")
 
+type CFType int
+
+const (
+	CFDefault CFType = 0
+	CFLock    CFType = 1
+	CFWrite   CFType = 2
+)
+
 type Statistics struct {
 	BlobBytesWritten uint64
 	BlobBytesRead    uint64
@@ -345,5 +353,63 @@ func (s *TitanStore) DeleteRange(start, end []byte) error {
         defer C.titan_free(unsafe.Pointer(cErr))
         return errors.New(C.GoString(cErr))
     }
+    return nil
+}
+
+// PutCF 带列族和时间戳的写入
+func (s *TitanStore) PutCF(cf CFType, key, value []byte, ts uint64) error {
+	var cErr *C.char
+	
+	var kPtr, vPtr *C.char
+	if len(key) > 0 { kPtr = (*C.char)(unsafe.Pointer(&key[0])) }
+	if len(value) > 0 { vPtr = (*C.char)(unsafe.Pointer(&value[0])) }
+
+	C.titan_put_cf(s.db, C.titan_cf_t(cf), kPtr, C.size_t(len(key)), 
+                   vPtr, C.size_t(len(value)), C.uint64_t(ts), &cErr)
+
+	if cErr != nil {
+		defer C.titan_free(unsafe.Pointer(cErr))
+		return errors.New(C.GoString(cErr))
+	}
+	return nil
+}
+
+// GetCF 带列族和时间戳的读取 (精确匹配)
+func (s *TitanStore) GetCF(cf CFType, key []byte, ts uint64) ([]byte, error) {
+	var cErr *C.char
+	var cVal *C.char
+	var cLen C.size_t
+
+	var kPtr *C.char
+	if len(key) > 0 { kPtr = (*C.char)(unsafe.Pointer(&key[0])) }
+
+	C.titan_get_cf(s.db, C.titan_cf_t(cf), kPtr, C.size_t(len(key)), C.uint64_t(ts),
+                   &cVal, &cLen, &cErr)
+
+	if cErr != nil {
+		defer C.titan_free(unsafe.Pointer(cErr))
+		return nil, errors.New(C.GoString(cErr))
+	}
+
+	if cVal != nil {
+		val := C.GoBytes(unsafe.Pointer(cVal), C.int(cLen))
+		C.titan_free(unsafe.Pointer(cVal))
+		return val, nil
+	}
+    
+    return nil, errors.New("key not found") 
+}
+
+// DeleteCF 带列族和时间戳的删除
+func (s *TitanStore) DeleteCF(cf CFType, key []byte, ts uint64) error {
+    var cErr *C.char
+    var kPtr *C.char
+	if len(key) > 0 { kPtr = (*C.char)(unsafe.Pointer(&key[0])) }
+
+    C.titan_delete_cf(s.db, C.titan_cf_t(cf), kPtr, C.size_t(len(key)), C.uint64_t(ts), &cErr)
+    if cErr != nil {
+		defer C.titan_free(unsafe.Pointer(cErr))
+		return errors.New(C.GoString(cErr))
+	}
     return nil
 }

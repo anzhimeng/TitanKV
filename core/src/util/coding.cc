@@ -1,4 +1,7 @@
 #include "util/coding.h"
+#include <limits>
+#include <cassert>
+#include <cstring>
 
 namespace titankv {
 
@@ -206,6 +209,65 @@ bool GetLengthPrefixedSlice(Slice* input, Slice* result) {
         }
     }
     return false;
+}
+
+// 【新增】Big Endian 编码
+void PutFixed64BigEndian(std::string* dst, uint64_t value) {
+    char buf[8];
+    buf[0] = (value >> 56) & 0xff;
+    buf[1] = (value >> 48) & 0xff;
+    buf[2] = (value >> 40) & 0xff;
+    buf[3] = (value >> 32) & 0xff;
+    buf[4] = (value >> 24) & 0xff;
+    buf[5] = (value >> 16) & 0xff;
+    buf[6] = (value >> 8) & 0xff;
+    buf[7] = value & 0xff;
+    dst->append(buf, 8);
+}
+
+// 【新增】Big Endian 解码
+uint64_t DecodeFixed64BigEndian(const char* ptr) {
+    const uint8_t* buffer = reinterpret_cast<const uint8_t*>(ptr);
+    return (static_cast<uint64_t>(buffer[0]) << 56) |
+           (static_cast<uint64_t>(buffer[1]) << 48) |
+           (static_cast<uint64_t>(buffer[2]) << 40) |
+           (static_cast<uint64_t>(buffer[3]) << 32) |
+           (static_cast<uint64_t>(buffer[4]) << 24) |
+           (static_cast<uint64_t>(buffer[5]) << 16) |
+           (static_cast<uint64_t>(buffer[6]) << 8) |
+           (static_cast<uint64_t>(buffer[7]));
+}
+
+// 【修改】EncodeMvccKey 使用 Big Endian
+std::string EncodeMvccKey(char cf, const Slice& key, uint64_t ts) {
+    std::string dst;
+    dst.push_back(cf);
+    dst.append(key.data(), key.size());
+    uint64_t ts_desc = std::numeric_limits<uint64_t>::max() - ts;
+    // 使用 Big Endian !
+    PutFixed64BigEndian(&dst, ts_desc); 
+    return dst;
+}
+
+std::string EncodeLockKey(const Slice& key) {
+    std::string dst;
+    // 假设 kCFLock 在 coding.h 中定义为 'l'
+    // 如果没有 enum，这里直接用 'l' 也行
+    dst.push_back('l'); 
+    dst.append(key.data(), key.size());
+    return dst;
+}
+
+Slice DecodeMvccKey(const Slice& internal_key, uint64_t* ts) {
+    assert(internal_key.size() >= 9); // 1B Prefix + 8B TS
+    
+    const char* data = internal_key.data();
+    size_t size = internal_key.size();
+    
+    // 提取 TS
+    uint64_t ts_desc = DecodeFixed64BigEndian(data + size - 8);
+    *ts = std::numeric_limits<uint64_t>::max() - ts_desc;
+    return Slice(data + 1, size - 9);
 }
 
 } // namespace titankv

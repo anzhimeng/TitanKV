@@ -2,6 +2,7 @@
 #include "titan_db.h" // Week 2 整理的总入口
 #include "titankv/db_impl.h"
 #include "titankv/write_batch.h"
+#include "lsm/mvcc_reader.h"
 #include <cstring>
 #include <cstdlib>
 #include <thread>
@@ -16,6 +17,16 @@ static void set_error(char** err, const Status& s) {
         std::string msg = s.ToString();
         *err = static_cast<char*>(malloc(msg.size() + 1));
         std::strcpy(*err, msg.c_str());
+    }
+}
+
+// 内部辅助：转换 C enum 到 C++ enum
+static titankv::CFType to_cpp_cf(titan_cf_t cf) {
+    switch (cf) {
+        case CF_DEFAULT: return titankv::kCFDefault;
+        case CF_LOCK:    return titankv::kCFLock;
+        case CF_WRITE:   return titankv::kCFWrite;
+        default:         return titankv::kCFDefault;
     }
 }
 
@@ -221,4 +232,58 @@ void titan_dump_sst(titan_db_t* db, const char* start, size_t slen,
     
     set_error(err, s);
 }
+
+void titan_put_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, 
+                  const char* val, size_t vlen, uint64_t ts, char** err) {
+    titankv::Status s = db->rep->PutCF(to_cpp_cf(cf), titankv::Slice(key, klen), titankv::Slice(val, vlen), ts);
+    set_error(err, s);
+}
+
+void titan_delete_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, uint64_t ts, char** err) {
+    titankv::Status s = db->rep->DeleteCF(to_cpp_cf(cf), titankv::Slice(key, klen), ts);
+    set_error(err, s);
+}
+
+void titan_get_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, uint64_t ts,
+                  char** val, size_t* vlen, char** err) {
+    std::string result;
+    titankv::Status s = db->rep->GetCF(to_cpp_cf(cf), titankv::Slice(key, klen), &result, ts);
+    
+    if (s.ok()) {
+        *vlen = result.size();
+        *val = static_cast<char*>(malloc(result.size()));
+        memcpy(*val, result.data(), result.size());
+        *err = nullptr;
+    } else {
+        *val = nullptr;
+        *vlen = 0;
+        set_error(err, s);
+    }
+}
+
+
+void* titan_mvcc_reader_create(titan_db_t* db, uint64_t snapshot) {
+    return new titankv::MvccReader(reinterpret_cast<titankv::DBImpl*>(db->rep), snapshot);
+}
+
+// 2. 销毁
+void titan_mvcc_reader_destroy(void* reader) {
+    delete reinterpret_cast<titankv::MvccReader*>(reader);
+}
+
+// 3. SeekWrite
+int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
+                                 uint64_t* commit_ts, char** val, size_t* vlen) {
+    auto r = reinterpret_cast<titankv::MvccReader*>(reader);
+    std::string info;
+    titankv::Status s = r->SeekWrite(titankv::Slice(key, klen), commit_ts, &info);
+    if (s.ok()) {
+        *vlen = info.size();
+        *val = static_cast<char*>(malloc(info.size()));
+        memcpy(*val, info.data(), info.size());
+        return 0; // OK
+    }
+    return -1; // NotFound
+}
+
 } // extern "C"

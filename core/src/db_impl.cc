@@ -1302,4 +1302,87 @@ Status DBImpl::IngestSST(const std::string& fname) {
     return Status::OK();
 }
 
+Status DBImpl::PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts) {
+    std::string encoded_key;
+    if (cf == kCFLock) {
+        encoded_key = EncodeLockKey(key);
+    } else {
+        encoded_key = EncodeMvccKey(static_cast<char>(cf), key, ts);
+    }
+    
+    // 调用底层的 Put (它会加锁、写 WAL、写 MemTable)
+    return Put(WriteOptions(), encoded_key, value);
+}
+
+Status DBImpl::DeleteCF(CFType cf, const Slice& key, uint64_t ts) {
+    std::string encoded_key;
+    if (cf == kCFLock) {
+        encoded_key = EncodeLockKey(key);
+    } else {
+        encoded_key = EncodeMvccKey(static_cast<char>(cf), key, ts);
+    }
+    
+    return Delete(WriteOptions(), encoded_key);
+}
+
+Status DBImpl::GetCF(CFType cf, const Slice& key, std::string* value, uint64_t ts) {
+    std::string encoded_key;
+    if (cf == kCFLock) {
+        encoded_key = EncodeLockKey(key);
+    } else {
+        encoded_key = EncodeMvccKey(static_cast<char>(cf), key, ts);
+    }
+    
+    return Get(ReadOptions(), encoded_key, value);
+}
+
+Iterator* DBImpl::NewIterator(const ReadOptions& options, CFType cf) {
+    std::vector<Iterator*> list;
+    
+    // 1. 获取 Version (加引用)
+    // 注意：迭代器需要持有 Version 的引用，直到迭代器销毁。
+    // 标准做法是：Iterator 析构时 Unref。
+    // 我们在 Week 7 实现了 RegisterCleanup。
+    Version* current = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current = versions_->current();
+        current->Ref();
+    }
+
+    // 2. MemTable
+    list.push_back(mem_->NewIterator());
+    if (imm_ != nullptr) {
+        list.push_back(imm_->NewIterator());
+    }
+
+    // 3. SSTables
+    // L0
+    const std::vector<FileMetaData*>& l0 = current->GetFiles(0);
+    for (FileMetaData* f : l0) {
+        list.push_back(table_cache_->NewIterator(options, f->file_number, f->file_size));
+    }
+    
+    // L1+ (每层一个 LevelIterator)
+    // 假设 kNumLevels = 7
+    for (int level = 1; level < 7; level++) {
+        const std::vector<FileMetaData*>& files = current->GetFiles(level);
+        if (!files.empty()) {
+            // NewLevelIterator 是 Week 8 实现的
+            list.push_back(NewLevelIterator(*versions_->icmp(), table_cache_, files, options));
+        }
+    }
+    
+    // 4. 合并
+    Iterator* internal_iter = NewMergingIterator(versions_->icmp(), list.data(), list.size());
+
+    // 5. 注册清理函数 (释放 Version)
+    internal_iter->RegisterCleanup([](void* arg1, void* arg2) {
+        Version* v = reinterpret_cast<Version*>(arg1);
+        v->Unref();
+    }, current, nullptr);
+
+    return internal_iter;
+}
+
 } // namespace titankv
