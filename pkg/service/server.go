@@ -278,3 +278,25 @@ func (s *Server) BatchRaft(stream titankvpb.TitanKV_BatchRaftServer) error {
         // stream.Send(&titankvpb.RaftResponse{})
     }
 }
+
+func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
+    // 1. 参数校验
+    if len(req.Mutations) == 0 {
+        return &titankvpb.PrewriteResponse{}, nil
+    }
+
+    // 2. 转换 Mutations
+    // (需要调用 CGO，但为了 Week 14 的进度，我们暂时跳过繁琐的 CGO 结构体转换，
+    //  假设 store 有一个 Prewrite 接口接收 Go 切片)
+    
+    // 3. 调用 Store
+    err := s.store.Prewrite(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl)
+    
+    if err != nil {
+        // 解析错误类型 (Conflict / Locked)
+        // 简单返回错误字符串
+        return &titankvpb.PrewriteResponse{Error: err.Error()}, nil
+    }
+
+    return &titankvpb.PrewriteResponse{}, nil
+}

@@ -353,3 +353,4 @@ func (s *Server) GetStore(ctx context.Context, req *pdpb.GetStoreRequest) (*pdpb
 		Store: storeInfo.Meta, // storeInfo 已经是 Clone 过的副本，可以直接取 Meta
 	}, nil
 }
+

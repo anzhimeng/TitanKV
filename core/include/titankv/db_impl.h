@@ -31,6 +31,15 @@ class DBImpl : public DB {
   Status PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0) override;
   Status DeleteCF(CFType cf, const Slice& key, uint64_t ts = 0) override;
   Status GetCF(CFType cf, const Slice& key, std::string* value, uint64_t ts = 0) override;
+  // MVCC Prewrite
+  // mutations: 编码后的 mutation 列表 (key, value, type)
+  // primary: primary key
+  // start_ts: 事务开始时间
+  // ttl: 锁超时时间
+  Status MvccPrewrite(const std::vector<Mutation>& mutations, 
+                              const std::string& primary,
+                              uint64_t start_ts, 
+                              uint64_t ttl) override;
   
   // 【新增】创建指定 CF 的迭代器
  Iterator* NewIterator(const ReadOptions& options, CFType cf) override;

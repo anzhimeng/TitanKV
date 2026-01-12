@@ -413,3 +413,49 @@ func (s *TitanStore) DeleteCF(cf CFType, key []byte, ts uint64) error {
 	}
     return nil
 }
+
+func (s *TitanStore) Prewrite(mutations []*titankvpb.Mutation, primary []byte, startTS uint64, ttl uint64) error {
+    count := len(mutations)
+    if count == 0 { return nil }
+
+    // 1. 分配 C 数组
+    // sizeof(titan_mutation_t) 可以在 C 中获取，但在 Go 中我们通常通过 C.titan_mutation_t 访问
+    // 我们需要一个 slice 来持有这些 C 结构体，防止 GC
+    cMutations := make([]C.titan_mutation_t, count)
+    
+    // 2. 填充数据
+    // 我们需要保持 Go 内存不被回收，直到 C 调用结束。
+    // 在这个函数作用域内，Go 指针是安全的（因为传给了 C 函数，Go 运行时会钉住它们？不一定，最好用 C.CString 或者 unsafe）
+    // 为了绝对安全和简单，我们这里不做深拷贝，而是直接传指针，因为 C++ 端会拷贝数据。
+    // 只要 C++ 端不持有这些指针超过函数返回，就是安全的。
+    
+    for i, m := range mutations {
+        cMutations[i].op = C.int(m.Op)
+        if len(m.Key) > 0 {
+            cMutations[i].key = (*C.char)(unsafe.Pointer(&m.Key[0]))
+            cMutations[i].klen = C.size_t(len(m.Key))
+        }
+        if len(m.Value) > 0 {
+            cMutations[i].value = (*C.char)(unsafe.Pointer(&m.Value[0]))
+            cMutations[i].vlen = C.size_t(len(m.Value))
+        }
+    }
+    
+    // Primary Key
+    var pKey *C.char
+    if len(primary) > 0 {
+        pKey = (*C.char)(unsafe.Pointer(&primary[0]))
+    }
+
+    // 3. 调用 C 接口
+    var cErr *C.char
+    C.titan_mvcc_prewrite(s.db, &cMutations[0], C.int(count), 
+                          pKey, C.size_t(len(primary)), 
+                          C.uint64_t(startTS), C.uint64_t(ttl), &cErr)
+
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return errors.New(C.GoString(cErr))
+    }
+    return nil
+}

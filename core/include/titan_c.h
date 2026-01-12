@@ -22,6 +22,14 @@ typedef enum {
     CF_WRITE   = 2  // 'w'
 } titan_cf_t;
 
+typedef struct {
+    int op; // 0: Put, 1: Delete
+    const char* key;
+    size_t klen;
+    const char* value;
+    size_t vlen;
+} titan_mutation_t;
+
 // 修改 open 接口，接收 options
 titan_db_t* titan_open(const char* name, const titan_options_t* options, char** err);
 
@@ -91,6 +99,9 @@ void* titan_mvcc_reader_create(titan_db_t* db, uint64_t snapshot);
 void titan_mvcc_reader_destroy(void* reader);
 int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
                                  uint64_t* commit_ts, char** val, size_t* vlen);
+                                 
+void titan_mvcc_prewrite(titan_db_t* db, const titan_mutation_t* mutations, int count,
+                         const char* primary, size_t plen, uint64_t start_ts, uint64_t ttl, char** err);
                                        
 
 #ifdef __cplusplus

@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include "titankv/slice.h"
+#include "util/coding.h" 
 
 namespace titankv {
 
@@ -25,6 +26,7 @@ class WriteBatch {
       std::string value;
   };
   const std::vector<Entry>& entries() const { return entries_; }
+  void PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0);
 
  private:
   std::vector<Entry> entries_;

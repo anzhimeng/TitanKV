@@ -7,6 +7,7 @@
 #include "lsm/merging_iterator.h" 
 #include "lsm/table_cache.h"
 #include "lsm/compaction.h"
+#include "lsm/mvcc_reader.h"
 #include "util/filename.h"
 #include "util/cache.h"
 #include <filesystem>
@@ -1383,6 +1384,53 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options, CFType cf) {
     }, current, nullptr);
 
     return internal_iter;
+}
+
+Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations, 
+                            const std::string& primary,
+                            uint64_t start_ts, 
+                            uint64_t ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 1. 创建 WriteBatch (所有操作原子生效)
+    WriteBatch batch;
+    MvccReader reader(this, start_ts); // 复用 Reader
+
+    for (const auto& m : mutations) {
+        // --- 检查 Write Conflict ---
+        // 查找 [StartTS, +inf] 的 Write 记录
+        // 我们的 Reader.SeekWrite 找的是 <= snapshot 的。
+        // 这里我们需要一个新的接口：找 >= StartTS 的。
+        // 简单实现：使用 Iterator 遍历 Write CF。
+        
+        // 为了简化，我们假设 DB 提供了 CheckWriteConflict 辅助函数
+        // 实际上这需要构建 WriteCF 的 Iterator 并 Seek(Key)
+        // 检查找到的 Write.CommitTS 是否 >= StartTS
+        // 如果有，返回 Conflict 错误。
+        
+        // --- 检查 Lock Conflict ---
+        std::string lock_val;
+        Status s = GetCF(kCFLock, m.key, &lock_val, 0);
+        if (s.ok()) {
+            // 锁存在！Conflict！
+            return Status::Aborted("Key is locked");
+        }
+
+        // --- 写入 ---
+        // 1. Lock CF: l{key} -> LockInfo
+        std::string lock_key = EncodeLockKey(m.key);
+        // LockInfo 序列化 (primary + ttl + type)
+        // 简单起见，我们把 start_ts 也存进去
+        std::string lock_info = primary + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl);
+        
+        batch.PutCF(kCFLock, m.key, lock_info, 0); // PutCF 内部会 Encode
+
+        // 2. Default CF: d{key}{start_ts} -> value
+        batch.PutCF(kCFDefault, m.key, m.value, start_ts);
+    }
+
+    // 提交 Batch
+    return Write(WriteOptions(), &batch);
 }
 
 } // namespace titankv

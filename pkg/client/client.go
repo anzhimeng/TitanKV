@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log" 
 	"time"
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -58,55 +59,50 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
 
 // 智能 Put
 func (c *Client) Put(ctx context.Context, key, value []byte) error {
-	for i := 0; i < 3; i++ { // 重试 3 次
-		// 1. 定位
+	for i := 0; i < 3; i++ {
 		addr, err := c.LocateLeader(ctx, key)
 		if err != nil {
-		    // 暂时 fallback 到硬编码地址用于测试 Week 8
-            // 实际代码这里应该 return err 或者 backoff
 			addr = "127.0.0.1:9091" 
 		}
 
-		// 2. 发送请求
 		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil { return err }
+		
+		// 【关键】重命名为 kvClient，避免与结构体字段 c.pdClient 混淆，或者与之前的 client 变量冲突
 		kvClient := titankvpb.NewTitanKVClient(conn)
 		
-		resp, err := kvClient.Put(ctx, &titankvpb.PutRequest{Key: key, Value: value})
+		region, _ := c.cache.Search(key)
+        
+        // 【新增】RegionEpoch 类型转换
+        var epoch *titankvpb.RegionEpoch
+        if region != nil && region.RegionEpoch != nil {
+            epoch = &titankvpb.RegionEpoch{
+                ConfVer: region.RegionEpoch.ConfVer,
+                Version: region.RegionEpoch.Version,
+            }
+        }
+        
+        // 构造请求
+		req := &titankvpb.PutRequest{
+			Context: &titankvpb.RegionContext{
+				RegionId:    region.Id,
+				RegionEpoch: epoch, // 使用转换后的 epoch
+			},
+			Key:   key, 
+			Value: value,
+		}
+		
+        // 【关键】使用 kvClient 调用
+		resp, err := kvClient.Put(ctx, req)
 		conn.Close()
 
 		if err != nil {
-            // 网络错误，清除缓存，重试
 			c.cache.Invalidate(key)
 			continue
 		}
-		// 构造请求时带上 Context
-        	region, _ := c.cache.Search(key)
-       	req := &titankvpb.PutRequest{
-          Context: &titankvpb.RegionContext{
-                RegionId:    region.Id,
-                RegionEpoch: region.RegionEpoch, // 带上 Client 认为的版本
-            },
-          Key: key, 
-          Value: value,
-          }
-        
-        resp, err := client.Put(ctx, req)
-        
-        // 检查错误
-        if status.Code(err) == codes.Aborted && status.Convert(err).Message() == "EpochNotMatch" {
-            // 【关键】Epoch 不匹配，说明路由过时了
-            log.Printf("Epoch mismatch for key %s, invalidating cache...", key)
-            c.cache.Invalidate(key)
-            // 下一次循环会去 PD 重新拉取
-            continue
-        }
-		
-		// 3. 处理业务层错误 (NotLeader)
-		if resp.ErrCode == 1 { // Not Leader
-			// Server 告诉我们新 Leader 是谁，更新缓存
-			// (需要 Server 返回 Leader 所在的 Store 地址，目前 Proto 里只有 LeaderId)
-			// 这里简单处理：清除缓存，下一轮循环去问 PD
+
+		if resp.ErrCode == 1 { 
+			log.Printf("Epoch mismatch for key %s, invalidating cache...", key)
 			c.cache.Invalidate(key)
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -117,7 +113,6 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 	return fmt.Errorf("max retries exceeded")
 }
 
-// pkg/client/client.go
 
 // 获取 TSO
 func (c *Client) GetTS(ctx context.Context) (uint64, error) {
@@ -137,4 +132,58 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
     // ...
     // 这里先 Mock 或者留空，等待 Week 14
     return nil, fmt.Errorf("SnapshotGet not implemented yet")
+}
+
+func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
+	// 使用第一个 Key 来定位 Leader
+    // (因为经过 GroupByRegion，这个 Batch 里的所有 Key 都属于同一个 Region)
+	key := req.Mutations[0].Key
+    
+	// 1. 定位
+	addr, err := c.LocateLeader(ctx, key)
+	if err != nil {
+        // 简单的重试策略或 fallback
+		addr = "127.0.0.1:9091" 
+	}
+
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil { return nil, err }
+	defer conn.Close()
+    
+	// 2. 发送
+	return titankvpb.NewTitanKVClient(conn).Prewrite(ctx, req)
+}
+
+// 定向发送 Commit
+func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
+	key := req.Keys[0]
+
+    // 如果 Request 里还没填 Context (针对 Primary Commit 的情况)，尝试填充
+    if req.Context == nil {
+        region, _ := c.cache.Search(key)
+        if region != nil {
+            req.Context = &titankvpb.RegionContext{
+                RegionId:    region.Id,
+                RegionEpoch: region.RegionEpoch,
+            }
+        } else {
+             // Fallback
+             req.Context = &titankvpb.RegionContext{RegionId: 1}
+        }
+    }
+
+	addr, err := c.LocateLeader(ctx, key)
+	if err != nil {
+		addr = "127.0.0.1:9091"
+	}
+
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil { return nil, err }
+	defer conn.Close()
+
+	return titankvpb.NewTitanKVClient(conn).Commit(ctx, req)
+}
+
+func (c *Client) GetRegionCache() *RegionCache {
+    return c.cache
 }

@@ -15,4 +15,16 @@ void WriteBatch::Clear() {
     entries_.clear();
 }
 
+void WriteBatch::PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts) {
+    std::string encoded_key;
+    if (cf == kCFLock) {
+        encoded_key = EncodeLockKey(key);
+    } else {
+        // Default 或 Write CF，需要 TS
+        encoded_key = EncodeMvccKey(static_cast<char>(cf), key, ts);
+    }
+    // 复用底层的 Put (它会把 encoded_key 放入 entries_)
+    Put(encoded_key, value);
+}
+
 } // namespace titankv
