@@ -106,6 +106,8 @@ class DBImpl : public DB {
   // 【新增】辅助：完成 GC 回填
   Status FinishGC(const std::vector<GCRecord>& gc_records);
 
+  void StartBackgroundThread();
+
   std::string EncodeInternalKey(const Slice& user_key, uint64_t seq, ValueType type);
   
   DBImpl(const DBImpl&) = delete;

@@ -78,7 +78,7 @@ func (s *balanceRegionScheduler) Schedule(c *cluster.RaftCluster) *schedule.Oper
     // 5. 生成 Operator
     // 【关键修复】分配真正的 PeerID
     newPeerID, err := s.alloc.Alloc(context.Background())
-    newPeerID += 100
+    newPeerID += 1000
     if err != nil {
         log.Printf("Failed to alloc peer id: %v", err)
         return nil

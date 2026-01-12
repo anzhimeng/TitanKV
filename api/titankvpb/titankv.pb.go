@@ -1117,7 +1117,8 @@ type SplitRequest struct {
 	// 新分裂出来的 Region ID
 	NewRegionId uint64 `protobuf:"varint,2,opt,name=new_region_id,json=newRegionId,proto3" json:"new_region_id,omitempty"`
 	// 新 Region 在各个 Store 上的 Peer ID
-	NewPeerIds    []uint64 `protobuf:"varint,3,rep,packed,name=new_peer_ids,json=newPeerIds,proto3" json:"new_peer_ids,omitempty"`
+	// repeated uint64 new_peer_ids = 3;
+	NewPeers      []*Peer `protobuf:"bytes,4,rep,name=new_peers,json=newPeers,proto3" json:"new_peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1166,9 +1167,9 @@ func (x *SplitRequest) GetNewRegionId() uint64 {
 	return 0
 }
 
-func (x *SplitRequest) GetNewPeerIds() []uint64 {
+func (x *SplitRequest) GetNewPeers() []*Peer {
 	if x != nil {
-		return x.NewPeerIds
+		return x.NewPeers
 	}
 	return nil
 }
@@ -1824,12 +1825,11 @@ const file_titankv_proto_rawDesc = "" +
 	"\fAdminCmdType\x12\t\n" +
 	"\x05SPLIT\x10\x00\x12\v\n" +
 	"\aCOMPACT\x10\x01\x12\x0f\n" +
-	"\vCONF_CHANGE\x10\x02\"q\n" +
+	"\vCONF_CHANGE\x10\x02\"{\n" +
 	"\fSplitRequest\x12\x1b\n" +
 	"\tsplit_key\x18\x01 \x01(\fR\bsplitKey\x12\"\n" +
-	"\rnew_region_id\x18\x02 \x01(\x04R\vnewRegionId\x12 \n" +
-	"\fnew_peer_ids\x18\x03 \x03(\x04R\n" +
-	"newPeerIds\"D\n" +
+	"\rnew_region_id\x18\x02 \x01(\x04R\vnewRegionId\x12*\n" +
+	"\tnew_peers\x18\x04 \x03(\v2\r.titankv.PeerR\bnewPeers\"D\n" +
 	"\x10BatchRaftCommand\x120\n" +
 	"\bcommands\x18\x01 \x03(\v2\x14.titankv.RaftCommandR\bcommands\"\x9e\x01\n" +
 	"\vRaftMessage\x12\x1b\n" +
@@ -1941,29 +1941,30 @@ var file_titankv_proto_depIdxs = []int32{
 	3,  // 15: titankv.AdminRequest.cmd_type:type_name -> titankv.AdminRequest.AdminCmdType
 	19, // 16: titankv.AdminRequest.split:type_name -> titankv.SplitRequest
 	6,  // 17: titankv.AdminRequest.change_peer:type_name -> titankv.ChangePeer
-	17, // 18: titankv.BatchRaftCommand.commands:type_name -> titankv.RaftCommand
-	21, // 19: titankv.BatchRaftMessage.msgs:type_name -> titankv.RaftMessage
-	26, // 20: titankv.RaftApplyState.truncated_state:type_name -> titankv.RaftTruncatedState
-	29, // 21: titankv.RaftSnapshotMetadata.conf_state:type_name -> titankv.RaftConfState
-	10, // 22: titankv.TitanKV.Get:input_type -> titankv.GetRequest
-	12, // 23: titankv.TitanKV.Put:input_type -> titankv.PutRequest
-	14, // 24: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
-	21, // 25: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
-	27, // 26: titankv.TitanKV.UpdateConfig:input_type -> titankv.UpdateConfigRequest
-	22, // 27: titankv.TitanKV.BatchRaft:input_type -> titankv.BatchRaftMessage
-	9,  // 28: titankv.TitanKV.StreamSnapshot:input_type -> titankv.SnapshotChunk
-	11, // 29: titankv.TitanKV.Get:output_type -> titankv.GetResponse
-	13, // 30: titankv.TitanKV.Put:output_type -> titankv.PutResponse
-	15, // 31: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
-	23, // 32: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
-	30, // 33: titankv.TitanKV.UpdateConfig:output_type -> titankv.UpdateConfigResponse
-	23, // 34: titankv.TitanKV.BatchRaft:output_type -> titankv.RaftResponse
-	23, // 35: titankv.TitanKV.StreamSnapshot:output_type -> titankv.RaftResponse
-	29, // [29:36] is the sub-list for method output_type
-	22, // [22:29] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	5,  // 18: titankv.SplitRequest.new_peers:type_name -> titankv.Peer
+	17, // 19: titankv.BatchRaftCommand.commands:type_name -> titankv.RaftCommand
+	21, // 20: titankv.BatchRaftMessage.msgs:type_name -> titankv.RaftMessage
+	26, // 21: titankv.RaftApplyState.truncated_state:type_name -> titankv.RaftTruncatedState
+	29, // 22: titankv.RaftSnapshotMetadata.conf_state:type_name -> titankv.RaftConfState
+	10, // 23: titankv.TitanKV.Get:input_type -> titankv.GetRequest
+	12, // 24: titankv.TitanKV.Put:input_type -> titankv.PutRequest
+	14, // 25: titankv.TitanKV.Delete:input_type -> titankv.DeleteRequest
+	21, // 26: titankv.TitanKV.Raft:input_type -> titankv.RaftMessage
+	27, // 27: titankv.TitanKV.UpdateConfig:input_type -> titankv.UpdateConfigRequest
+	22, // 28: titankv.TitanKV.BatchRaft:input_type -> titankv.BatchRaftMessage
+	9,  // 29: titankv.TitanKV.StreamSnapshot:input_type -> titankv.SnapshotChunk
+	11, // 30: titankv.TitanKV.Get:output_type -> titankv.GetResponse
+	13, // 31: titankv.TitanKV.Put:output_type -> titankv.PutResponse
+	15, // 32: titankv.TitanKV.Delete:output_type -> titankv.DeleteResponse
+	23, // 33: titankv.TitanKV.Raft:output_type -> titankv.RaftResponse
+	30, // 34: titankv.TitanKV.UpdateConfig:output_type -> titankv.UpdateConfigResponse
+	23, // 35: titankv.TitanKV.BatchRaft:output_type -> titankv.RaftResponse
+	23, // 36: titankv.TitanKV.StreamSnapshot:output_type -> titankv.RaftResponse
+	30, // [30:37] is the sub-list for method output_type
+	23, // [23:30] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_titankv_proto_init() }

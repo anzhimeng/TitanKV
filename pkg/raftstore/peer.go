@@ -6,6 +6,7 @@ import (
 	"log"
 	"fmt"
 	"os"
+	"sort"
 	"encoding/binary"
 	"sync/atomic"
 	
@@ -58,6 +59,7 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 			break
 		}
 	}
+	// log.Printf("[DEBUG] NewPeer %d Region %d Peers: %v", peerID, region.Id, region.Peers)
 	// Bootstrap hack
 	if !found && len(region.Peers) == 0 {
 		peerID = 1 
@@ -66,8 +68,8 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 	// 3. 配置 Raft
 	c := &raft.Config{
 		ID:              peerID,
-		ElectionTick:    10,
-		HeartbeatTick:   1,
+		ElectionTick:    50,
+		HeartbeatTick:   5,
 		Storage:         ps,
 		MaxSizePerMsg:   4096,
 		MaxInflightMsgs: 256,
@@ -231,6 +233,11 @@ func (p *Peer) applyConfChange(cc raftpb.ConfChange) *Peer {
         }
         region.Peers = newPeers
     }
+
+    // 【关键修复】对 Peers 进行排序，保证确定性
+    sort.Slice(region.Peers, func(i, j int) bool {
+        return region.Peers[i].Id < region.Peers[j].Id
+    })
     
     // 3. 持久化 RegionLocalState
     writeRegionState(p.storage.engine, region)
@@ -299,11 +306,14 @@ func (p *Peer) execSplit(req *titankvpb.SplitRequest, engine *store.TitanStore) 
     regionB.StartKey = splitKey
     // Peers 需要替换 ID
     // 假设 req.NewPeerIds 和 region.Peers 顺序一一对应
-    for i, peer := range regionB.Peers {
-        if i < len(req.NewPeerIds) {
-            peer.Id = req.NewPeerIds[i]
-        }
-    }
+    //for i, peer := range regionB.Peers {
+        //if i < len(req.NewPeerIds) {
+            //peer.Id = req.NewPeerIds[i]
+        //}
+    //}
+    // 直接使用 Request 里的 Peers，它们包含了正确的 StoreID 映射
+    regionB.Peers = req.NewPeers
+    log.Printf("Split Region B Peers: %v", regionB.Peers)
     
     // 4. 持久化 (Meta A & Meta B)
     // 这里应该用 WriteBatch 原子写入，Day 3 简化为两次 Put

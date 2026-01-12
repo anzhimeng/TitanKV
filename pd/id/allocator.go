@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"sync"
+	"log"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -24,9 +25,19 @@ type Allocator struct {
 }
 
 func NewAllocator(client *clientv3.Client) *Allocator {
-	return &Allocator{
+	a := &Allocator{
 		client: client,
 	}
+    // 【新增】尝试读取一次当前 Base (仅用于调试打印)
+    // 注意：这里没有 Context，可以用 Background
+    resp, err := client.Get(context.Background(), idPath)
+    var currentBase uint64 = 0
+    if err == nil && len(resp.Kvs) > 0 {
+        currentBase = binary.BigEndian.Uint64(resp.Kvs[0].Value)
+    }
+    log.Printf("[IDAllocator] Initialized. Current Etcd Base: %d", currentBase)
+    
+	return a
 }
 
 // Alloc 分配 ID (支持 CAS 乐观锁重试)

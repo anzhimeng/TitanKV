@@ -1,11 +1,12 @@
 package raftstore
 
 import (
-     "io/ioutil"
      "os"
+     "log"
      "fmt"
      "path/filepath"
-
+     "encoding/json"
+     
 	"titankv/api/titankvpb"
 	"titankv/pkg/store" // C++ Store
 
@@ -13,6 +14,12 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 )
+
+// 定义快照数据包
+type SnapshotData struct {
+    Region   *titankvpb.Region `json:"region"`
+    FilePath string            `json:"file_path"`
+}
 
 type kvPair struct {
 	key   []byte
@@ -96,6 +103,7 @@ func (s *PeerStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error)
 	for _, p := range s.region.Peers {
 		cs.Voters = append(cs.Voters, p.Id)
 	}
+	log.Printf("[DEBUG] PeerStorage InitialState Voters: %v", cs.Voters)
 	return hs, cs, nil
 }
 
@@ -120,7 +128,7 @@ func (s *PeerStorage) Entries(lo, hi, maxSize uint64) ([]raftpb.Entry, error) {
 		}
 		
 		var ent raftpb.Entry
-		// 【修复】raftpb.Entry 使用自带的 Unmarshal
+		// 【修复】raftpb.Entry 使用自带的 Un
 		if err := ent.Unmarshal(val); err != nil {
 			return nil, err
 		}
@@ -165,7 +173,6 @@ func (s *PeerStorage) FirstIndex() (uint64, error) {
 	return s.applyState.TruncatedState.Index + 1, nil
 }
 
-// pkg/raftstore/peers_storage.go
 
 func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) ([]kvPair, error) {
     var batch []kvPair
@@ -253,10 +260,16 @@ func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
     // 4. 读取文件内容放入 Snapshot (适用于小数据量)
     // 对于大数据量，应该只传 Metadata，文件通过流式传输
     // 这里采用【直接读入内存】的简化方案 (限制在几十MB以内)
-    data, err := ioutil.ReadFile(fname)
-    if err != nil {
-        return raftpb.Snapshot{}, err
+    //data, err := ioutil.ReadFile(fname)
+    //if err != nil {
+      //  return raftpb.Snapshot{}, err
+    //}
+    
+    snapData := SnapshotData{
+        Region:   s.region,
+        FilePath: fname,
     }
+    dataBytes, _ := json.Marshal(snapData)
 
     // 构造 Snapshot
     snap := raftpb.Snapshot{
@@ -265,7 +278,7 @@ func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
             Term:      term,
             ConfState: cs,
         },
-        Data: data, // 放入 SST 文件内容
+        Data: dataBytes, // 放入 SST 文件内容
     }
 
     return snap, nil

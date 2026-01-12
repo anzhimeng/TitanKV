@@ -145,7 +145,8 @@ message SplitRequest {
     // 新分裂出来的 Region ID
     uint64 new_region_id = 2;
     // 新 Region 在各个 Store 上的 Peer ID
-    repeated uint64 new_peer_ids = 3; 
+    // repeated uint64 new_peer_ids = 3;
+    repeated Peer new_peers = 4; 
 }
 
 message BatchRaftCommand {

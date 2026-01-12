@@ -70,7 +70,13 @@ func main() {
 		}
 		peers[id] = kv[1]
 	}
-	log.Printf("Parsed peers: %v", peers)
+	// 【关键调试】打印解析结果
+	log.Printf("----------------------------------------------------------------")
+	log.Printf("My Node ID: %d", *nodeID)
+	log.Printf("Cluster Config String: %s", *cluster)
+	log.Printf("Parsed Peers Map: %v", peers)
+	log.Printf("----------------------------------------------------------------")
+
 
 	// 2. 初始化 C++ 存储引擎
 	log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
@@ -147,16 +153,16 @@ func main() {
 	log.Printf("Starting RaftStore (Node %d)...", *nodeID)
 	
 	router := raftstore.NewRouter()
+
 	// 初始化 Transport
 	trans := raftstore.NewTransport(peers, pdClient)
 	
 	// 传入 Transport 和 PDClient
 	storeWorker := raftstore.NewStoreWorker(router, trans, db, pdClient)
-	
 	// 启动 Worker 线程
 	go storeWorker.Run()
-
-    if *nodeID <= 3 { // 假设 ID 1-3 是初始节点
+	router.RegisterStore(storeWorker.Receiver())
+     if *nodeID <= 3 { // 假设 ID 1-3 是初始节点
      log.Printf("Bootstrapping initial region for node %d", *nodeID)
 	// 初始化默认 Region (ID=1)
 	initialRegion := &titankvpb.Region{

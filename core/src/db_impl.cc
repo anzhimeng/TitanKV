@@ -38,7 +38,7 @@ Status DB::Open(const Options& options, const std::string& name, DB** dbptr) {
     delete impl;
     return s;
   }
-
+  impl->StartBackgroundThread();
   *dbptr = impl;
   return Status::OK();
 }
@@ -87,7 +87,12 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
   table_cache_ = new TableCache(dbname_, options_);
   versions_ = new VersionSet(dbname_, options_);
   // 启动后台线程
-  bg_thread_ = std::thread(&DBImpl::BGWork, this);
+  //bg_thread_ = std::thread(&DBImpl::BGWork, this);
+}
+
+void DBImpl::StartBackgroundThread() {
+    // 启动后台线程
+    bg_thread_ = std::thread(&DBImpl::BGWork, this);
 }
 
 DBImpl::~DBImpl() {

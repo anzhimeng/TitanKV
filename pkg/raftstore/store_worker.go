@@ -5,12 +5,15 @@ import (
 	"time"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
 	"titankv/pkg/store" // C++ 引擎
+	
 
 	"google.golang.org/protobuf/proto"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/raft/v3"
 )
 
@@ -107,6 +110,9 @@ func (w *StoreWorker) processMsg(msg Msg) {
 	if !ok {
 		// Region 不存在，可能是已经被 Split 移除，或者发错了
 		// log.Printf("[Worker] Msg %v for non-existent region %d", msg.Type, msg.RegionID)
+	   if msg.Type == MsgTypeRaftMessage {
+            w.maybeCreatePeer(msg)
+        }
 		return
 	}
 
@@ -407,10 +413,13 @@ func (w *StoreWorker) onSplitCheck(regionID uint64) {
     if err != nil { return }
     
     // 新 Region 对应的 Peers 的 ID (每个副本都需要一个新 ID)
-    var newPeerIDs []uint64
-    for range peer.region.Peers {
+    var newPeers []*titankvpb.Peer
+    for _, p := range peer.region.Peers {
         pid, _ := w.askPDAllocID()
-        newPeerIDs = append(newPeerIDs, pid)
+        newPeers = append(newPeers, &titankvpb.Peer{
+            Id:      pid,
+            StoreId: p.StoreId, // 绑定 StoreID
+        })
     }
     
     // 3. 构造 Admin Request
@@ -419,7 +428,7 @@ func (w *StoreWorker) onSplitCheck(regionID uint64) {
         Split: &titankvpb.SplitRequest{
             SplitKey:    splitKey,
             NewRegionId: newRegionID,
-            NewPeerIds:  newPeerIDs,
+            NewPeers:   newPeers,
         },
     }
     
@@ -495,7 +504,7 @@ func (w *StoreWorker) sendRegionHeartbeat(p *Peer) {
 			return
 		}
 		// 【调试点】打印接收到的 Response
-          log.Printf("[DEBUG] Recv Heartbeat Resp: %v", resp)
+          // log.Printf("[DEBUG] Recv Heartbeat Resp: %v", resp)
 
 		if resp.TransferLeader != nil {
 			log.Printf("[Schedule] Received TransferLeader to peer %d", resp.TransferLeader.PeerId)
@@ -532,4 +541,67 @@ func (w *StoreWorker) sendRegionHeartbeat(p *Peer) {
 			w.router.Send(p.regionID, NewMsgRaftCmd(p.regionID, cmd, nil))
 		}
 	}()
+}
+
+func (w *StoreWorker) maybeCreatePeer(msg Msg) {
+    if msg.Type != MsgTypeRaftMessage {
+        return
+    }
+
+    var rMsg raftpb.Message
+    if err := rMsg.Unmarshal(msg.RaftMessage.Data); err != nil {
+        return
+    }
+
+    // 只有 Snapshot 消息携带了足够的信息来创建 Peer
+    if rMsg.Type == raftpb.MsgSnap {
+        log.Printf("[StoreWorker] Received Snapshot for unknown region %d. Creating Peer...", msg.RegionID)
+        
+        var snapData SnapshotData
+        if err := json.Unmarshal(rMsg.Snapshot.Data, &snapData); err != nil {
+            log.Printf("Failed to unmarshal snapshot data: %v", err)
+            return
+        }
+        
+        // 1. 获取当前 Store 对应的 PeerID
+        // 假设 NewPeer 内部能处理，或者我们需要在这里找到 PeerID
+        // NewPeer(storeID, region, engine)
+        // StoreID 如何获取？我们在 NewStoreWorker 里没有存 StoreID。
+        // 假设我们通过 msg.ToPeerId 反查？
+        // 最好 StoreWorker 持有 StoreID。
+        // Hack: 遍历 snapData.Region.Peers，找到 msg.ToPeerId 对应的 StoreId
+        var myStoreID uint64
+        for _, p := range snapData.Region.Peers {
+            if p.Id == msg.RaftMessage.ToPeerId {
+                myStoreID = p.StoreId
+                break
+            }
+        }
+        
+        if myStoreID == 0 {
+            log.Printf("Cannot find my store ID for peer %d", msg.RaftMessage.ToPeerId)
+            return 
+        }
+
+        // 2. 创建 Peer
+        newPeer, err := NewPeer(myStoreID, snapData.Region, w.store)
+        if err != nil {
+            log.Printf("Failed to create peer: %v", err)
+            return
+        }
+
+        // 3. 注册 Peer
+        w.registerPeer(newPeer)
+        
+        // 4. 将消息转交给新 Peer 处理 (Peer 会应用 Snapshot)
+        newPeer.step(msg)
+    } else {
+        // 对于非 Snapshot 消息（如 Vote, Heartbeat），
+        // 如果我们没有 Peer，说明我们落后了或者是被误发了。
+        // 我们可以回复 GroupMissing 或者忽略。
+        // 为了触发 Leader 发送 Snapshot，最好的办法是回复一个 "Index=0" 的 Reject。
+        // 但这需要构造回复消息，比较复杂。
+        // 简单处理：打印日志。
+        // log.Printf("Ignored non-snapshot msg for unknown region %d", msg.RegionID)
+    }
 }

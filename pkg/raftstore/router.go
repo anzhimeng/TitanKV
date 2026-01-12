@@ -14,6 +14,7 @@ type Router struct {
      // 我们需要把同一个 Region 的消息总是发给同一个 Worker 以保证顺序。
 	regions map[uint64]PeerSender
 	peers sync.Map
+	storeSender PeerSender // 【新增】全局信箱
 }
 
 func NewRouter() *Router {
@@ -40,6 +41,13 @@ func (r *Router) Unregister(regionID uint64) {
 	r.peers.Delete(regionID)
 }
 
+// 注册全局信箱
+func (r *Router) RegisterStore(sender PeerSender) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.storeSender = sender
+}
+
 func (r *Router) Send(regionID uint64, msg Msg) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -56,6 +64,17 @@ func (r *Router) Send(regionID uint64, msg Msg) bool {
 	default:
 		return false // 队列满
 	}
+    // 【新增】如果找不到 Region，发给全局 StoreSender
+    // 只有 RaftMessage 需要全局处理（可能是创建 Peer 的消息）
+    if msg.Type == MsgTypeRaftMessage && r.storeSender != nil {
+        select {
+        case r.storeSender <- msg:
+            return true
+        default:
+            return false
+        }
+    }
+    return false
 }
 
 type PeerStateReader interface {

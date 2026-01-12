@@ -1,0 +1,46 @@
+2026/01/12 12:22:44 ----------------------------------------------------------------
+2026/01/12 12:22:44 My Node ID: 2
+2026/01/12 12:22:44 Cluster Config String: 1=127.0.0.1:9091,2=127.0.0.1:9092,3=127.0.0.1:9093,4=127.0.0.1:9094
+2026/01/12 12:22:44 Parsed Peers Map: map[1:127.0.0.1:9091 2:127.0.0.1:9092 3:127.0.0.1:9093 4:127.0.0.1:9094]
+2026/01/12 12:22:44 ----------------------------------------------------------------
+2026/01/12 12:22:44 Opening storage at /tmp/node2 (DirectIO: true)...
+[DBImpl] io_uring enabled.
+[BlobStore] Recovered. NextFileID: 1
+[DBImpl] Flushed SSTable #8. Entries: 32, Size: 1167
+[DBImpl] Flushed SSTable #8. Entries: 32, Seq: 63257
+2026/01/12 12:22:44 Successfully registered store 2 to PD
+2026/01/12 12:22:44 Starting RaftStore (Node 2)...
+2026/01/12 12:22:44 Bootstrapping initial region for node 2
+2026/01/12 12:22:44 [DEBUG] PeerStorage InitialState Voters: [3 1 2]
+raft2026/01/12 12:22:44 INFO: 2 switched to configuration voters=(1 2 3)
+raft2026/01/12 12:22:44 INFO: 2 became follower at term 14
+raft2026/01/12 12:22:44 INFO: newRaft 2 [peers: [1,2,3], term: 14, commit: 8, applied: 5, lastindex: 8, lastterm: 6]
+2026/01/12 12:22:44 Server listening on port 9092
+2026/01/12 12:22:44 Pprof & Metrics listening on 0.0.0.0:6062
+raft2026/01/12 12:22:44 INFO: 2 switched to configuration voters=(1 2 3 1005)
+raft2026/01/12 12:22:44 INFO: 2 switched to configuration voters=(1 2 1005)
+raft2026/01/12 12:22:51 INFO: 2 [term: 14] received a MsgVote message with higher term from 1 [term: 16]
+raft2026/01/12 12:22:51 INFO: 2 became follower at term 16
+raft2026/01/12 12:22:51 INFO: 2 [logterm: 6, index: 8, vote: 0] cast MsgVote for 1 [logterm: 6, index: 8] at term 16
+2026/01/12 12:22:52 [Apply] Executing Split at key-01000
+2026/01/12 12:22:52 Split Region B Peers: [id:11 store_id:1 id:12 store_id:2 id:13 store_id:4]
+2026/01/12 12:22:52 [DEBUG] PeerStorage InitialState Voters: [11 12 13]
+raft2026/01/12 12:22:52 INFO: c switched to configuration voters=(11 12 13)
+raft2026/01/12 12:22:52 INFO: c became follower at term 5
+raft2026/01/12 12:22:52 INFO: newRaft c [peers: [b,c,d], term: 5, commit: 5, applied: 5, lastindex: 5, lastterm: 5]
+2026/01/12 12:22:52 Split finish. Region A: [, key-01000), Region B: [key-01000, )
+2026/01/12 12:22:52 Registered new peer for Region 10
+raft2026/01/12 12:22:58 INFO: c is starting a new election at term 5
+raft2026/01/12 12:22:58 INFO: c became candidate at term 6
+raft2026/01/12 12:22:58 INFO: c received MsgVoteResp from c at term 6
+raft2026/01/12 12:22:58 INFO: c [logterm: 5, index: 5] sent MsgVote request to b at term 6
+raft2026/01/12 12:22:58 INFO: c [logterm: 5, index: 5] sent MsgVote request to d at term 6
+raft2026/01/12 12:22:58 INFO: c received MsgVoteResp from b at term 6
+raft2026/01/12 12:22:58 INFO: c has received 2 MsgVoteResp votes and 0 vote rejections
+raft2026/01/12 12:22:58 INFO: c became leader at term 6
+2026/01/12 12:22:59 Received shutdown signal...
+2026/01/12 12:22:59 Stopping StoreWorker...
+2026/01/12 12:22:59 Closing Transport...
+2026/01/12 12:22:59 Stopping gRPC server (Graceful)...
+2026/01/12 12:22:59 gRPC server stopped gracefully.
+2026/01/12 12:22:59 TitanKV Server exit.
