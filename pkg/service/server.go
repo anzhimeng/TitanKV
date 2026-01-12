@@ -340,8 +340,12 @@ func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (
     err := s.store.Prewrite(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl)
     
     if err != nil {
-        // 解析错误类型 (Conflict / Locked)
-        // 简单返回错误字符串
+        // C++ 层返回 "Key is locked" 字符串
+        if strings.Contains(err.Error(), "Key is locked") {
+            // 返回 Aborted + KeyLocked
+            // 生产环境应该返回结构化的 KeyError，这里简化为 Error 字符串匹配
+            return &titankvpb.PrewriteResponse{Error: "KeyLocked"}, nil
+        }
         return &titankvpb.PrewriteResponse{Error: err.Error()}, nil
     }
 

@@ -135,15 +135,16 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
 }
 
 func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
+    bo := NewBackoffer(ctx)
 	// 使用第一个 Key 来定位 Leader
-    // (因为经过 GroupByRegion，这个 Batch 里的所有 Key 都属于同一个 Region)
+     // (因为经过 GroupByRegion，这个 Batch 里的所有 Key 都属于同一个 Region)
 	key := req.Mutations[0].Key
     
 	// 1. 定位
 	addr, err := c.LocateLeader(ctx, key)
 	if err != nil {
-        // 简单的重试策略或 fallback
-		addr = "127.0.0.1:9091" 
+         bo.Sleep()
+         continue
 	}
 
 	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -185,6 +186,7 @@ func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (
 }
 
 func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
+    bo := NewBackoffer(ctx)
     for i := 0; i < 3; i++ { // 重试 3 次
         // 1. 定位路由
         addr, err := c.LocateLeader(ctx, key)
@@ -226,9 +228,12 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
                 return nil, nil // Key 不存在，返回 nil, nil (符合 Go 习惯)
             }
             if st.Code() == codes.Aborted && st.Message() == "KeyLocked" {
-                // 遇到锁，需要 Backoff 重试 (Day 4 内容)
-                // 这里暂时直接返回错误，让上层 Transaction 处理
-                return nil, fmt.Errorf("key is locked")
+                // 遇到锁！退避重试
+                // log.Printf("Key %s locked, backing off...", key)
+                if boErr := bo.Sleep(); boErr != nil {
+                    return nil, boErr // 超时放弃
+                }
+                continue
             }
             if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
                 c.cache.Invalidate(key)
