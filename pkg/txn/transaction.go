@@ -137,7 +137,7 @@ func (txn *Transaction) groupMutations(mutations []*titankvpb.Mutation) (map[uin
 }
 
 func (txn *Transaction) Commit(ctx context.Context) error {
-	// 1. 转换 Mutations (Internal struct -> Proto)
+	// 1. 转换 Mutations
 	var pbMutations []*titankvpb.Mutation
 	for _, m := range txn.mutations {
 		op := titankvpb.Mutation_Put
@@ -158,102 +158,115 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 	// 2. 选择 Primary Key
 	primary := pbMutations[0].Key
 
-	// 3. 第一阶段：Prewrite (GroupByRegion + Concurrent)
-	batches, err := txn.groupMutations(pbMutations)
-	if err != nil { return err }
+	// 3. 第一阶段：Prewrite (带重试和锁清理)
+	// 使用无限循环来处理 ResolveLock 重试
+	for {
+		batches, err := txn.groupMutations(pbMutations)
+		if err != nil { return err }
 
-	g, groupCtx := errgroup.WithContext(ctx)
-	// ts1, _ := txn.client.GetTS(ctx)
-    // fmt.Printf("commit StartTS: %d", ts1)
-	// 遍历每个 Region 的批次
-	for _, batch := range batches {
-		batch := batch // capture loop var
-		g.Go(func() error {
-			req := &titankvpb.PrewriteRequest{
-				Context: &titankvpb.RegionContext{
-					RegionId:    batch.region.Id,
-					RegionEpoch: toTitanEpoch(batch.region.RegionEpoch),
-				},
-				Mutations:  batch.muts,
-				PrimaryKey: primary,
-				StartTs:    txn.StartTS,
-				LockTtl:    3000,
-			}
-			
-			// 【修改】添加重试循环
-			var lastErr error
-			for i := 0; i < 3; i++ { // 重试 3 次
-				resp, err := txn.client.SendPrewrite(groupCtx, req)
-				if err == nil {
-					if resp.Error != "" {
-						// 业务错误（如 KeyLocked）不需要重试，直接返回失败
-						// fmt.Printf("DEBUG: SendPrewrite logic error: %s\n", resp.Error)
-						return fmt.Errorf("prewrite failed: %s", resp.Error)
-					}
-					return nil // 成功
+		g, groupCtx := errgroup.WithContext(ctx)
+		
+		// 错误通道：用于收集 KeyLocked 错误
+		// buffer 大小 = region 数量，足以容纳所有并发错误
+		lockErrCh := make(chan *titankvpb.LockInfo, len(batches))
+		
+		for _, batch := range batches {
+			batch := batch
+			g.Go(func() error {
+				req := &titankvpb.PrewriteRequest{
+					Context: &titankvpb.RegionContext{
+						RegionId:    batch.region.Id,
+						RegionEpoch: toTitanEpoch(batch.region.RegionEpoch),
+					},
+					Mutations:  batch.muts,
+					PrimaryKey: primary,
+					StartTs:    txn.StartTS,
+					LockTtl:    3000,
 				}
 				
-				// 网络错误，记录并重试
-				lastErr = err
-				// fmt.Printf("SendPrewrite RPC failed (retry %d): %v\n", i, err)
-				time.Sleep(50 * time.Millisecond)
-			}
-			return lastErr // 耗尽重试次数
-		})
-	}
+				// 网络重试循环 (这是针对网络错误的)
+				var lastErr error
+				for i := 0; i < 3; i++ {
+					resp, err := txn.client.SendPrewrite(groupCtx, req)
+					if err == nil {
+						// 检查业务错误
+						if resp.Error != "" {
+							// 【新增】如果是 KeyLocked，收集 LockInfo 并返回 nil (非 Fatal)
+							// 这样其他正常的 Prewrite 可以继续，我们在 g.Wait 后统一处理
+							if resp.KeyError != nil {
+								lockErrCh <- resp.KeyError.LockInfo
+								return nil 
+							}
+							return fmt.Errorf("prewrite failed: %s", resp.Error)
+						}
+						return nil // 成功
+					}
+					lastErr = err
+					time.Sleep(50 * time.Millisecond)
+				}
+				return lastErr
+			})
+		}
 
-	if err := g.Wait(); err != nil {
-	     fmt.Printf("[Debug] Prewrite phase failed: %v\n", err)
-		return err // 任意一个 Prewrite 失败，事务回滚 (Client 端 Cleanup 暂略)
+		if err := g.Wait(); err != nil {
+			return err // 网络错误或非锁的业务错误，直接失败
+		}
+		
+		close(lockErrCh)
+		
+		// 检查是否遇到锁
+		var lockInfo *titankvpb.LockInfo
+		for l := range lockErrCh {
+			lockInfo = l
+			break // 处理第一个遇到的锁即可
+		}
+		
+		if lockInfo != nil {
+			// 【核心】自动 Resolve
+			log.Printf("[Txn] Conflict on key %s (Primary: %s). Resolving...", lockInfo.Key, lockInfo.PrimaryKey)
+			
+			ok, err := txn.client.ResolveLocks(ctx, lockInfo)
+			if err != nil { return err }
+			
+			if ok {
+				// 成功清理了锁，立即重试 Prewrite (continue loop)
+				// 注意：这里是全量重试。更优的是只重试失败的 Region。
+				// 但全量重试是安全的（Prewrite 是幂等的）。
+				time.Sleep(50 * time.Millisecond)
+				continue
+			} else {
+				// Resolve 说 "NoAction" (锁没过期)，我们只能失败
+				return fmt.Errorf("txn conflict: key locked by live txn")
+			}
+		}
+
+		// 全部成功，无锁冲突，进入 Commit 阶段
+		break
 	}
-	// fmt.Println("[Debug] Prewrite success!")
 
 	// 4. 获取 CommitTS
 	commitTS, err := txn.client.GetTS(ctx)
-	if err != nil { 
-		// fmt.Printf("[Debug] Get CommitTS failed: %v\n", err)
-		return err
-	}
+	if err != nil { return err }
 	if commitTS <= txn.StartTS {
 		return fmt.Errorf("invalid commit ts")
 	}
 
 	// 5. 第二阶段：Commit Primary
-	// Primary Key 必须先提交，决定事务状态
-	// 我们需要找到 Primary Key 所在的 Region
-	// 为了复用逻辑，我们重新 Group 一次，但只包含 Primary Key
-    // 或者简单点：直接构造请求，利用 SendCommit 内部的 Locate 逻辑
-    
 	commitReq := &titankvpb.CommitRequest{
-        // Context 会由 SendCommit 自动填充 (如果需要)
 		StartTs:    txn.StartTS,
 		CommitTs:   commitTS,
 		Keys:       [][]byte{primary},
 	}
     
-    // Primary Commit 必须同步等待成功
-    // 我们复用 SendCommit，它会根据 Key 路由
 	cResp, err := txn.client.SendCommit(ctx, commitReq)
 	if err != nil {
-         fmt.Printf("[Debug] Commit Primary transport failed: %v\n", err) // <--- 加这个
          return err
      }
 	if cResp.Error != "" { return fmt.Errorf("commit primary failed: %s", cResp.Error) }
-	// fmt.Println("[Debug] Commit Primary success!")
+
 	// 6. 异步 Commit Secondaries
-	// Primary 成功后，事务已经成功。剩下的可以异步做。
 	if len(pbMutations) > 1 {
 		go func() {
-            // 这里应该重新 GroupByRegion，但为了简单，我们还是利用 Client 的自动路由能力
-            // 构造包含所有 Secondary Keys 的请求
-            // 但这样会导致请求发给所有 Region 吗？
-            // 不，SendCommit 如果只支持单 Region 路由，这里就会出问题。
-            // 正确做法：对 Secondary Keys 也做 GroupByRegion。
-            
-            // 为了 Week 14 Day 1 不过于复杂，我们假设 Client.SendCommit 内部不做拆分，
-            // 而是要求我们传入已经拆分好的。
-            
-            // 重新 Group 剩余的 Keys
             var secMutations []*titankvpb.Mutation
             for i := 1; i < len(pbMutations); i++ {
                 secMutations = append(secMutations, pbMutations[i])
@@ -274,7 +287,6 @@ func (txn *Transaction) Commit(ctx context.Context) error {
                     CommitTs: commitTS,
                     Keys:     keys,
                 }
-                // 背景执行，忽略错误
                 txn.client.SendCommit(context.Background(), req)
             }
 		}()

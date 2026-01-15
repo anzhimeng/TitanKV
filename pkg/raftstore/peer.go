@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	
 	"titankv/api/titankvpb"
+	"titankv/pd/api/pdpb"
 	"titankv/pkg/store"
 	"titankv/api/raft_serverpb" 
 
@@ -121,7 +122,11 @@ func (p *Peer) step(msg Msg) {
 			}
 		}
 	     if msg.RaftCmd.Header != nil {
-            if err := p.CheckEpoch(msg.RaftCmd.Header.RegionEpoch); err != nil {
+	       reqEpoch := &pdpb.RegionEpoch{
+            ConfVer: msg.RaftCmd.Header.RegionEpoch.ConfVer,
+            Version: msg.RaftCmd.Header.RegionEpoch.Version,
+            }
+            if err := p.CheckEpoch(reqEpoch); err != nil {
                 if msg.Callback != nil {
                     msg.Callback(err) // 返回 EpochNotMatch
                 }
@@ -387,7 +392,7 @@ func initRaftState(engine *store.TitanStore, region *titankvpb.Region) {
 }
 
 // 检查 Epoch 是否匹配
-func (p *Peer) CheckEpoch(reqEpoch *titankvpb.RegionEpoch) error {
+func (p *Peer) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
     // 容错：如果请求没带 Epoch (旧 Client)，或者本地还没初始化好，先放行
     // 生产环境应该严格拒绝
     if reqEpoch == nil {

@@ -24,12 +24,14 @@ type RegionCache struct {
 	tree  *btree.BTree
 	// 辅助 Map: StoreID -> Address (用于解析 Peer 对应的真实 IP)
 	stores map[uint64]string
+	leaders map[uint64]*pdpb.Peer 
 }
 
 func NewRegionCache() *RegionCache {
 	return &RegionCache{
 		tree:   btree.New(32), // degree 32
 		stores: make(map[uint64]string),
+		leaders: make(map[uint64]*pdpb.Peer),
 	}
 }
 
@@ -70,6 +72,7 @@ func (c *RegionCache) UpdateRegion(region *pdpb.Region, leader *pdpb.Peer) {
 		region: region,
 		leader: leader,
 	})
+	c.leaders[region.Id] = leader
 }
 
 // 移除缓存 (当 Server 报 KeyNotInRegion 时)
@@ -100,4 +103,16 @@ func (c *RegionCache) GetStoreAddr(storeID uint64) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.stores[storeID]
+}
+
+// 通过 RegionID 获取 Leader 的地址
+func (c *RegionCache) GetLeaderAddr(regionID uint64) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	leader, ok := c.leaders[regionID]
+	if !ok {
+		return ""
+	}
+	return c.stores[leader.StoreId]
 }

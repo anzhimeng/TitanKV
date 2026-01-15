@@ -141,97 +141,62 @@ func (c *Client) GetTS(ctx context.Context) (uint64, error) {
 }
 
 func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
+    key := req.Mutations[0].Key
+    regionID := req.Context.RegionId // Transaction 层已经填好了
+
+    // 填充默认 Context (如果 Transaction 层没填)
     if req.Context == nil {
         req.Context = &titankvpb.RegionContext{RegionId: 1, RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1}}
     }
-    if req.Context.RegionId == 0 {
-        req.Context.RegionId = 1 // 兜底
+    
+    bo := NewBackoffer(ctx)
+    for i := 0; i < 5; i++ {
+        // 【修改】使用 getAddrForReq
+        addr, err := c.getAddrForReq(ctx, regionID, key)
+        if err != nil {
+             if bo.Sleep() != nil { return nil, err }
+             addr = "127.0.0.1:9091"
+        }
+
+        conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+        if err != nil {
+            if bo.Sleep() != nil { return nil, err }
+            continue
+        }
+
+        client := titankvpb.NewTitanKVClient(conn)
+        resp, err := client.Prewrite(ctx, req)
+        conn.Close()
+
+        if err != nil {
+            // 网络错误，重试
+            c.cache.Invalidate(key) // 可能是切主了
+            if bo.Sleep() != nil { return nil, err }
+            continue
+        }
+        
+        // 成功响应 (哪怕包含业务 Error)
+        return resp, nil
     }
-	if len(req.Mutations) == 0 {
-		return &titankvpb.PrewriteResponse{}, nil
-	}
-	
-	key := req.Mutations[0].Key
-	bo := NewBackoffer(ctx)
-	
-	// 重试循环
-	for i := 0; i < 5; i++{
-		// 1. 定位
-		addr, err := c.LocateLeader(ctx, key)
-		if err != nil { 
-			 //定位失败，退避后重试
-			if err := bo.Sleep(); err != nil {
-				return nil, err
-			}
-			addr = "127.0.0.1:9091" 
-               // fmt.Printf("[Client Debug] LocateLeader failed, fallback to %s. Err: %v\n", addr, err)
-			continue
-		}
-		// log.Printf("[Client] Sending Prewrite to %s. Key=%s", addr, string(req.PrimaryKey))
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			if err := bo.Sleep(); err != nil {
-				return nil, err
-			}
-			continue
-		}
-
-		// 2. 发送
-		client := titankvpb.NewTitanKVClient(conn)
-		resp, err := client.Prewrite(ctx, req)
-		// fmt.Printf("[Client Debug] Sending Prewrite to %s\n", addr)
-		if err != nil {
-			log.Printf("[Client] RPC Error: %v", err)
-		}
-		conn.Close() // 及时关闭连接
-		if resp.Error != "" {
-        		// 业务错误 (KeyLocked) -> 返回错误
-        		return nil, fmt.Errorf(resp.Error)
-    		}
-
-		if err != nil {
-			// 网络错误，退避重试
-			// 注意：这里可能需要判断错误类型，如果是 KeyLocked 等逻辑错误，应该直接返回
-			// 但 Prewrite 的 KeyLocked 通常是在 resp.Error 里返回的，这里的 err 通常是 gRPC 错误
-			if err := bo.Sleep(); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		
-		// 成功收到响应（哪怕响应里有业务错误，也返回给上层处理）
-		return resp, nil
-	}
-	return nil, fmt.Errorf("send prewrite failed: max retries exceeded")
+    return nil, fmt.Errorf("send prewrite max retries exceeded")
 }
+
 // 定向发送 Commit
 func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
-	key := req.Keys[0]
+    key := req.Keys[0]
+    regionID := req.Context.RegionId
 
-    // 如果 Request 里还没填 Context (针对 Primary Commit 的情况)，尝试填充
     if req.Context == nil {
-        region, _ := c.cache.Search(key)
-        if region != nil {
-            req.Context = &titankvpb.RegionContext{
-                RegionId:    region.Id,
-                RegionEpoch: toTitanEpoch(region.RegionEpoch),
-            }
-        } else {
-             // Fallback
-             req.Context = &titankvpb.RegionContext{RegionId: 1}
-        }
+        req.Context = &titankvpb.RegionContext{RegionId: 1}
     }
 
-	addr, err := c.LocateLeader(ctx, key)
-	if err != nil {
-		addr = "127.0.0.1:9091"
-	}
+    addr, _ := c.getAddrForReq(ctx, regionID, key)
+    
+    conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+    if err != nil { return nil, err }
+    defer conn.Close()
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil { return nil, err }
-	defer conn.Close()
-
-	return titankvpb.NewTitanKVClient(conn).Commit(ctx, req)
+    return titankvpb.NewTitanKVClient(conn).Commit(ctx, req)
 }
 
 func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
@@ -277,16 +242,30 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
         if err != nil {
             // 处理错误
             st, _ := status.FromError(err)
+            log.Printf("[DEBUG] SnapshotGet Error: Code=%v, Msg=%s", st.Code(), st.Message())
             if st.Code() == codes.NotFound {
                 return nil, nil // Key 不存在，返回 nil, nil (符合 Go 习惯)
             }
             if st.Code() == codes.Aborted && st.Message() == "KeyLocked" {
-                // 遇到锁！退避重试
-                // log.Printf("Key %s locked, backing off...", key)
-                if boErr := bo.Sleep(); boErr != nil {
-                    return nil, boErr // 超时放弃
-                }
-                continue
+            	log.Printf("[Client] SnapshotGet hit lock. Details len: %d", len(st.Details()))
+		      // 解析 Details
+		      for _, detail := range st.Details() {
+		          if keyErr, ok := detail.(*titankvpb.KeyError); ok {
+		                // 捕获 ResolveLocks 的返回值
+		                resolved, resolveErr := c.ResolveLocks(ctx, keyErr.LockInfo)
+		                
+		                // 打印 Resolve 的结果，而不是 Get 的错误
+		                log.Printf("[Client] Resolve result: %v, Err: %v", resolved, resolveErr)
+		                
+		                if resolved {
+		                    continue // 重试
+		                }
+		          }
+		      }
+	      	if boErr := bo.Sleep(); boErr != nil {
+               	return nil, boErr // 超时放弃
+               }
+               continue  
             }
             if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
                 c.cache.Invalidate(key)
@@ -304,11 +283,141 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
     return nil, fmt.Errorf("snapshot get max retries exceeded")
 }
 
+// 遇到锁时的处理逻辑
+// lockInfo: 从 Prewrite/Get 错误中解析出的锁信息
+func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo) (bool, error) {
+    // 1. 检查 Primary 状态
+    // 需要定位 Primary Key 所在的 Leader
+    // lockInfo.PrimaryKey
+    
+    // 构造 CheckTxnStatusRequest
+    // 当前时间：从 PD 获取或者用本地时间（不准）
+    // 正确做法：PD GetTS。为了快，用 lockInfo.LockVersion 估算? 不行。
+    // 必须去 PD 拿个 TSO 作为 current_ts。
+    currentTS, err := c.GetTS(ctx)
+    if err != nil { return false, err }
+    log.Printf("[Client] Checking Txn Status: Primary=%s, LockTS=%d, CallerTS=%d", 
+        string(lockInfo.PrimaryKey), lockInfo.LockVersion, currentTS)
+    checkReq := &titankvpb.CheckTxnStatusRequest{
+        PrimaryKey: lockInfo.PrimaryKey,
+        LockTs:     lockInfo.LockVersion,
+        CurrentTs:  currentTS,
+    }
+    
+    // 发送 CheckTxnStatus (定向发送给 Primary)
+    checkResp, err := c.SendCheckTxnStatus(ctx, checkReq) // 需实现
+    if err != nil { return false, err }
+    log.Printf("[Client] Check Result: Action=%v", checkResp.Action)
+    // 2. 根据 Action 决定
+    if checkResp.Action == titankvpb.CheckTxnStatusResponse_NoAction {
+        return false, nil // 等待，不重试（或者由上层 Backoff）
+    }
+
+    // 3. 执行 Resolve
+    // 如果是 TTL Expire，Server 已经帮我们回滚了 Primary。
+    // 我们需要清理当前的 Secondary Key (lockInfo.Key)。
+    
+    commitTS := checkResp.CommitTs // 如果是 Rollback，这里是 0
+    if checkResp.Action == titankvpb.CheckTxnStatusResponse_Rollback ||
+       checkResp.Action == titankvpb.CheckTxnStatusResponse_LockNotExist ||
+       checkResp.Action == titankvpb.CheckTxnStatusResponse_TtlExpire {
+        commitTS = 0
+    }
+
+    resolveReq := &titankvpb.ResolveLockRequest{
+        StartTs:  lockInfo.LockVersion,
+        CommitTs: commitTS,
+        Keys:     [][]byte{lockInfo.Key}, // 清理阻挡我们的这把锁
+    }
+    
+    // 发送 ResolveLock (定向发送给当前 Key)
+    // 注意：lockInfo.Key 不一定是 Primary，所以要重新路由
+    log.Printf("[Client] Sending ResolveLock: CommitTS=%d (0=Rollback)", commitTS)
+    _, err = c.SendResolveLock(ctx, resolveReq) // 需实现
+    if err != nil { return false, err }
+
+    return true, nil // 成功清理，上层可以立即重试
+}
+
+// 发送 CheckTxnStatus (发给 Primary Key 所在的 Leader)
+func (c *Client) SendCheckTxnStatus(ctx context.Context, req *titankvpb.CheckTxnStatusRequest) (*titankvpb.CheckTxnStatusResponse, error) {
+    key := req.PrimaryKey
+    // CheckTxnStatus 可能没传 RegionID (Resolve 逻辑里)，所以主要靠 Key
+    regionID := uint64(0)
+    if req.Context != nil { regionID = req.Context.RegionId }
+
+    if req.Context == nil {
+        req.Context = &titankvpb.RegionContext{RegionId: 1}
+    }
+
+    addr, _ := c.getAddrForReq(ctx, regionID, key)
+    
+    conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+    if err != nil { return nil, err }
+    defer conn.Close()
+
+    return titankvpb.NewTitanKVClient(conn).CheckTxnStatus(ctx, req)
+}
+
+// 注意：SendResolveLock 已经是 GroupByRegion 的产物了 (Client.ResolveLocks 调用它)
+// ResolveLocks 内部会分组调用 SendResolveLock
+func (c *Client) SendResolveLock(ctx context.Context, req *titankvpb.ResolveLockRequest) (*titankvpb.ResolveLockResponse, error) {
+    if len(req.Keys) == 0 { return &titankvpb.ResolveLockResponse{}, nil }
+    key := req.Keys[0]
+    if req.Context == nil {
+        region, _ := c.cache.Search(key)
+        if region != nil {
+            req.Context = &titankvpb.RegionContext{
+                RegionId:    region.Id,
+                RegionEpoch: toTitanEpoch(region.RegionEpoch),
+            }
+        } else {
+             req.Context = &titankvpb.RegionContext{RegionId: 1}
+        }
+    }
+    regionID := req.Context.RegionId
+
+    addr, _ := c.getAddrForReq(ctx, regionID, key)
+
+    conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+    if err != nil { return nil, err }
+    defer conn.Close()
+
+    return titankvpb.NewTitanKVClient(conn).ResolveLock(ctx, req)
+}
+
 func (c *Client) GetRegionCache() *RegionCache {
     return c.cache
 }
 
+// 统一的辅助发送逻辑
+func (c *Client) getAddrForReq(ctx context.Context, regionID uint64, key []byte) (string, error) {
+    // 1. 优先尝试通过 RegionID 直接获取
+    if regionID > 0 {
+        addr := c.cache.GetLeaderAddr(regionID)
+        if addr != "" {
+            return addr, nil
+        }
+    }
+    
+    // 2. 缓存未命中，回退到 LocateKey (这会去 PD 查并更新缓存)
+    if len(key) > 0 {
+        return c.LocateLeader(ctx, key)
+    }
+    
+    // 3. 都没有，只能 Blind Guess (单机测试用)
+    return "127.0.0.1:9091", nil
+}
+
+func toPdpbEpoch(e *titankvpb.RegionEpoch) *pdpb.RegionEpoch {
+    if e == nil { return &pdpb.RegionEpoch{} }
+    return &pdpb.RegionEpoch{ConfVer: e.ConfVer, Version: e.Version}
+}
+
 func toTitanEpoch(e *pdpb.RegionEpoch) *titankvpb.RegionEpoch {
     if e == nil { return nil }
-    return &titankvpb.RegionEpoch{ConfVer: e.ConfVer, Version: e.Version}
+    return &titankvpb.RegionEpoch{
+        ConfVer: e.ConfVer,
+        Version: e.Version,
+    }
 }

@@ -79,6 +79,7 @@ std::string Status::ToString() const {
         case kNotSupported: type = "Not implemented: "; break;
         case kInvalidArgument: type = "Invalid argument: "; break;
         case kIOError: type = "IO error: "; break;
+        case kAborted: type = "Aborted: "; break;
         default:
             snprintf(tmp, sizeof(tmp), "Unknown code(%d): ", static_cast<int>(code()));
             type = tmp;

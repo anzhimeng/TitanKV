@@ -10,7 +10,6 @@ import "C"
 import (
 	"errors"
 	"unsafe"
-	"log"
 	"path/filepath"
 	"strings"
 
@@ -418,7 +417,7 @@ func (s *TitanStore) DeleteCF(cf CFType, key []byte, ts uint64) error {
 }
 
 func (s *TitanStore) Prewrite(mutations []*titankvpb.Mutation, primary []byte, startTS uint64, ttl uint64) error {
-    log.Printf("[Store] Invoking CGO titan_mvcc_prewrite...")
+    // log.Printf("[Store] Invoking CGO titan_mvcc_prewrite...")
     count := len(mutations)
     if count == 0 { return nil }
 
@@ -612,4 +611,49 @@ func (s *TitanStore) MvccGet(key []byte, startTS uint64) ([]byte, error) {
         return val, nil
     }
     return nil, nil // Should not happen if err is nil
+}
+
+// 1. GetLockCF: 获取 Lock 列族的值 (Raw Bytes)
+func (s *TitanStore) GetLockCF(key []byte) ([]byte, error) {
+    var cVal *C.char
+    var cLen C.size_t
+    var cErr *C.char
+    
+    kPtr := (*C.char)(unsafe.Pointer(&key[0]))
+    
+    // 我们需要 C 接口暴露 titan_get_cf (Week 13 Day 2 应该已经有了)
+    // CF_LOCK = 1
+    C.titan_get_cf(s.db, 1, kPtr, C.size_t(len(key)), 0, &cVal, &cLen, &cErr)
+    
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return nil, errors.New(C.GoString(cErr))
+    }
+    
+    if cVal != nil {
+        val := C.GoBytes(unsafe.Pointer(cVal), C.int(cLen))
+        C.titan_free(unsafe.Pointer(cVal))
+        return val, nil
+    }
+    return nil, errors.New("key not found")
+}
+
+// 2. CheckTxnStatus: 检查事务状态
+func (s *TitanStore) CheckTxnStatus(primaryKey []byte, lockTS, currentTS uint64) (int, uint64, error) {
+    var action C.int
+    var commitTS C.uint64_t
+    var cErr *C.char
+    
+    kPtr := (*C.char)(unsafe.Pointer(&primaryKey[0]))
+    
+    C.titan_check_txn_status(s.db, kPtr, C.size_t(len(primaryKey)), 
+                             C.uint64_t(lockTS), C.uint64_t(currentTS),
+                             &action, &commitTS, &cErr)
+                             
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return 0, 0, errors.New(C.GoString(cErr))
+    }
+    
+    return int(action), uint64(commitTS), nil
 }

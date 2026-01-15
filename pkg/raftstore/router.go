@@ -3,6 +3,8 @@ package raftstore
 import (
 	"sync"
 	"context"
+
+	"titankv/pd/api/pdpb"
 )
 
 // PeerSender 本质上就是 Worker 的信箱 (Channel)
@@ -81,11 +83,14 @@ func (r *Router) Send(regionID uint64, msg Msg) bool {
 type PeerStateReader interface {
     GetAppliedIndex() uint64
     WaitApplied(ctx context.Context, targetIndex uint64) error
+    CheckEpoch(reqEpoch *pdpb.RegionEpoch) error
 }
 
 func (r *Router) GetLocalPeer(regionID uint64) PeerStateReader {
     if v, ok := r.peers.Load(regionID); ok {
-        return v.(*Peer)
+		if peer, ok := v.(*Peer); ok {
+			return peer
+		}
     }
     return nil
 }

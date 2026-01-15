@@ -6,6 +6,8 @@ import (
      "os"
      "strings"
      "log"
+     "fmt"     
+     "strconv"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -50,7 +52,7 @@ func (s *Server) checkEpoch(ctx context.Context, regionID uint64, reqEpoch *tita
 	// 【修改】直接传 titankvpb.RegionEpoch，不要转 pdpb
 	// 如果你的 Peer.CheckEpoch 定义是接收 *pdpb.RegionEpoch，那你应该去改 Peer
 	// 让我们假设 Peer 用的是 titankvpb (因为 Peer.region 是 titankvpb.Region)
-	if err := peer.CheckEpoch(reqEpoch); err != nil {
+	if err := peer.CheckEpoch(toPdpbEpoch(reqEpoch)); err != nil {
 		return status.Error(codes.Aborted, "EpochNotMatch")
 	}
 	return nil
@@ -179,10 +181,20 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
     // 调用 MvccGet
     val, err := s.store.MvccGet(encodedKey, req.StartTs)
     if err != nil {
-        if err.Error() == "Key is locked" {
-             return nil, status.Error(codes.Aborted, "KeyLocked")
+        if strings.Contains(err.Error(), "Key is locked") {
+            // 构造 LockInfo 并返回 Aborted
+            lockInfo, _ := s.getLockInfo(req.Context.RegionId, req.Key)
+            
+            st := status.New(codes.Aborted, "KeyLocked")
+            ds, _ := st.WithDetails(&titankvpb.KeyError{
+                LockInfo: lockInfo,
+            })
+            return nil, ds.Err()
         }
-        if err.Error() == "Key deleted" || err.Error() == "key not found" {
+        if strings.Contains(err.Error(), "NotFound") || 
+           strings.Contains(err.Error(), "key not found") || 
+           strings.Contains(err.Error(), "Key deleted") {
+             // 返回标准的 gRPC NotFound 错误码
              return nil, status.Error(codes.NotFound, "key not found")
         }
         return nil, status.Error(codes.Internal, err.Error())
@@ -360,10 +372,15 @@ func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (
 	
 	if err != nil {
 		// 解析错误
-		log.Printf("[Server] Store.Prewrite failed: %v", err)
-		if strings.Contains(err.Error(), "Key is locked") {
-			return &titankvpb.PrewriteResponse{Error: "KeyLocked"}, nil
-		}
+	   log.Printf("[Server] Store.Prewrite failed: %v", err)
+        if strings.Contains(err.Error(), "Key is locked") {
+            lockInfo, _ := s.getLockInfo(req.Context.RegionId, req.Mutations[0].Key)
+            
+            return &titankvpb.PrewriteResponse{
+                Error: "KeyLocked",
+                KeyError: &titankvpb.KeyError{LockInfo: lockInfo},
+            }, nil
+        }
 		// 还可以处理 WriteConflict
 		return &titankvpb.PrewriteResponse{Error: err.Error()}, nil
 	} else {
@@ -411,5 +428,88 @@ func (s *Server) CheckTxnStatus(ctx context.Context, req *titankvpb.CheckTxnStat
     return &titankvpb.CheckTxnStatusResponse{
         Action:   titankvpb.CheckTxnStatusResponse_Action(action),
         CommitTs: commitTS,
+    }, nil
+}
+
+func (s *Server) ResolveLock(ctx context.Context, req *titankvpb.ResolveLockRequest) (*titankvpb.ResolveLockResponse, error) {
+	log.Printf("[DEBUG-Server] ResolveLock RPC received. Keys: %d", len(req.Keys))
+    // 1. 路由与 Epoch 检查 (Multi-Raft 适配)
+    if req.Context != nil {
+        regionID := req.Context.RegionId
+        
+        // 【关键修复】通过 Router 获取 Peer
+        peer := s.router.GetLocalPeer(regionID)
+        if peer == nil {
+            return nil, status.Error(codes.NotFound, "region not found")
+        }
+        
+        // 调用 Peer 的 CheckEpoch
+        if err := peer.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
+            return nil, status.Error(codes.Aborted, "EpochNotMatch")
+        }
+    }
+
+    // 2. 编码 Key (Multi-Raft 适配)
+    // 所有的 Key 都要加上 z{RegionID} 前缀
+    regionID := req.Context.RegionId
+    var encodedKeys [][]byte
+    for _, k := range req.Keys {
+        // 【关键修复】检查 Key 是否已经编码
+        // 假设 DataKey 的第一个字节是 'z' (Week 10 定义)
+        // 并且后续是 RegionID。
+        // 简单判断：如果以 'z' 开头，且长度足够，且包含 RegionID，就不再编码。
+        // 或者更简单：Client 传来的 Keys 约定必须是 User Key。
+        
+        // 既然 LockInfo 返回的是 Encoded Key，Client 为了方便直接传回来了。
+        // 我们在这里做一个 Hack：如果 Key 以 'z' 开头，假设它已经是 Encoded Key。
+        
+        isEncoded := false
+        if len(k) >= 9 && k[0] == 'z' {
+             // 进一步检查 RegionID 是否匹配 (可选，但更安全)
+             // rid := binary.BigEndian.Uint64(k[1:9])
+             // if rid == regionID { isEncoded = true }
+             isEncoded = true
+        }
+        
+        if isEncoded {
+            encodedKeys = append(encodedKeys, k)
+        } else {
+            encodedKeys = append(encodedKeys, raftstore.DataKey(regionID, k))
+        }
+    }
+
+    // 3. 调用 Store 执行
+    // ResolveLock 本质上就是 Commit (如果 commit_ts > 0) 或 Rollback (如果 commit_ts == 0)
+    // 我们复用 Commit 接口，但需要 Store 支持 Rollback 语义
+    err := s.store.Commit(encodedKeys, req.StartTs, req.CommitTs)
+    log.Printf("[DEBUG-Server] ResolveLock Store.Commit result: %v", err)
+    if err != nil {
+        return nil, status.Error(codes.Internal, err.Error())
+    }
+
+    return &titankvpb.ResolveLockResponse{}, nil
+}
+
+// 辅助：读取锁信息
+func (s *Server) getLockInfo(regionID uint64, key []byte) (*titankvpb.LockInfo, error) {
+    encKey := raftstore.DataKey(regionID, key)
+    // 直接调用 C++ GetCF(Lock)
+    // 假设 store 有 GetLock 接口，或者直接用 GetCF
+    // 我们假设 val 格式是 "primary|start_ts|ttl" (Day 1 定义的)
+    valBytes, err := s.store.GetLockCF(encKey) // 需要实现
+    if err != nil { return nil, err }
+    
+    val := string(valBytes)
+    parts := strings.Split(val, "|")
+    if len(parts) < 3 { return nil, fmt.Errorf("bad lock val") }
+    
+    startTS, _ := strconv.ParseUint(parts[1], 10, 64)
+    ttl, _ := strconv.ParseUint(parts[2], 10, 64)
+
+    return &titankvpb.LockInfo{
+        PrimaryKey:  []byte(parts[0]),
+        LockVersion: startTS,
+        Ttl:         ttl,
+        Key:         key,
     }, nil
 }

@@ -251,6 +251,9 @@ void titan_delete_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen
 void titan_get_cf(titan_db_t* db, titan_cf_t cf, const char* key, size_t klen, uint64_t ts,
                   char** val, size_t* vlen, char** err) {
     std::string result;
+    titankv::CFType type = titankv::kCFDefault;
+    if (cf == 1) type = titankv::kCFLock;
+    if (cf == 2) type = titankv::kCFWrite;
     titankv::Status s = db->rep->GetCF(to_cpp_cf(cf), titankv::Slice(key, klen), &result, ts);
     
     if (s.ok()) {
@@ -293,9 +296,9 @@ int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
 
 void titan_mvcc_prewrite(titan_db_t* db, const titan_mutation_t* mutations, int count,
                          const char* primary, size_t plen, uint64_t start_ts, uint64_t ttl, char** err) {
-    fprintf(stderr, "[C-API] titan_mvcc_prewrite called.\n");
+    //fprintf(stderr, "[C-API] titan_mvcc_prewrite called.\n");
     if (!db || !db->rep) return;
-    fprintf(stderr, "[C-API] titan_mvcc_prewrite called db not null.\n");
+    //fprintf(stderr, "[C-API] titan_mvcc_prewrite called db not null.\n");
     auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
     
     // 转换 Mutation
@@ -306,8 +309,8 @@ void titan_mvcc_prewrite(titan_db_t* db, const titan_mutation_t* mutations, int 
         m.op = (mutations[i].op == 0) ? titankv::Mutation::Put : titankv::Mutation::Delete;
 	   m.key = titankv::Slice(mutations[i].key, mutations[i].klen).ToString();
 	   m.value = titankv::Slice(mutations[i].value, mutations[i].vlen).ToString();
-        fprintf(stderr, "[C-API] Mutate Key (len=%lu): [%s]\n", 
-                mutations[i].klen, ToHex(mutations[i].key, mutations[i].klen).c_str());
+        //fprintf(stderr, "[C-API] Mutate Key (len=%lu): [%s]\n", 
+                //mutations[i].klen, ToHex(mutations[i].key, mutations[i].klen).c_str());
         cpp_mutations.push_back(m);
     }
     
@@ -349,5 +352,6 @@ void titan_check_txn_status(titan_db_t* db, const char* pkey, size_t plen,
     titankv::Status s = db->rep->CheckTxnStatus(titankv::Slice(pkey, plen), lock_ts, current_ts, action, commit_ts);
     set_error(err, s);
 }
+
 
 } // extern "C"

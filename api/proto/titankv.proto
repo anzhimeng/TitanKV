@@ -21,7 +21,20 @@ service TitanKV {
     rpc Prewrite(PrewriteRequest) returns (PrewriteResponse);
     rpc Commit(CommitRequest) returns (CommitResponse);
     rpc CheckTxnStatus(CheckTxnStatusRequest) returns (CheckTxnStatusResponse);
+    rpc ResolveLock(ResolveLockRequest) returns (ResolveLockResponse);
 }
+
+message ResolveLockRequest {
+    RegionContext context = 1;
+    uint64 start_ts = 2;
+    // 如果是 Commit，需要 CommitTS；如果是 Rollback，commit_ts = 0
+    uint64 commit_ts = 3; 
+    
+    // 需要清理的 Keys (通常是 Secondary Keys)
+    repeated bytes keys = 4;
+}
+
+message ResolveLockResponse {}
 
 message CheckTxnStatusRequest {
     RegionContext context = 1;
@@ -140,9 +153,10 @@ message KeyError {
 }
 
 message LockInfo {
-    bytes primary_lock = 1;
+    bytes primary_key = 1;
     uint64 lock_version = 2;
-    uint64 ttl = 3;
+    bytes key = 3;
+    uint64 ttl = 4;
 }
 
 message CommitRequest {
