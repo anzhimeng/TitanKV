@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"context"
+	"sync"
 	"encoding/binary"
 	"sync/atomic"
 	
@@ -40,6 +42,8 @@ type Peer struct {
      // 【新增】Applied Index (原子变量，供 Server 检查)
      // 注意：etcd/raft 内部没有这个，我们需要自己维护
      appliedIndex uint64 
+     applyCond *sync.Cond
+     readMu sync.Mutex
 }
 
 func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore) (*Peer, error) {
@@ -82,15 +86,20 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 		return nil, err
 	}
 
-	return &Peer{
-		regionID:  region.Id,
-		peerID:    peerID,
-		storeID:   storeID, 
-		raftGroup: rn,
-		storage:   ps,
-		region:    region,
+    p := &Peer{
+		regionID:     region.Id,
+		peerID:       peerID,
+		storeID:      storeID, 
+		raftGroup:    rn,
+		storage:      ps,
+		region:       region,
 		pendingReads: make(map[string]chan uint64),
-	}, nil
+	}
+    
+    // 【新增】初始化 Condition Variable
+    p.applyCond = sync.NewCond(&p.readMu)
+    
+    return p, nil
 }
 
 // 处理消息
@@ -112,7 +121,7 @@ func (p *Peer) step(msg Msg) {
 			}
 		}
 	     if msg.RaftCmd.Header != nil {
-            if err := p.checkEpoch(msg.RaftCmd.Header.RegionEpoch); err != nil {
+            if err := p.CheckEpoch(msg.RaftCmd.Header.RegionEpoch); err != nil {
                 if msg.Callback != nil {
                     msg.Callback(err) // 返回 EpochNotMatch
                 }
@@ -378,7 +387,7 @@ func initRaftState(engine *store.TitanStore, region *titankvpb.Region) {
 }
 
 // 检查 Epoch 是否匹配
-func (p *Peer) checkEpoch(reqEpoch *titankvpb.RegionEpoch) error {
+func (p *Peer) CheckEpoch(reqEpoch *titankvpb.RegionEpoch) error {
     // 容错：如果请求没带 Epoch (旧 Client)，或者本地还没初始化好，先放行
     // 生产环境应该严格拒绝
     if reqEpoch == nil {
@@ -450,4 +459,44 @@ func (p *Peer) GetAppliedIndex() uint64 {
 // 设置 AppliedIndex (原子写)
 func (p *Peer) SetAppliedIndex(idx uint64) {
     atomic.StoreUint64(&p.appliedIndex, idx)
+    log.Printf("[Peer %d] Applied Index Updated to %d. Broadcasting...", p.peerID, idx)
+    p.applyCond.Broadcast()
+}
+
+// WaitApplied 阻塞直到 AppliedIndex >= targetIndex
+func (p *Peer) WaitApplied(ctx context.Context, targetIndex uint64) error {
+    // 1. 快速路径：无锁检查原子变量
+    if atomic.LoadUint64(&p.appliedIndex) >= targetIndex {
+        return nil
+    }
+
+    // 2. 慢路径：使用 Cond 等待
+    // 需要开一个 goroutine 转换 Cond 阻塞为 Channel 信号，以便 select 处理 context timeout
+    doneC := make(chan struct{})
+
+    go func() {
+        p.readMu.Lock()
+        defer p.readMu.Unlock()
+        
+        // 循环检查，防止虚假唤醒
+        for atomic.LoadUint64(&p.appliedIndex) < targetIndex {
+            // 【调试】打印等待状态
+            //log.Printf("[Peer %d] Waiting Applied: Current %d < Target %d", 
+                //p.peerID, atomic.LoadUint64(&p.appliedIndex), targetIndex)
+            p.applyCond.Wait() // 释放锁并挂起
+        }
+        // 【调试】
+        //log.Printf("[Peer %d] Wait Finished! Current %d >= Target %d", 
+             //p.peerID, atomic.LoadUint64(&p.appliedIndex), targetIndex)
+        close(doneC)
+    }()
+
+    select {
+    case <-doneC:
+        return nil
+    case <-ctx.Done():
+        // 注意：goroutine 会泄露直到下一次 Broadcast，这是 Go Cond 的已知限制。
+        // 但对于短连接或频繁更新的 Apply，这是可接受的。
+        return ctx.Err()
+    }
 }

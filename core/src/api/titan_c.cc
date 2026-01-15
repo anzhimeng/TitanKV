@@ -3,9 +3,12 @@
 #include "titankv/db_impl.h"
 #include "titankv/write_batch.h"
 #include "lsm/mvcc_reader.h"
+#include "util/coding.h"
 #include <cstring>
 #include <cstdlib>
 #include <thread>
+#include <sstream>  
+#include <iomanip>
 
 using namespace titankv;
 
@@ -29,6 +32,7 @@ static titankv::CFType to_cpp_cf(titan_cf_t cf) {
         default:         return titankv::kCFDefault;
     }
 }
+
 
 extern "C" {
 
@@ -284,6 +288,32 @@ int titan_mvcc_reader_seek_write(void* reader, const char* key, size_t klen,
         return 0; // OK
     }
     return -1; // NotFound
+}
+
+
+void titan_mvcc_prewrite(titan_db_t* db, const titan_mutation_t* mutations, int count,
+                         const char* primary, size_t plen, uint64_t start_ts, uint64_t ttl, char** err) {
+    fprintf(stderr, "[C-API] titan_mvcc_prewrite called.\n");
+    if (!db || !db->rep) return;
+    fprintf(stderr, "[C-API] titan_mvcc_prewrite called db not null.\n");
+    auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+    
+    // 转换 Mutation
+    std::vector<titankv::Mutation> cpp_mutations;
+    for (int i = 0; i < count; ++i) {
+        titankv::Mutation m;
+        // 0: Put, 1: Delete
+        m.op = (mutations[i].op == 0) ? titankv::Mutation::Put : titankv::Mutation::Delete;
+	   m.key = titankv::Slice(mutations[i].key, mutations[i].klen).ToString();
+	   m.value = titankv::Slice(mutations[i].value, mutations[i].vlen).ToString();
+        fprintf(stderr, "[C-API] Mutate Key (len=%lu): [%s]\n", 
+                mutations[i].klen, ToHex(mutations[i].key, mutations[i].klen).c_str());
+        cpp_mutations.push_back(m);
+    }
+    
+    titankv::Slice p(primary, plen);
+    titankv::Status s = impl->MvccPrewrite(cpp_mutations, p.ToString(), start_ts, ttl);
+    set_error(err, s);
 }
 
 void titan_mvcc_commit(titan_db_t* db, const char** keys, size_t* klens, int count,

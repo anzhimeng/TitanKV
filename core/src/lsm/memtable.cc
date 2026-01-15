@@ -67,7 +67,7 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key, const Sli
   // DEBUG LOG
   // fprintf(stderr, "[MemTable::Add] Inserted Key: %s, Seq: %lu, InternalLen: %lu\n", 
           //key.ToString().c_str(), s, internal_key_size);
-  
+  // fprintf(stderr, "[MemTable::Add] Inserting Key: %s (Seq: %lu)\n", ToHex(key.ToString()).c_str(), s);
   table_.Insert(buf);
 }
 
@@ -135,7 +135,23 @@ class MemTableIterator : public Iterator {
   ~MemTableIterator() override { delete iter_; }
 
   bool Valid() const override { return iter_->Valid(); }
-  void Seek(const Slice& k) override { iter_->Seek(k.data()); }
+void Seek(const Slice& k) override { 
+      // 构造一个带有 Varint Length 前缀的 Buffer
+      std::string encoded_key;
+      PutVarint32(&encoded_key, k.size());
+      encoded_key.append(k.data(), k.size());
+      
+      // 【修改】删除之前的 fprintf 错误行
+      // fprintf(stderr, "[MemTableIter] Seek Raw: %s\n", Slice(encoded_key).ToString(true).c_str());
+      
+      iter_->Seek(encoded_key.data()); 
+      
+      // 【修改】删除这里的调试日志
+      // if (Valid()) {
+      //    Slice found = key();
+      //    fprintf(stderr, "[MemTableIter] Found Raw: %s\n", found.ToString(true).c_str());
+      // }
+  }
   void SeekToFirst() override { iter_->SeekToFirst(); }
   void SeekToLast() override { iter_->SeekToLast(); }
   void Next() override { iter_->Next(); }

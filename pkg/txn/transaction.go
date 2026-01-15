@@ -2,8 +2,11 @@ package txn
 
 import (
 	"context"
-	"errors"
-	
+	"fmt"
+	"time"
+
+	"titankv/api/titankvpb"
+	"titankv/pd/api/pdpb"
 	"titankv/pkg/client" // Week 8 实现的 Client
 
 	"golang.org/x/sync/errgroup" 
@@ -44,20 +47,18 @@ type Transaction struct {
 
 // 开启新事务
 func NewTransaction(ctx context.Context, c *client.Client) (*Transaction, error) {
-	// 1. 从 PD 获取 StartTS
-	// 假设 Client 暴露了 GetTS 接口 (Week 8 Day 2)
-	// 如果没有，需要去补一个
-	ts, err := c.GetTS(ctx)
-	if err != nil {
-		return nil, err
-	}
+    ts, err := c.GetTS(ctx)
+    if err != nil {
+        return nil, err
+    }
 
-	return &Transaction{
-		StartTS:   ts,
-		client:    c,
-		buffer:    make(map[string][]byte),
-		mutations: make([]Mutation, 0),
-	}, nil
+    return &Transaction{
+        StartTS:   ts,
+        client:    c,
+        // 【必须初始化】
+        buffer:    make(map[string][]byte), 
+        mutations: make([]Mutation, 0),
+    }, nil
 }
 
 func (txn *Transaction) Set(key []byte, value []byte) {
@@ -161,8 +162,9 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 	batches, err := txn.groupMutations(pbMutations)
 	if err != nil { return err }
 
-	g, ctx := errgroup.WithContext(ctx)
-	
+	g, groupCtx := errgroup.WithContext(ctx)
+	// ts1, _ := txn.client.GetTS(ctx)
+    // fmt.Printf("commit StartTS: %d", ts1)
 	// 遍历每个 Region 的批次
 	for _, batch := range batches {
 		batch := batch // capture loop var
@@ -170,8 +172,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 			req := &titankvpb.PrewriteRequest{
 				Context: &titankvpb.RegionContext{
 					RegionId:    batch.region.Id,
-					RegionEpoch: batch.region.RegionEpoch,
-					// Peer: 这里可以留空，由 Client.SendPrewrite 内部填充或忽略
+					RegionEpoch: toTitanEpoch(batch.region.RegionEpoch),
 				},
 				Mutations:  batch.muts,
 				PrimaryKey: primary,
@@ -179,21 +180,40 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 				LockTtl:    3000,
 			}
 			
-			// 调用 Client 的定向发送接口
-			resp, err := txn.client.SendPrewrite(ctx, req)
-			if err != nil { return err }
-			if resp.Error != "" { return fmt.Errorf("prewrite failed: %s", resp.Error) }
-			return nil
+			// 【修改】添加重试循环
+			var lastErr error
+			for i := 0; i < 3; i++ { // 重试 3 次
+				resp, err := txn.client.SendPrewrite(groupCtx, req)
+				if err == nil {
+					if resp.Error != "" {
+						// 业务错误（如 KeyLocked）不需要重试，直接返回失败
+						// fmt.Printf("DEBUG: SendPrewrite logic error: %s\n", resp.Error)
+						return fmt.Errorf("prewrite failed: %s", resp.Error)
+					}
+					return nil // 成功
+				}
+				
+				// 网络错误，记录并重试
+				lastErr = err
+				// fmt.Printf("SendPrewrite RPC failed (retry %d): %v\n", i, err)
+				time.Sleep(50 * time.Millisecond)
+			}
+			return lastErr // 耗尽重试次数
 		})
 	}
 
 	if err := g.Wait(); err != nil {
+	     fmt.Printf("[Debug] Prewrite phase failed: %v\n", err)
 		return err // 任意一个 Prewrite 失败，事务回滚 (Client 端 Cleanup 暂略)
 	}
+	// fmt.Println("[Debug] Prewrite success!")
 
 	// 4. 获取 CommitTS
 	commitTS, err := txn.client.GetTS(ctx)
-	if err != nil { return err }
+	if err != nil { 
+		// fmt.Printf("[Debug] Get CommitTS failed: %v\n", err)
+		return err
+	}
 	if commitTS <= txn.StartTS {
 		return fmt.Errorf("invalid commit ts")
 	}
@@ -214,9 +234,12 @@ func (txn *Transaction) Commit(ctx context.Context) error {
     // Primary Commit 必须同步等待成功
     // 我们复用 SendCommit，它会根据 Key 路由
 	cResp, err := txn.client.SendCommit(ctx, commitReq)
-	if err != nil { return err }
+	if err != nil {
+         fmt.Printf("[Debug] Commit Primary transport failed: %v\n", err) // <--- 加这个
+         return err
+     }
 	if cResp.Error != "" { return fmt.Errorf("commit primary failed: %s", cResp.Error) }
-
+	// fmt.Println("[Debug] Commit Primary success!")
 	// 6. 异步 Commit Secondaries
 	// Primary 成功后，事务已经成功。剩下的可以异步做。
 	if len(pbMutations) > 1 {
@@ -245,7 +268,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
                 req := &titankvpb.CommitRequest{
                     Context: &titankvpb.RegionContext{
                         RegionId:    batch.region.Id,
-                        RegionEpoch: batch.region.RegionEpoch,
+                        RegionEpoch: toTitanEpoch(batch.region.RegionEpoch),
                     },
                     StartTs:  txn.StartTS,
                     CommitTs: commitTS,
@@ -259,4 +282,14 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 
 	txn.committed = true
 	return nil
+}
+
+func toTitanEpoch(e *pdpb.RegionEpoch) *titankvpb.RegionEpoch {
+    if e == nil {
+        return nil
+    }
+    return &titankvpb.RegionEpoch{
+        ConfVer: e.ConfVer,
+        Version: e.Version,
+    }
 }

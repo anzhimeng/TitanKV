@@ -31,6 +31,7 @@ class DBImpl : public DB {
   Status PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0) override;
   Status DeleteCF(CFType cf, const Slice& key, uint64_t ts = 0) override;
   Status GetCF(CFType cf, const Slice& key, std::string* value, uint64_t ts = 0) override;
+  Status GetCFLocked(CFType cf, const Slice& key, std::string* value, uint64_t ts = 0);
   // MVCC Prewrite
   // mutations: 编码后的 mutation 列表 (key, value, type)
   // primary: primary key
@@ -75,7 +76,8 @@ class DBImpl : public DB {
   const std::string dbname_;
   Options options_; 
 
-  std::mutex mutex_;
+  // 【修改】核心业务锁：递归锁，防止死锁
+  std::recursive_mutex mutex_;
   MemTable* mem_;
   BlobStore* blob_store_;
   
@@ -113,13 +115,15 @@ class DBImpl : public DB {
   // 触发 Flush
   Status MaybeScheduleCompaction(); // Day 4 我们改为 MakeRoomForWrite 同步刷盘
   Status MakeRoomForWrite(bool force); // 检查 MemTable 是否满了
-
+  // 增加私有方法
+  Status GetLocked(const ReadOptions& opt, const Slice& key, std::string* value);
   // 私有辅助函数声明
   std::string EncodeLogRecord(ValueType type, const Slice& key, const Slice& value);
   Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
   // 增加 WriteBatch 支持
   Status Write(const WriteOptions& options, WriteBatch* batch) override;
   Status WriteLocked(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
+  Status WriteLocked(const WriteOptions& options, WriteBatch* batch);
 
   Status DoCompactionWork(Compaction* c);
 

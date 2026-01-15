@@ -10,6 +10,16 @@
 
 namespace titankv {
 
+struct Mutation {
+    enum Op {
+        Put = 0,
+        Delete = 1,
+        Lock = 2
+    };
+    Op op;
+    std::string key;
+    std::string value;
+};
 
 struct Range {
   Slice start;

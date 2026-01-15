@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"sync"
+	"context"
 )
 
 // PeerSender 本质上就是 Worker 的信箱 (Channel)
@@ -79,6 +80,7 @@ func (r *Router) Send(regionID uint64, msg Msg) bool {
 
 type PeerStateReader interface {
     GetAppliedIndex() uint64
+    WaitApplied(ctx context.Context, targetIndex uint64) error
 }
 
 func (r *Router) GetLocalPeer(regionID uint64) PeerStateReader {

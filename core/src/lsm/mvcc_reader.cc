@@ -1,8 +1,8 @@
 #include "lsm/mvcc_reader.h"
 #include "util/coding.h"
 #include "lsm/block.h"
+#include <sstream>
 
-#include <limits>
 
 namespace titankv {
 
@@ -19,17 +19,26 @@ Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string*
     
     // Seek 到最开始 (最小的 TS_Desc，即最大的 TS)
     // 也就是 TS=Max
-    std::string start_key = EncodeMvccKey(kCFWrite, key, std::numeric_limits<uint64_t>::max());
+    //std::string start_key = EncodeMvccKey(kCFWrite, key, std::numeric_limits<uint64_t>::max()); 
+    std::string mvcc_key = EncodeMvccKey(kCFWrite, key, snapshot_);
     // 构造 Internal Key
-    std::string internal_start;
-    internal_start.append(start_key);
-    PutFixed64(&internal_start, PackSequenceAndType(kMaxSequenceNumber, kTypeValue));
+    //std::string internal_start;
+    //internal_start.append(start_key);
+    //PutFixed64(&internal_start, PackSequenceAndType(kMaxSequenceNumber, kTypeValue));
+    LookupKey lkey(mvcc_key, kMaxSequenceNumber);
+        fprintf(stderr, "[Seek] TargetKey=%s, Snapshot=%lu, SeekKeyLen=%lu\n", 
+            key.ToString().c_str(), snapshot_, mvcc_key.size());
+    iter->Seek(lkey.internal_key()); 
     
-    iter->Seek(internal_start);
+    //iter->Seek(internal_start);
 
     // 线性扫描，找到第一个 TS <= snapshot_ 的
     for (; iter->Valid(); iter->Next()) {
         Slice internal_key = iter->key();
+        // fprintf(stderr, "[DebugDump] Raw Key: %s\n", ToHex(internal_key.ToString()).c_str());
+        // fprintf(stderr, "[SeekWrite] Landed on Key: %s (Len: %lu). TargetLen: %lu\n", 
+             //   ToHex(internal_key.ToString()).c_str(), internal_key.size(), 
+              //  1 + key.size() + 8);
         Slice found_mvcc_key = ExtractUserKey(internal_key);
         
         // 检查 User Key (不含 TS) 是否匹配
@@ -42,6 +51,8 @@ Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string*
         // 解析 TS
         uint64_t ts;
         DecodeMvccKey(found_mvcc_key, &ts);
+        //fprintf(stderr, "[SeekWrite] Scan: Key=%s, TS=%lu, TargetSnapshot=%lu\n", 
+               // ToHex(found_mvcc_key.ToString()).c_str(), ts, snapshot_);
         
         // 找到第一个 <= snapshot 的版本
         if (ts <= snapshot_) {
@@ -50,6 +61,8 @@ Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string*
             return Status::OK();
         }
     }
+    if(!iter->Valid())
+    	fprintf(stderr, "[SeekWrite] Seek Invalid!\n");
     
     return Status::NotFound("No visible version");
 }

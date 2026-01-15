@@ -3,7 +3,26 @@
 #include <cassert>
 #include <cstring>
 
+
 namespace titankv {
+
+std::string ToHex(const std::string& s) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (unsigned char c : s) {
+        ss << std::setw(2) << (int)c << " ";
+    }
+    return ss.str();
+}
+
+std::string ToHex(const char* data, size_t len) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < len; ++i) {
+        ss << std::setw(2) << static_cast<unsigned int>(static_cast<unsigned char>(data[i])) << " ";
+    }
+    return ss.str();
+}
 
 // --- Fixed Implementation ---
 

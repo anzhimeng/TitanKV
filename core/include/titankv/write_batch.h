@@ -27,6 +27,7 @@ class WriteBatch {
   };
   const std::vector<Entry>& entries() const { return entries_; }
   void PutCF(CFType cf, const Slice& key, const Slice& value, uint64_t ts = 0);
+  void DeleteCF(CFType cf, const Slice& key, uint64_t ts = 0);
 
  private:
   std::vector<Entry> entries_;

@@ -437,7 +437,7 @@ void VersionSet::AppendVersion(Version* v) {
 }
 
 // 核心：使用 Builder 应用 Edit，并写入 Manifest
-Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu) {
+Status VersionSet::LogAndApply(VersionEdit* edit, std::recursive_mutex* mu) {
   // 1. 设置 Edit 的全局状态
   if (edit->has_log_number_) {
       assert(edit->log_number_ >= log_number_);

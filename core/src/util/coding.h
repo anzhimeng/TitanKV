@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <sstream>
+#include <iomanip>
 #include "titankv/slice.h"
 
 namespace titankv {
@@ -14,7 +16,8 @@ namespace titankv {
 	    kCFWrite   = 'w'
 	};
 
-
+    std::string ToHex(const std::string& s);
+    std::string ToHex(const char* data, size_t len);
 
     // --- Fixed-length encoding (定长编码) ---
     // // 用于磁盘 Header，速度快，易于解析

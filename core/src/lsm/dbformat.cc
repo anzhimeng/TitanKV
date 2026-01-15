@@ -62,6 +62,7 @@ int InternalKeyComparator::Compare(const Slice& akey, const Slice& bkey) const {
   Slice b_user = (bkey.size() >= 8) ? Slice(bkey.data(), bkey.size() - 8) : bkey;
 
   int r = user_key_compare(a_user, b_user);
+  // fprintf(stderr, "[Cmp] A=%s, B=%s, Res=%d\n", a_user.ToString().c_str(), b_user.ToString().c_str(), r);
   if (r != 0) {
     return r;
   }

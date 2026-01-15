@@ -77,7 +77,7 @@ public:
     VersionSet(const std::string& dbname, const Options& options);
     ~VersionSet();
 
-    Status LogAndApply(VersionEdit* edit, std::mutex* mu);
+    Status LogAndApply(VersionEdit* edit, std::recursive_mutex* mu);
     Status Recover(bool* save_manifest);
 
     Version* current() const { return current_; }

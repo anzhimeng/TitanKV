@@ -14,8 +14,45 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include <sstream>
 
 namespace titankv {
+
+static uint64_t ParseLockStartTs(const std::string& lock_val) {
+    // Lock Value 格式: "primary|start_ts|ttl"
+    size_t first_sep = lock_val.find('|');
+    if (first_sep == std::string::npos) return 0;
+    
+    size_t second_sep = lock_val.find('|', first_sep + 1);
+    if (second_sep == std::string::npos) return 0;
+
+    std::string ts_str = lock_val.substr(first_sep + 1, second_sep - first_sep - 1);
+    try {
+        return std::stoull(ts_str);
+    } catch (...) {
+        return 0;
+    }
+}
+
+// 辅助：解析 Lock Value (格式 "primary|start_ts|ttl|type")
+// 返回 true 解析成功
+bool ParseLockInfo(const std::string& val, uint64_t* start_ts, std::string* type) {
+    std::stringstream ss(val);
+    std::string segment;
+    std::vector<std::string> parts;
+    while(std::getline(ss, segment, '|')) {
+        parts.push_back(segment);
+    }
+    if (parts.size() < 4) return false;
+    
+    try {
+        *start_ts = std::stoull(parts[1]);
+        *type = parts[3]; // "Put" or "Delete"
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 // --- 静态工厂方法 ---
 Status DB::Open(const Options& options, const std::string& name, DB** dbptr) {
@@ -205,7 +242,7 @@ Status DBImpl::Recover() {
       // 为了安全，我们加个锁调用 WriteLevel0Table
       
       {
-          std::lock_guard<std::mutex> l(mutex_);
+          std::lock_guard<std::recursive_mutex> l(mutex_);
           s = WriteLevel0Table(mem_, &edit, &file_num);
       }
       
@@ -213,7 +250,7 @@ Status DBImpl::Recover() {
 
       // 移除保护 (因为 WriteLevel0Table 加了 insert，但没 erase)
       if (file_num > 0) {
-          std::lock_guard<std::mutex> l(mutex_);
+          std::lock_guard<std::recursive_mutex> l(mutex_);
           pending_outputs_.erase(file_num);
       }
       
@@ -240,7 +277,7 @@ Status DBImpl::Recover() {
   
   // 原子应用
   {
-      std::lock_guard<std::mutex> l(mutex_);
+      std::lock_guard<std::recursive_mutex> l(mutex_);
       s = versions_->LogAndApply(&edit, &mutex_);
   }
 
@@ -249,7 +286,7 @@ Status DBImpl::Recover() {
 // --- 写入路径 ---
 
 Status DBImpl::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   
   // 1. 检查 MemTable 空间 (可能触发 Flush)
   Status s = MakeRoomForWrite(false);
@@ -260,7 +297,7 @@ Status DBImpl::Put(const WriteOptions& opt, const Slice& key, const Slice& value
 }
 
 Status DBImpl::Delete(const WriteOptions& opt, const Slice& key) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   
   Status s = MakeRoomForWrite(false);
   if (!s.ok()) return s;
@@ -339,6 +376,60 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
   mem_->Add(last_sequence_, type, key, value_to_store);
 
   return Status::OK();
+}
+
+Status DBImpl::WriteLocked(const WriteOptions& opt, WriteBatch* batch) {
+  if (!log_) {
+    uint64_t new_log_num = versions_->NewFileNumber();
+    std::unique_ptr<WritableFile> lfile;
+    Status s = NewWritableFile(LogFileName(dbname_, new_log_num), &lfile);
+    if (!s.ok()) return s;
+    
+    logfile_ = std::move(lfile);
+    log_ = std::make_unique<log::Writer>(logfile_.get());
+    
+    VersionEdit edit;
+    edit.SetLogNumber(new_log_num);
+    versions_->LogAndApply(&edit, &mutex_);
+  }
+
+      // 2. 【关键】将整个 Batch 编码为一条 Log Record
+    // 我们需要一种特殊的 Record Type 吗？
+    // 或者我们沿用之前的 Put/Delete 格式？
+    // 为了兼容 Recover 逻辑，我们这里做个权衡：
+    // 方案 A: 修改 Log Format 支持 Batch。
+    // 方案 B: 在 WAL 中依然分条写，但在 sync 之前不返回。
+    // 方案 C (推荐): 构造一个大的 Buffer，包含多条 Log Record，一次性 Append。
+    
+    // 鉴于 Recover 是按条读的，我们采用 方案 C 变体：
+    // 我们手动构造多条 Log Record 的数据流，或者让 LogWriter 支持 Batch Add。
+    // 简单起见：依然循环 AddRecord，但在最后一次才 Sync。
+    // 这样虽然 WAL 是多条，但物理上它们会在一次 write 中落盘（如果 OS buffer 够大），
+    // 且只有最后 Sync 成功了才算成功。
+    
+    Status s;
+    for (const auto& entry : batch->entries()) {
+    // fprintf(stderr, "[WriteLocked] Writing Key: %s, Type: %d\n", ToHex(entry.key).c_str(), entry.type);
+        ValueType type = (entry.type == kTypeDeletion) ? kTypeDeletion : kTypeValue;
+        std::string log_record = EncodeLogRecord(type, entry.key, entry.value);
+        s = log_->AddRecord(log_record); // 只是 copy 到 buffer
+        if (!s.ok()) return s;
+    }
+
+    // 3. 【关键】最后统一 Sync
+    if (opt.sync) {
+        s = logfile_->Sync();
+        if (!s.ok()) return s;
+    }
+
+    // 4. 写入 MemTable (内存操作绝不会失败)
+    for (const auto& entry : batch->entries()) {
+        ValueType type = (entry.type == kTypeDeletion) ? kTypeDeletion : kTypeValue;
+        last_sequence_++;
+        mem_->Add(last_sequence_, type, entry.key, entry.value);
+    }
+
+    return Status::OK();
 }
 
 Status DBImpl::MakeRoomForWrite(bool force) {
@@ -426,8 +517,11 @@ Status DBImpl::MakeRoomForWrite(bool force) {
         imm_->Unref();
         imm_ = nullptr;
     }
-    
-    bg_cv_.notify_one(); 
+    // 唤醒后台线程 (需要获取 bg_mutex_)
+    {
+        std::lock_guard<std::mutex> l(bg_mutex_);
+        bg_cv_.notify_one();
+    }
     return Status::OK();
 }
 
@@ -506,6 +600,11 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit, uint64_t* file
 // --- 读取路径 ---
 
 Status DBImpl::Get(const ReadOptions& opt, const Slice& key, std::string* value) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return GetLocked(opt, key, value);
+}
+
+Status DBImpl::GetLocked(const ReadOptions& opt, const Slice& key, std::string* value) {
   SequenceNumber snapshot = last_sequence_.load(std::memory_order_acquire);
   LookupKey lkey(key, snapshot);
   Status s;
@@ -527,7 +626,6 @@ Status DBImpl::Get(const ReadOptions& opt, const Slice& key, std::string* value)
   // 3. 查 Version (L0 - L6)
   Version* current;
   {
-      std::lock_guard<std::mutex> lock(mutex_);
       current = versions_->current();
       current->Ref();
   }
@@ -582,7 +680,7 @@ Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
   // 3. 查 Version (L0 - L6)
   Version* current;
   {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
       current = versions_->current();
       current->Ref();
   }
@@ -624,7 +722,7 @@ Status DBImpl::FinishGC(const std::vector<GCRecord>& gc_records) {
     // 这一步需要加锁，确保原子写入 WriteBatch
     // 但查询 GetLSMValue 是否需要加锁？
     // 为了保证 Check-And-Set 的原子性，我们在检查期间持有锁。
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     int success_count = 0;
     
@@ -879,13 +977,13 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
     if (status.ok()) {
         VersionEdit edit;
         c->AddToEdit(&edit); 
-        std::lock_guard<std::mutex> l(mutex_);
+        std::lock_guard<std::recursive_mutex> l(mutex_);
         status = versions_->LogAndApply(&edit, &mutex_);
     }
 
     // 【关键】LogAndApply 结束后（或者失败后），统一移除保护
     {
-        std::lock_guard<std::mutex> l(mutex_);
+        std::lock_guard<std::recursive_mutex> l(mutex_);
         for (uint64_t num : produced_files) {
             pending_outputs_.erase(num);
         }
@@ -899,18 +997,23 @@ void DBImpl::BGWork() {
     while (true) {
         bool did_compaction = false;
         
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(bg_mutex_);
         
         if (!bg_running_) break;
 
-        // 1. Flush Check (简略)
-        if (imm_ != nullptr) {
-             // MakeRoomForWrite(false); 
-        }
+	   Compaction* c = nullptr;
+	   {
+		   std::lock_guard<std::recursive_mutex> lock(mutex_);
+		   // 1. Flush Check (简略)
+	        if (imm_ != nullptr) {
+	             MakeRoomForWrite(false); 
+	        }
+	
+	        // 2. Compaction Check
+	        versions_->current()->Finalize();
+	        c = versions_->PickCompaction();
 
-        // 2. Compaction Check
-        versions_->current()->Finalize();
-        Compaction* c = versions_->PickCompaction();
+	   }
 
         if (c != nullptr) {
             Status s;
@@ -985,7 +1088,7 @@ void DBImpl::DeleteObsoleteFiles() {
 
     std::set<uint64_t> live;
     {
-        std::lock_guard<std::mutex> l(mutex_);
+        std::lock_guard<std::recursive_mutex> l(mutex_);
         versions_->AddLiveFiles(&live);
         
         // 【关键修复】将 pending_outputs 也视为 live
@@ -1034,33 +1137,18 @@ void DBImpl::DeleteObsoleteFiles() {
 }
 
 Status DBImpl::Write(const WriteOptions& opt, WriteBatch* batch) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     // 1. 检查空间
     Status s = MakeRoomForWrite(false);
     if (!s.ok()) return s;
 
-    // 2. 遍历 Batch 中的 Entry
-    // 注意：WriteBatch 的迭代器需要自己实现或暴露
-    // 假设 WriteBatch 内部有一个 std::vector<Entry> entries_;
-    for (const auto& entry : batch->entries()) {
-        // 复用 WriteLocked 逻辑
-        // 注意：WriteLocked 是原子的吗？在锁内是原子的。
-        // 但如果我们要保证整个 Batch 原子性（要么全进 WAL，要么全不进），
-        // 我们应该构造一个大的 WAL Record 包含所有 Entry。
-        
-        // Day 4 简化：在锁内循环调用 WriteLocked。
-        // 虽然 WAL 是分条写的，但因为持有锁，外界看来是原子的。
-        ValueType type = (entry.type == kTypeValue) ? kTypeValue : kTypeDeletion;
-        s = WriteLocked(opt, type, entry.key, entry.value);
-        if (!s.ok()) return s;
-    }
-    
-    return Status::OK();
+    // 2. 调用新版 WriteLocked
+    return WriteLocked(opt, batch);
 }
 
 void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Version* v = versions_->current();
     
     for (int i = 0; i < n; i++) {
@@ -1090,7 +1178,7 @@ Status DBImpl::DumpSST(const Slice& start, const Slice& end,
                        const std::string& fname, uint64_t seq) {
     // 1. 强制 Flush MemTable (确保数据落盘，简化 Iterator 逻辑)
     {
-        std::lock_guard<std::mutex> l(mutex_);
+        std::lock_guard<std::recursive_mutex> l(mutex_);
         // 如果 mem 不为空，flush 它
         if (mem_->ApproximateMemoryUsage() > 0) {
              MakeRoomForWrite(true); 
@@ -1098,7 +1186,7 @@ Status DBImpl::DumpSST(const Slice& start, const Slice& end,
     }
     
     // 2. 获取快照
-    SequenceNumber snapshot = (seq == 0) ? last_sequence_.load() : seq;
+    //SequenceNumber snapshot = (seq == 0) ? last_sequence_.load() : seq;
 
     // 3. 构建 Iterator (遍历所有 SSTable)
     // 我们需要一个能遍历整个 DB 的迭代器
@@ -1188,7 +1276,7 @@ Status DBImpl::DeleteRange(const WriteOptions& opt, const Slice& start, const Sl
     Iterator* iter = nullptr;
     Version* current = nullptr;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         current = versions_->current();
         current->Ref();
 
@@ -1246,7 +1334,7 @@ Status DBImpl::DeleteRange(const WriteOptions& opt, const Slice& start, const Sl
     
     delete iter;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         current->Unref();
     }
 
@@ -1337,6 +1425,17 @@ Status DBImpl::GetCF(CFType cf, const Slice& key, std::string* value, uint64_t t
     return Get(ReadOptions(), encoded_key, value);
 }
 
+Status DBImpl::GetCFLocked(CFType cf, const Slice& key, std::string* value, uint64_t ts) {
+    std::string encoded_key;
+    if (cf == kCFLock) {
+        encoded_key = EncodeLockKey(key);
+    } else {
+        encoded_key = EncodeMvccKey(static_cast<char>(cf), key, ts);
+    }
+    
+    return GetLocked(ReadOptions(), encoded_key, value);
+}
+
 Iterator* DBImpl::NewIterator(const ReadOptions& options, CFType cf) {
     std::vector<Iterator*> list;
     
@@ -1346,7 +1445,7 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options, CFType cf) {
     // 我们在 Week 7 实现了 RegisterCleanup。
     Version* current = nullptr;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         current = versions_->current();
         current->Ref();
     }
@@ -1390,13 +1489,16 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
                             const std::string& primary,
                             uint64_t start_ts, 
                             uint64_t ttl) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    //fprintf(stderr, "[DBImpl] MvccPrewrite: Waiting for lock...\n");
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+     //fprintf(stderr, "[DBImpl] MvccPrewrite: Lock acquired.\n");
 
     // 1. 创建 WriteBatch (所有操作原子生效)
     WriteBatch batch;
     MvccReader reader(this, start_ts); // 复用 Reader
 
     for (const auto& m : mutations) {
+    	//fprintf(stderr, "[DBImpl] MvccPrewrite: Processing key %s\n", m.key.c_str());
         // --- 检查 Write Conflict ---
         // 查找 [StartTS, +inf] 的 Write 记录
         // 我们的 Reader.SeekWrite 找的是 <= snapshot 的。
@@ -1410,9 +1512,35 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         
         // --- 检查 Lock Conflict ---
         std::string lock_val;
-        Status s = GetCF(kCFLock, m.key, &lock_val, 0);
+        Status s = GetCFLocked(kCFLock, m.key, &lock_val, 0);
+        //fprintf(stderr, "[DBImpl] GetCF Lock done: %s\n", s.ToString().c_str());
         if (s.ok()) {
-            // 锁存在！Conflict！
+            // 【关键修复】幂等性检查
+            // 解析 Lock Value 里的 start_ts
+            // 假设 lock_val 格式是 "primary|start_ts|ttl"
+            fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
+                    ToHex(m.key.data(), m.key.size()).c_str(), 
+                    lock_val.c_str());
+            // 找到第一个分隔符
+            size_t first_sep = lock_val.find('|');
+            if (first_sep != std::string::npos) {
+                // 找到第二个分隔符
+                size_t second_sep = lock_val.find('|', first_sep + 1);
+                if (second_sep != std::string::npos) {
+                    std::string ts_str = lock_val.substr(first_sep + 1, second_sep - first_sep - 1);
+                    try {
+                        uint64_t lock_ts = std::stoull(ts_str);
+                        if (lock_ts == start_ts) {
+                             // 是我自己的锁！幂等成功。
+                             //fprintf(stderr, "[DBImpl] Idempotent Prewrite hit.\n");
+                             continue; // 跳过写入，处理下一个 Mutation
+                        }
+                    } catch (...) {}
+                }
+            }
+            // 【新增调试】打印出到底是哪个 Key 冲突了，以及 Lock 里的内容是什么
+            //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
+                    //m.key.c_str(), lock_val.c_str());
             return Status::Aborted("Key is locked");
         }
 
@@ -1421,7 +1549,8 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         std::string lock_key = EncodeLockKey(m.key);
         // LockInfo 序列化 (primary + ttl + type)
         // 简单起见，我们把 start_ts 也存进去
-        std::string lock_info = primary + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl);
+		std::string op_type = (m.op == Mutation::Delete) ? "Delete" : "Put";
+		std::string lock_info = primary + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl) + "|" + op_type;
         
         batch.PutCF(kCFLock, m.key, lock_info, 0); // PutCF 内部会 Encode
 
@@ -1429,101 +1558,137 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         batch.PutCF(kCFDefault, m.key, m.value, start_ts);
     }
 
-    // 提交 Batch
-    return Write(WriteOptions(), &batch);
+
+    Status s = WriteLocked(WriteOptions(), &batch);
+    fprintf(stderr, "[Verify] Write done. Get result: %s\n", s.ToString().c_str());
+    //fprintf(stderr, "[DBImpl] Write batch status: %s\n", s.ToString().c_str());
+    return s;
 }
 
 Status DBImpl::MvccCommit(const std::vector<std::string>& keys, 
                           uint64_t start_ts, 
                           uint64_t commit_ts) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     WriteBatch batch;
 
     for (const auto& key : keys) {
         // 1. 检查 Lock
         std::string lock_val;
         Status s = GetCF(kCFLock, key, &lock_val, 0);
+        
         if (!s.ok()) {
             // 锁不存在？
-            // 可能性 A: 事务已经提交过 (幂等性检查: 查 Write CF)
-            // 可能性 B: 锁被 TTL 清理或 Rollback
-            // 这里我们需要查 Write CF 确认是否重复提交。
-            // 简单实现：如果是 Secondary，且 Primary 已提交，则视为成功。
-            // 但在这个原子 Batch 里，如果任意一个 Key 没锁，通常意味着出问题了。
-            // 为了 Day 2 简单：直接报错 "Lock not found" (让上层处理重试或回滚)
+            // 工业级实现：应该查 Write CF 看看是不是已经提交过了 (幂等性)。
+            // 为了简化：我们假设上层 Client 已经做过检查，这里只要没锁就报错。
             return Status::NotFound("Lock not found for key: " + key);
         }
 
-        // 检查 Lock 的 StartTS 是否匹配
-        // LockValue 格式: "primary|start_ts|ttl" (我们在 Day 1 定义的)
-        // 解析 LockValue... (需实现简单解析)
-        // 假设我们能解析出 lock_start_ts
-        // if (lock_start_ts != start_ts) return Status::Aborted("Lock ts mismatch");
-
-        // 2. 写入 Write CF
-        // Key: w{key}{commit_ts}
-        // Value: {start_ts, type=Put} (类型应该从 Lock 中获取，或者由上层传下来)
-        // 简化：假设都是 Put
-        std::string write_val = std::to_string(start_ts) + "|Put"; // 简单序列化
+        // 2. 验证 Lock 归属
+        uint64_t lock_ts;
+        std::string type;
+        if (!ParseLockInfo(lock_val, &lock_ts, &type)) {
+            return Status::Corruption("Invalid lock value format");
+        }
         
-        // Batch 写入 Write CF
+        if (lock_ts != start_ts) {
+            // 这是一个严重错误：你想提交 TS=100，但锁是 TS=105 的！
+            return Status::Aborted("Lock start_ts mismatch");
+        }
+
+        // 3. 写入 Write CF
+        // Value 格式: "start_ts|type"
+        std::string write_val = std::to_string(start_ts) + "|" + type;
+        
+        // 【调试日志】打印即将写入的 Write Key
+        std::string debug_enc_key = EncodeMvccKey(kCFWrite, key, commit_ts);
+        // fprintf(stderr, "[MvccCommit] Writing WriteCF. Key=%s, CommitTS=%lu, EncKeySize=%lu\n", 
+        //         key.c_str(), commit_ts, debug_enc_key.size());
+
         batch.PutCF(kCFWrite, key, write_val, commit_ts);
 
-        // 3. 删除 Lock CF
+        // 4. 删除 Lock CF
         batch.DeleteCF(kCFLock, key, 0);
     }
-
-    return Write(WriteOptions(), &batch);
+    // fprintf(stderr, "[MvccCommit] Batch size: %lu\n", batch.entries().size());
+    // 提交
+    return WriteLocked(WriteOptions(), &batch);
 }
 
 Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) {
-    // 读操作可以不加互斥锁 (LSM 的 MemTable 是无锁读的，VersionSet 引用计数保护)
-    // 但为了使用 MvccReader 和 Iterator，我们需要一个 Reader 对象
-    
-    // 1. 检查 Lock
+    // 1. 检查 Lock (Lock CF)
     std::string lock_val;
-    Status s = GetCF(kCFLock, key, &lock_val, 0); // Lock CF 无需 TS
+    Status s = GetCF(kCFLock, key, &lock_val, 0); 
+    
     if (s.ok()) {
-        // 解析 Lock 信息 (假设格式: "primary|start_ts|ttl")
-        // 这里简化：假设我们能解析出 lock_start_ts
-        // uint64_t lock_start_ts = ParseLockTs(lock_val);
+        // 锁存在！检查锁的 StartTS 是否 <= 我的 StartTS
+        // 如果 Lock.StartTS > 我的 StartTS，说明是未来的事务，我可以忽略它
+        uint64_t lock_ts = ParseLockStartTs(lock_val);
         
-        // 简化 Hack: 为了 Day 3 跑通，先假设锁的 StartTS 就是字符串的前几位？
-        // 或者我们暂时悲观一点：只要有锁就冲突。
-        return Status::Aborted("Key is locked");
+        if (lock_ts <= start_ts) {
+            // 确实冲突了
+            fprintf(stderr, "[MvccGet] Key Locked! Key: %s, MyTS: %lu, LockTS: %lu\n", 
+                    key.ToString().c_str(), start_ts, lock_ts);
+            return Status::Aborted("Key is locked");
+        }
     }
 
-    // 2. 查找 Write
+    // 2. 查找 Write (Write CF)
     MvccReader reader(this, start_ts);
     uint64_t commit_ts;
     std::string write_info;
     
+    // fprintf(stderr, "[MvccGet] Seeking Key (Hex): %s\n", ToHex(key.ToString()).c_str());
+
     s = reader.SeekWrite(key, &commit_ts, &write_info);
     if (!s.ok()) {
-        return s; // NotFound (Key 不存在或已删除)
+        fprintf(stderr, "[MvccGet] Write Record Not Found. Status: %s\n", s.ToString().c_str());
+        
+        // 【新增调试】全量扫描 Write CF，看看有没有数据
+        std::unique_ptr<Iterator> debug_iter(NewIterator(ReadOptions(), kCFWrite));
+        debug_iter->SeekToFirst();
+        int count = 0;
+        while (debug_iter->Valid()) {
+            if (count++ > 10) break; // 只打前10个
+            Slice k = debug_iter->key();
+            // 这里的 k 是 InternalKey，我们需要提取 UserKey (MVCC Key)
+            Slice user_k = ExtractUserKey(k);
+            fprintf(stderr, "[DebugDump] DB Key: %s\n", ToHex(user_k.ToString()).c_str());
+            debug_iter->Next();
+        }
+
+        return Status::NotFound("Key not found");
     }
 
-    // 解析 Write Info (假设格式: "start_ts|type")
-    // size_t sep = write_info.find('|');
-    // uint64_t data_start_ts = std::stoull(write_info.substr(0, sep));
-    // char type = write_info[sep+1]; // 'P' or 'D'
-    
-    // 简化 Hack: 假设 write_info 直接就是 start_ts (Week 14 Day 2 实现时可能简化了)
-    // 让我们回顾 Day 2 的 Commit 实现：
-    // std::string write_val = std::to_string(start_ts) + "|Put";
-    
+    // fprintf(stderr, "[MvccGet] Found Write Record. CommitTS: %lu, Info: %s\n", 
+         //   commit_ts, write_info.c_str());
+
+    // 3. 解析 Write Info (格式: "start_ts|type")
     size_t sep = write_info.find('|');
-    if (sep == std::string::npos) return Status::Corruption("Bad write info");
+    if (sep == std::string::npos) {
+        return Status::Corruption("Bad write info format");
+    }
     
-    uint64_t data_start_ts = std::stoull(write_info.substr(0, sep));
+    uint64_t data_start_ts = 0;
+    try {
+        data_start_ts = std::stoull(write_info.substr(0, sep));
+    } catch (...) {
+        return Status::Corruption("Bad write info timestamp");
+    }
+
     std::string type_str = write_info.substr(sep + 1);
 
     if (type_str == "Delete") {
+        // fprintf(stderr, "[MvccGet] Key is deleted at StartTS: %lu\n", data_start_ts);
         return Status::NotFound("Key deleted");
     }
 
-    // 3. 读取 Data
+    // 4. 读取 Data (Default CF)
+    // fprintf(stderr, "[MvccGet] Reading DefaultCF. Key: %s, DataStartTS: %lu\n", 
+          //  ToHex(key.ToString()).c_str(), data_start_ts);
+            
     return reader.GetValue(key, data_start_ts, value);
 }
+
+
 
 } // namespace titankv

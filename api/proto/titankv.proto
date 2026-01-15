@@ -18,7 +18,11 @@ service TitanKV {
     // 双向流：Client 发 Batch，Server 回 Response (可以不回)
     rpc BatchRaft(stream BatchRaftMessage) returns (stream RaftResponse);
     rpc StreamSnapshot(stream SnapshotChunk) returns (RaftResponse);
+    rpc Prewrite(PrewriteRequest) returns (PrewriteResponse);
+    rpc Commit(CommitRequest) returns (CommitResponse);
 }
+
+
 
 
 message RegionEpoch {
@@ -70,6 +74,55 @@ message SnapshotChunk {
 
 // --- 请求/响应定义 ---
 
+message PrewriteRequest {
+    RegionContext context = 1;
+    // 批处理多个 Mutation
+    repeated Mutation mutations = 2;
+    // 事务开始时间
+    uint64 start_ts = 3;
+    // Primary Key (用于故障恢复)
+    bytes primary_key = 4;
+    uint64 lock_ttl = 5;
+}
+
+message Mutation {
+    enum Op {
+        Put = 0;
+        Delete = 1;
+        Lock = 2;
+    }
+    Op op = 1;
+    bytes key = 2;
+    bytes value = 3;
+}
+
+message PrewriteResponse {
+    // 错误信息
+    string error = 1; // 空表示成功
+    // 如果有 Write Conflict
+    WriteConflict conflict = 2;
+    // 如果有 KeyLocked
+    KeyError key_error = 3;
+}
+
+message WriteConflict {
+    uint64 start_ts = 1;
+    uint64 conflict_ts = 2;
+    bytes key = 3;
+    bytes primary = 4;
+}
+
+message KeyError {
+    bytes key = 1;
+    // 锁信息
+    LockInfo lock_info = 2;
+}
+
+message LockInfo {
+    bytes primary_lock = 1;
+    uint64 lock_version = 2;
+    uint64 ttl = 3;
+}
 
 message CommitRequest {
     RegionContext context = 1;

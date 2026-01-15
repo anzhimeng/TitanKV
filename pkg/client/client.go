@@ -9,6 +9,8 @@ import (
 	"titankv/pd/api/pdpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+     "google.golang.org/grpc/codes"
 )
 
 type Client struct {
@@ -30,7 +32,7 @@ func NewClient(pdAddr string) (*Client, error) {
 
 // 核心逻辑：定位 Key 所在的 Leader 地址
 func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
-	// 1. 查缓存
+	// 1. 查本地缓存
 	region, leader := c.cache.Search(key)
 	if region != nil && leader != nil {
 		addr := c.cache.GetStoreAddr(leader.StoreId)
@@ -39,22 +41,34 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
 		}
 	}
 
-	// 2. 缓存未命中，查 PD
-	// (注意：这部分 Server 端逻辑还没写，我们在 Week 9 实现，这里先写 Client 端逻辑)
-	// resp, err := c.pdClient.GetRegion(ctx, &pdpb.GetRegionRequest{Key: key})
-	// if err != nil { return "", err }
-	
-	// 模拟 PD 返回 (Day 5 Mock)
-	// 假设 PD 告诉我们 Key 属于 Region 1, Leader 在 Node 1
-	// 实际上这里应该调用 RPC
-	
-	// mockRegion := &pdpb.Region{Id: 1, StartKey: []byte(""), EndKey: []byte("")}
-	// mockLeader := &pdpb.Peer{Id: 1, StoreId: 1}
-	// c.cache.UpdateRegion(mockRegion, mockLeader)
-	// c.cache.UpdateStore(1, "127.0.0.1:9091")
+	// 2. 缓存未命中，查 PD (RPC)
+    req := &pdpb.GetRegionRequest{Key: key}
+    resp, err := c.pdClient.GetRegion(ctx, req)
+    if err != nil {
+        return "", fmt.Errorf("PD GetRegion failed: %v", err)
+    }
+    
+    // 3. 更新缓存
+    if resp.Region != nil && resp.Leader != nil {
+        c.cache.UpdateRegion(resp.Region, resp.Leader)
+        
+        // 还需要获取 Store 地址
+        // 这一步也需要 RPC (GetStore)，或者我们假设 PD 返回的 Leader 包含地址信息？
+        // Proto 中 Peer 只有 ID 和 StoreID。
+        // 我们需要再调一次 GetStore。
+        
+        storeReq := &pdpb.GetStoreRequest{StoreId: resp.Leader.StoreId}
+        storeResp, err := c.pdClient.GetStore(ctx, storeReq)
+        if err != nil {
+             return "", fmt.Errorf("PD GetStore failed: %v", err)
+        }
+        
+        addr := storeResp.Store.Address
+        c.cache.UpdateStore(resp.Leader.StoreId, addr)
+        return addr, nil
+    }
 
-	// return "127.0.0.1:9091", nil
-	return "", fmt.Errorf("PD GetRegion not implemented yet (Week 9)")
+	return "", fmt.Errorf("region not found")
 }
 
 // 智能 Put
@@ -126,35 +140,70 @@ func (c *Client) GetTS(ctx context.Context) (uint64, error) {
     return ts, nil
 }
 
-// 快照读 (Week 14 Server 端实现后才能真正跑通)
-func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
-    // 构造请求，带上 TS
-    // ...
-    // 这里先 Mock 或者留空，等待 Week 14
-    return nil, fmt.Errorf("SnapshotGet not implemented yet")
-}
-
 func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
-    bo := NewBackoffer(ctx)
-	// 使用第一个 Key 来定位 Leader
-     // (因为经过 GroupByRegion，这个 Batch 里的所有 Key 都属于同一个 Region)
-	key := req.Mutations[0].Key
-    
-	// 1. 定位
-	addr, err := c.LocateLeader(ctx, key)
-	if err != nil {
-         bo.Sleep()
-         continue
+    if req.Context == nil {
+        req.Context = &titankvpb.RegionContext{RegionId: 1, RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1}}
+    }
+    if req.Context.RegionId == 0 {
+        req.Context.RegionId = 1 // 兜底
+    }
+	if len(req.Mutations) == 0 {
+		return &titankvpb.PrewriteResponse{}, nil
 	}
+	
+	key := req.Mutations[0].Key
+	bo := NewBackoffer(ctx)
+	
+	// 重试循环
+	for i := 0; i < 5; i++{
+		// 1. 定位
+		addr, err := c.LocateLeader(ctx, key)
+		if err != nil { 
+			 //定位失败，退避后重试
+			if err := bo.Sleep(); err != nil {
+				return nil, err
+			}
+			addr = "127.0.0.1:9091" 
+               // fmt.Printf("[Client Debug] LocateLeader failed, fallback to %s. Err: %v\n", addr, err)
+			continue
+		}
+		// log.Printf("[Client] Sending Prewrite to %s. Key=%s", addr, string(req.PrimaryKey))
+		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			if err := bo.Sleep(); err != nil {
+				return nil, err
+			}
+			continue
+		}
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil { return nil, err }
-	defer conn.Close()
-    
-	// 2. 发送
-	return titankvpb.NewTitanKVClient(conn).Prewrite(ctx, req)
+		// 2. 发送
+		client := titankvpb.NewTitanKVClient(conn)
+		resp, err := client.Prewrite(ctx, req)
+		// fmt.Printf("[Client Debug] Sending Prewrite to %s\n", addr)
+		if err != nil {
+			log.Printf("[Client] RPC Error: %v", err)
+		}
+		conn.Close() // 及时关闭连接
+		if resp.Error != "" {
+        		// 业务错误 (KeyLocked) -> 返回错误
+        		return nil, fmt.Errorf(resp.Error)
+    		}
+
+		if err != nil {
+			// 网络错误，退避重试
+			// 注意：这里可能需要判断错误类型，如果是 KeyLocked 等逻辑错误，应该直接返回
+			// 但 Prewrite 的 KeyLocked 通常是在 resp.Error 里返回的，这里的 err 通常是 gRPC 错误
+			if err := bo.Sleep(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		
+		// 成功收到响应（哪怕响应里有业务错误，也返回给上层处理）
+		return resp, nil
+	}
+	return nil, fmt.Errorf("send prewrite failed: max retries exceeded")
 }
-
 // 定向发送 Commit
 func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
 	key := req.Keys[0]
@@ -165,7 +214,7 @@ func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (
         if region != nil {
             req.Context = &titankvpb.RegionContext{
                 RegionId:    region.Id,
-                RegionEpoch: region.RegionEpoch,
+                RegionEpoch: toTitanEpoch(region.RegionEpoch),
             }
         } else {
              // Fallback
@@ -204,8 +253,12 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
         var context *titankvpb.RegionContext
         if region != nil {
             context = &titankvpb.RegionContext{
-                RegionId:    region.Id,
-                RegionEpoch: region.RegionEpoch,
+                RegionId: region.Id,
+                // 【修复】手动转换 Epoch 类型
+                RegionEpoch: &titankvpb.RegionEpoch{
+                    ConfVer: region.RegionEpoch.ConfVer,
+                    Version: region.RegionEpoch.Version,
+                },
             }
         } else {
              context = &titankvpb.RegionContext{RegionId: 1} // Fallback
@@ -253,4 +306,9 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
 
 func (c *Client) GetRegionCache() *RegionCache {
     return c.cache
+}
+
+func toTitanEpoch(e *pdpb.RegionEpoch) *titankvpb.RegionEpoch {
+    if e == nil { return nil }
+    return &titankvpb.RegionEpoch{ConfVer: e.ConfVer, Version: e.Version}
 }

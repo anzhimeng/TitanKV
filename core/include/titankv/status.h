@@ -38,6 +38,9 @@ public:
     static Status IOError(const Slice& msg, const Slice& msg2 = Slice()) {
         return Status(kIOError, msg, msg2);
     }
+    static Status Aborted(const Slice& msg, const Slice& msg2 = Slice()) {
+        return Status(kAborted, msg, msg2);
+    }
 
     // 状态检查
     bool ok() const { return state_ == nullptr; }
@@ -58,7 +61,8 @@ private:
         kCorruption = 2,
         kNotSupported = 3,
         kInvalidArgument = 4,
-        kIOError = 5
+        kIOError = 5,
+        kAborted = 6
     };
 
     // 构造错误状态的私有函数

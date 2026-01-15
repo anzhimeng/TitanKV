@@ -170,6 +170,8 @@ func (w *StoreWorker) handleReady() {
 		}
 		
 		rd := peer.raftGroup.Ready()
+		//log.Printf("[Worker] Peer %d Ready: Entries=%d, Msgs=%d, Committed=%d", 
+            // id, len(rd.Entries), len(rd.Messages), len(rd.CommittedEntries))
 		if len(rd.ReadStates) > 0 {
             peer.handleReadStates(rd.ReadStates)
         	}
@@ -231,16 +233,20 @@ func (w *StoreWorker) handleReady() {
 
 	// 2. 执行阶段：批量写盘 (Atomic & Batch)
 	if len(batchKeys) > 0 {
+		//start := time.Now()
 		// 调用 CGO BatchPut
 		err := w.store.BatchPut(batchKeys, batchValues)
 		if err != nil {
 			 log.Fatalf("BatchPut failed: %v", err)
 		}
+		//log.Printf("[Worker] Batch Write done. Items=%d, Cost=%v", len(batchKeys), time.Since(start))
 	}
 
 	// 3. 执行阶段：批量发送
 	if len(messages) > 0 {
+		//start := time.Now()
 		w.transport.Send(messages)
+		//log.Printf("[Worker] Batch Send done. Msgs=%d, Cost=%v", len(messages), time.Since(start))
 	}
 
 	// 4. 后处理阶段：Apply & Advance
@@ -253,8 +259,11 @@ func (w *StoreWorker) handleReady() {
 		for _, entry := range rd.CommittedEntries {
             // 【修改】接收返回值
             newPeer := peer.processEntry(entry)
+            //log.Printf("[DEBUG] Peer processEntry")
             if peer != nil {
                 if entry.Index > peer.GetAppliedIndex() {
+                    //log.Printf("[DEBUG] Peer %d Apply Index %d -> %d", peer.peerID, peer.etAppliedIndex(), entry.Index)
+                 peer.SetAppliedIndex(entry.Index)
                     peer.SetAppliedIndex(entry.Index)
                 }
             }

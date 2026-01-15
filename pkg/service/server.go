@@ -4,7 +4,8 @@ import (
  	"context"
      "io"
      "os"
-     "time"
+     "strings"
+     "log"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -29,6 +30,32 @@ func NewServer(router *raftstore.Router, s *store.TitanStore) *Server {
 		store:  s,
 	}
 }
+
+// 辅助：获取 Peer 以进行 Epoch 检查
+func (s *Server) getPeer(regionID uint64) (*raftstore.Peer, error) {
+	peer := s.router.GetLocalPeer(regionID).(*raftstore.Peer)
+	if peer == nil {
+		return nil, status.Error(codes.NotFound, "region not found on this store")
+	}
+	return peer, nil
+}
+
+// 辅助：Epoch 检查
+func (s *Server) checkEpoch(ctx context.Context, regionID uint64, reqEpoch *titankvpb.RegionEpoch) error {
+	peer, err := s.getPeer(regionID)
+	if err != nil {
+		return err
+	}
+	
+	// 【修改】直接传 titankvpb.RegionEpoch，不要转 pdpb
+	// 如果你的 Peer.CheckEpoch 定义是接收 *pdpb.RegionEpoch，那你应该去改 Peer
+	// 让我们假设 Peer 用的是 titankvpb (因为 Peer.region 是 titankvpb.Region)
+	if err := peer.CheckEpoch(reqEpoch); err != nil {
+		return status.Error(codes.Aborted, "EpochNotMatch")
+	}
+	return nil
+}
+
 
 func (s *Server) Put(ctx context.Context, req *titankvpb.PutRequest) (*titankvpb.PutResponse, error) {
 	if len(req.Key) == 0 {
@@ -119,18 +146,13 @@ func (s *Server) Get(ctx context.Context, req *titankvpb.GetRequest) (*titankvpb
     if peer == nil {
         return nil, status.Error(codes.NotFound, "region lost during read")
     }
+
     
-    ticker := time.NewTicker(time.Millisecond)
-    defer ticker.Stop()
-    
-    for peer.GetAppliedIndex() < safeIndex {
-        select {
-        case <-ctx.Done():
-            return nil, status.Error(codes.DeadlineExceeded, "wait applied timeout")
-        case <-ticker.C:
-            // continue polling
-        }
+    // 【修改】调用 Peer 的高效等待接口
+    if err := peer.WaitApplied(ctx, safeIndex); err != nil {
+        return nil, status.Error(codes.DeadlineExceeded, "wait applied timeout")
     }
+
 
     // =========================================================
     // Phase 2: MVCC Read (Snapshot Read)
@@ -306,73 +328,74 @@ func (s *Server) BatchRaft(stream titankvpb.TitanKV_BatchRaftServer) error {
 }
 
 func (s *Server) Prewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
-    // 1. 参数校验
-    if len(req.Mutations) == 0 {
-        return &titankvpb.PrewriteResponse{}, nil
-    }
-    
-    if req.Context != nil {
-        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
-            return nil, status.Error(codes.Aborted, "EpochNotMatch")
-        }
-    }
+	// log.Println("!!! SERVER RECEIVED PREWRITE !!!")
+	if req.Context == nil {
+		return nil, status.Error(codes.InvalidArgument, "missing context")
+	}
+	
+	// 1. 检查 Epoch
+	if err := s.checkEpoch(ctx, req.Context.RegionId, req.Context.RegionEpoch); err != nil {
+		return nil, err
+	}
 
-    regionID := req.Context.RegionId
+	regionID := req.Context.RegionId
 
-    // 【关键】对所有 Key 进行 Region 编码
-    // 我们不能直接修改 req.Mutations (会影响原数据)，需要拷贝一份
-    var encodedMutations []*titankvpb.Mutation
-    
-    for _, m := range req.Mutations {
-        // DataKey = z{RegionID}_{UserKey}
-        encKey := raftstore.DataKey(regionID, m.Key)
-        
-        encodedMutations = append(encodedMutations, &titankvpb.Mutation{
-            Op:    m.Op,
-            Key:   encKey, // 传入编码后的 Key
-            Value: m.Value,
-        })
-    }
-    
-    // Primary Key 也要编码
-    encPrimary := raftstore.DataKey(regionID, req.PrimaryKey)
-    // 3. 调用 Store
-    err := s.store.Prewrite(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl)
-    
-    if err != nil {
-        // C++ 层返回 "Key is locked" 字符串
-        if strings.Contains(err.Error(), "Key is locked") {
-            // 返回 Aborted + KeyLocked
-            // 生产环境应该返回结构化的 KeyError，这里简化为 Error 字符串匹配
-            return &titankvpb.PrewriteResponse{Error: "KeyLocked"}, nil
-        }
-        return &titankvpb.PrewriteResponse{Error: err.Error()}, nil
-    }
+	// 2. 编码 Keys (Multi-Raft 隔离)
+	var encodedMutations []*titankvpb.Mutation
+	for _, m := range req.Mutations {
+		encKey := raftstore.DataKey(regionID, m.Key)
+		encodedMutations = append(encodedMutations, &titankvpb.Mutation{
+			Op:    m.Op,
+			Key:   encKey,
+			Value: m.Value,
+		})
+	}
+	
+	// 【修复】使用编码后的 Primary Key
+	encPrimary := raftstore.DataKey(regionID, req.PrimaryKey)
 
-    return &titankvpb.PrewriteResponse{}, nil
+	// 3. 调用 Store
+	// log.Printf("[Server] Calling Store.Prewrite...")
+	err := s.store.Prewrite(encodedMutations, encPrimary, req.StartTs, req.LockTtl)
+	
+	if err != nil {
+		// 解析错误
+		log.Printf("[Server] Store.Prewrite failed: %v", err)
+		if strings.Contains(err.Error(), "Key is locked") {
+			return &titankvpb.PrewriteResponse{Error: "KeyLocked"}, nil
+		}
+		// 还可以处理 WriteConflict
+		return &titankvpb.PrewriteResponse{Error: err.Error()}, nil
+	} else {
+        // log.Printf("[Server] Store.Prewrite success.")
+     }
+
+	return &titankvpb.PrewriteResponse{}, nil
 }
 
 func (s *Server) Commit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
-    // 1. 路由检查 (Epoch)
-    if req.Context != nil {
-        if err := s.raftNode.CheckEpoch(toPdpbEpoch(req.Context.RegionEpoch)); err != nil {
-            return nil, status.Error(codes.Aborted, "EpochNotMatch")
-        }
-    }
-    regionID := req.Context.RegionId
+	if req.Context == nil {
+		return nil, status.Error(codes.InvalidArgument, "missing context")
+	}
 
-    // 【关键】对 Key 进行 Region 编码
-    var encodedKeys [][]byte
-    for _, k := range req.Keys {
-        encodedKeys = append(encodedKeys, raftstore.DataKey(regionID, k))
-    }
-    // 2. 调用 Store
-    err := s.store.Commit(req.Keys, req.StartTs, req.CommitTs)
-    if err != nil {
-        // 如果是 LockNotFound，可能需要特殊处理（Retryable?）
-        // 暂时直接返回 Error
-        return &titankvpb.CommitResponse{Error: err.Error()}, nil
-    }
+	// 1. 检查 Epoch
+	if err := s.checkEpoch(ctx, req.Context.RegionId, req.Context.RegionEpoch); err != nil {
+		return nil, err
+	}
 
-    return &titankvpb.CommitResponse{}, nil
+	regionID := req.Context.RegionId
+
+	// 2. 编码 Keys
+	var encodedKeys [][]byte
+	for _, k := range req.Keys {
+		encodedKeys = append(encodedKeys, raftstore.DataKey(regionID, k))
+	}
+
+	// 3. 调用 Store
+	err := s.store.Commit(encodedKeys, req.StartTs, req.CommitTs)
+	if err != nil {
+		return &titankvpb.CommitResponse{Error: err.Error()}, nil
+	}
+
+	return &titankvpb.CommitResponse{}, nil
 }

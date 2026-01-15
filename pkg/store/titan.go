@@ -10,8 +10,11 @@ import "C"
 import (
 	"errors"
 	"unsafe"
+	"log"
 	"path/filepath"
 	"strings"
+
+	"titankv/api/titankvpb"
 )
 
 var ErrKeyNotFound = errors.New("key not found")
@@ -415,8 +418,18 @@ func (s *TitanStore) DeleteCF(cf CFType, key []byte, ts uint64) error {
 }
 
 func (s *TitanStore) Prewrite(mutations []*titankvpb.Mutation, primary []byte, startTS uint64, ttl uint64) error {
+    log.Printf("[Store] Invoking CGO titan_mvcc_prewrite...")
     count := len(mutations)
     if count == 0 { return nil }
+
+    // 用于收集所有分配的 C 内存指针，最后统一释放
+    // 这一点非常重要，否则会导致严重的内存泄漏
+    var ptrsToFree []unsafe.Pointer
+    defer func() {
+        for _, ptr := range ptrsToFree {
+            C.free(ptr)
+        }
+    }()
 
     // 1. 分配 C 数组
     // sizeof(titan_mutation_t) 可以在 C 中获取，但在 Go 中我们通常通过 C.titan_mutation_t 访问
@@ -429,29 +442,77 @@ func (s *TitanStore) Prewrite(mutations []*titankvpb.Mutation, primary []byte, s
     // 为了绝对安全和简单，我们这里不做深拷贝，而是直接传指针，因为 C++ 端会拷贝数据。
     // 只要 C++ 端不持有这些指针超过函数返回，就是安全的。
     
-    for i, m := range mutations {
-        cMutations[i].op = C.int(m.Op)
-        if len(m.Key) > 0 {
-            cMutations[i].key = (*C.char)(unsafe.Pointer(&m.Key[0]))
-            cMutations[i].klen = C.size_t(len(m.Key))
-        }
-        if len(m.Value) > 0 {
-            cMutations[i].value = (*C.char)(unsafe.Pointer(&m.Value[0]))
-            cMutations[i].vlen = C.size_t(len(m.Value))
-        }
-    }
+    //for i, m := range mutations {
+        //cMutations[i].op = C.int(m.Op)
+        //if len(m.Key) > 0 {
+            //cMutations[i].key = (*C.char)(unsafe.Pointer(&m.Key[0]))
+            //cMutations[i].klen = C.size_t(len(m.Key))
+        //}
+        //if len(m.Value) > 0 {
+           // cMutations[i].value = (*C.char)(unsafe.Pointer(&m.Value[0]))
+            //cMutations[i].vlen = C.size_t(len(m.Value))
+       // }
+   // }
     
     // Primary Key
+   // var pKey *C.char
+    //if len(primary) > 0 {
+        // = (*C.char)(unsafe.Pointer(&primary[0]))
+    //}
+
+    // 2. 填充数据 (把数据拷贝到 C 内存)
+    for i, m := range mutations {
+        cMutations[i].op = C.int(m.Op)
+
+        // 处理 Key
+        if len(m.Key) > 0 {
+            // C.CBytes 会在 C 堆上 malloc 内存并拷贝数据
+            cKeyPtr := C.CBytes(m.Key)
+            cMutations[i].key = (*C.char)(cKeyPtr)
+            cMutations[i].klen = C.size_t(len(m.Key))
+            // 加入释放列表
+            ptrsToFree = append(ptrsToFree, cKeyPtr)
+        } else {
+            cMutations[i].key = nil
+            cMutations[i].klen = 0
+        }
+
+        // 处理 Value
+        if len(m.Value) > 0 {
+            cValPtr := C.CBytes(m.Value)
+            cMutations[i].value = (*C.char)(cValPtr)
+            cMutations[i].vlen = C.size_t(len(m.Value))
+            // 加入释放列表
+            ptrsToFree = append(ptrsToFree, cValPtr)
+        } else {
+            cMutations[i].value = nil
+            cMutations[i].vlen = 0
+        }
+    }
+
+    // 3. 处理 Primary Key
     var pKey *C.char
+    var pKeyLen C.size_t
     if len(primary) > 0 {
-        pKey = (*C.char)(unsafe.Pointer(&primary[0]))
+        pKeyPtr := C.CBytes(primary)
+        pKey = (*C.char)(pKeyPtr)
+        pKeyLen = C.size_t(len(primary))
+        // 加入释放列表
+        ptrsToFree = append(ptrsToFree, pKeyPtr)
     }
 
     // 3. 调用 C 接口
     var cErr *C.char
-    C.titan_mvcc_prewrite(s.db, &cMutations[0], C.int(count), 
-                          pKey, C.size_t(len(primary)), 
-                          C.uint64_t(startTS), C.uint64_t(ttl), &cErr)
+	C.titan_mvcc_prewrite(
+        s.db, 
+        &cMutations[0], 
+        C.int(count),
+        pKey, 
+        pKeyLen,
+        C.uint64_t(startTS), 
+        C.uint64_t(ttl), 
+        &cErr,
+    	)
 
     if cErr != nil {
         defer C.titan_free(unsafe.Pointer(cErr))
@@ -464,16 +525,64 @@ func (s *TitanStore) Commit(keys [][]byte, startTS, commitTS uint64) error {
     count := len(keys)
     if count == 0 { return nil }
 
-    // 构造 C 数组
-    cKeys := make([]*C.char, count)
-    cLens := make([]C.size_t, count)
+    // 1. 分配 C 端的指针数组 (char**) 和长度数组 (size_t*)
+    // 这块内存由 C 管理（手动 free），Go GC 不会动它
+    cKeysPtr := C.malloc(C.size_t(count) * C.size_t(unsafe.Sizeof(uintptr(0))))
+    cLensPtr := C.malloc(C.size_t(count) * C.size_t(unsafe.Sizeof(C.size_t(0))))
+    
+    defer C.free(cKeysPtr)
+    defer C.free(cLensPtr)
+
+    // 将 void* 转换为切片以便操作 (Go trick)
+    // 注意：这里需要非常小心，或者我们可以不用切片，直接指针运算
+    // 简单起见，我们用 SliceHeader 或者简单的指针偏移
+    // 但为了安全，最推荐的做法是：在循环里分别调用 Commit？不，那样失去了 Batch。
+    
+    // 让我们用更安全的转换方式：
+    // 创建一个 Go slice 映射到 C 内存 (为了赋值)
+    // 这是一个 unsafe 操作，但只要我们不让 GC 移动它就行。
+    // 其实，我们可以用一个临时的 Go slice，然后传给 C？不，报错就是因为 Go slice 里的指针。
+    
+    // --- 最佳修复：深拷贝 Key 到 C 内存 ---
+    // 虽然有拷贝开销，但这绝对安全，且解决了 "Go pointer to unpinned Go pointer"
+    
+    // 我们需要构建两个 C 数组：
+    // char** keys_array
+    // size_t* lens_array
+    
+    // 使用 Slice 辅助构造，最后再复制到 C 内存太麻烦。
+    // 我们直接在 C++ 侧改接口？不。
+    
+    // 我们使用一个临时的 Go slice 存储 C 指针
+    tempKeys := make([]*C.char, count)
+    tempLens := make([]C.size_t, count)
+    
     for i, k := range keys {
-        cKeys[i] = (*C.char)(unsafe.Pointer(&k[0]))
-        cLens[i] = C.size_t(len(k))
+        // 深拷贝 Key 到 C 内存
+        // C.CBytes 返回的是 unsafe.Pointer，需要转为 *C.char
+        // 注意：CBytes 会 malloc，我们需要在函数结束时 free
+        p := (*C.char)(C.CBytes(k))
+        tempKeys[i] = p
+        tempLens[i] = C.size_t(len(k))
     }
+    
+    // 注册 cleanup
+    defer func() {
+        for _, p := range tempKeys {
+            C.free(unsafe.Pointer(p))
+        }
+    }()
+
+    // 现在 tempKeys 是一个 Go slice，里面存的是 C 的指针 (非 Go pointer)。
+    // 我们可以安全地把 &tempKeys[0] 传给 C 吗？
+    // 是的！因为 slice 本身在 Go 栈/堆上，传它的地址给 C 是允许的（只要它里面的元素不是指向 Go 内存的指针）。
+    // 现在里面的元素指向的是 C 内存，所以是安全的。
 
     var cErr *C.char
-    C.titan_mvcc_commit(s.db, &cKeys[0], &cLens[0], C.int(count),
+    C.titan_mvcc_commit(s.db, 
+                        &tempKeys[0], // char**
+                        &tempLens[0], // size_t*
+                        C.int(count),
                         C.uint64_t(startTS), C.uint64_t(commitTS), &cErr)
 
     if cErr != nil {

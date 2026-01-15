@@ -26,6 +26,8 @@ const (
 	TitanKV_UpdateConfig_FullMethodName   = "/titankv.TitanKV/UpdateConfig"
 	TitanKV_BatchRaft_FullMethodName      = "/titankv.TitanKV/BatchRaft"
 	TitanKV_StreamSnapshot_FullMethodName = "/titankv.TitanKV/StreamSnapshot"
+	TitanKV_Prewrite_FullMethodName       = "/titankv.TitanKV/Prewrite"
+	TitanKV_Commit_FullMethodName         = "/titankv.TitanKV/Commit"
 )
 
 // TitanKVClient is the client API for TitanKV service.
@@ -45,6 +47,8 @@ type TitanKVClient interface {
 	// 双向流：Client 发 Batch，Server 回 Response (可以不回)
 	BatchRaft(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BatchRaftMessage, RaftResponse], error)
 	StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error)
+	Prewrite(ctx context.Context, in *PrewriteRequest, opts ...grpc.CallOption) (*PrewriteResponse, error)
+	Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitResponse, error)
 }
 
 type titanKVClient struct {
@@ -131,6 +135,26 @@ func (c *titanKVClient) StreamSnapshot(ctx context.Context, opts ...grpc.CallOpt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TitanKV_StreamSnapshotClient = grpc.ClientStreamingClient[SnapshotChunk, RaftResponse]
 
+func (c *titanKVClient) Prewrite(ctx context.Context, in *PrewriteRequest, opts ...grpc.CallOption) (*PrewriteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewriteResponse)
+	err := c.cc.Invoke(ctx, TitanKV_Prewrite_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titanKVClient) Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitResponse)
+	err := c.cc.Invoke(ctx, TitanKV_Commit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TitanKVServer is the server API for TitanKV service.
 // All implementations must embed UnimplementedTitanKVServer
 // for forward compatibility.
@@ -148,6 +172,8 @@ type TitanKVServer interface {
 	// 双向流：Client 发 Batch，Server 回 Response (可以不回)
 	BatchRaft(grpc.BidiStreamingServer[BatchRaftMessage, RaftResponse]) error
 	StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error
+	Prewrite(context.Context, *PrewriteRequest) (*PrewriteResponse, error)
+	Commit(context.Context, *CommitRequest) (*CommitResponse, error)
 	mustEmbedUnimplementedTitanKVServer()
 }
 
@@ -178,6 +204,12 @@ func (UnimplementedTitanKVServer) BatchRaft(grpc.BidiStreamingServer[BatchRaftMe
 }
 func (UnimplementedTitanKVServer) StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamSnapshot not implemented")
+}
+func (UnimplementedTitanKVServer) Prewrite(context.Context, *PrewriteRequest) (*PrewriteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Prewrite not implemented")
+}
+func (UnimplementedTitanKVServer) Commit(context.Context, *CommitRequest) (*CommitResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Commit not implemented")
 }
 func (UnimplementedTitanKVServer) mustEmbedUnimplementedTitanKVServer() {}
 func (UnimplementedTitanKVServer) testEmbeddedByValue()                 {}
@@ -304,6 +336,42 @@ func _TitanKV_StreamSnapshot_Handler(srv interface{}, stream grpc.ServerStream) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TitanKV_StreamSnapshotServer = grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]
 
+func _TitanKV_Prewrite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewriteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitanKVServer).Prewrite(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitanKV_Prewrite_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitanKVServer).Prewrite(ctx, req.(*PrewriteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TitanKV_Commit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitanKVServer).Commit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitanKV_Commit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitanKVServer).Commit(ctx, req.(*CommitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TitanKV_ServiceDesc is the grpc.ServiceDesc for TitanKV service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -330,6 +398,14 @@ var TitanKV_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateConfig",
 			Handler:    _TitanKV_UpdateConfig_Handler,
+		},
+		{
+			MethodName: "Prewrite",
+			Handler:    _TitanKV_Prewrite_Handler,
+		},
+		{
+			MethodName: "Commit",
+			Handler:    _TitanKV_Commit_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
