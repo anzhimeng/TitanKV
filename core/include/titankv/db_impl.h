@@ -49,6 +49,8 @@ class DBImpl : public DB {
                             uint64_t start_ts, 
                             uint64_t commit_ts) override;
   Status MvccGet(const Slice& key, uint64_t start_ts, std::string* value) override;
+  Status CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t current_ts,
+                                int* action, uint64_t* commit_ts) override;
   
   // 【新增】创建指定 CF 的迭代器
  Iterator* NewIterator(const ReadOptions& options, CFType cf) override;

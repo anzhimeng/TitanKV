@@ -28,6 +28,7 @@ const (
 	TitanKV_StreamSnapshot_FullMethodName = "/titankv.TitanKV/StreamSnapshot"
 	TitanKV_Prewrite_FullMethodName       = "/titankv.TitanKV/Prewrite"
 	TitanKV_Commit_FullMethodName         = "/titankv.TitanKV/Commit"
+	TitanKV_CheckTxnStatus_FullMethodName = "/titankv.TitanKV/CheckTxnStatus"
 )
 
 // TitanKVClient is the client API for TitanKV service.
@@ -49,6 +50,7 @@ type TitanKVClient interface {
 	StreamSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, RaftResponse], error)
 	Prewrite(ctx context.Context, in *PrewriteRequest, opts ...grpc.CallOption) (*PrewriteResponse, error)
 	Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitResponse, error)
+	CheckTxnStatus(ctx context.Context, in *CheckTxnStatusRequest, opts ...grpc.CallOption) (*CheckTxnStatusResponse, error)
 }
 
 type titanKVClient struct {
@@ -155,6 +157,16 @@ func (c *titanKVClient) Commit(ctx context.Context, in *CommitRequest, opts ...g
 	return out, nil
 }
 
+func (c *titanKVClient) CheckTxnStatus(ctx context.Context, in *CheckTxnStatusRequest, opts ...grpc.CallOption) (*CheckTxnStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckTxnStatusResponse)
+	err := c.cc.Invoke(ctx, TitanKV_CheckTxnStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TitanKVServer is the server API for TitanKV service.
 // All implementations must embed UnimplementedTitanKVServer
 // for forward compatibility.
@@ -174,6 +186,7 @@ type TitanKVServer interface {
 	StreamSnapshot(grpc.ClientStreamingServer[SnapshotChunk, RaftResponse]) error
 	Prewrite(context.Context, *PrewriteRequest) (*PrewriteResponse, error)
 	Commit(context.Context, *CommitRequest) (*CommitResponse, error)
+	CheckTxnStatus(context.Context, *CheckTxnStatusRequest) (*CheckTxnStatusResponse, error)
 	mustEmbedUnimplementedTitanKVServer()
 }
 
@@ -210,6 +223,9 @@ func (UnimplementedTitanKVServer) Prewrite(context.Context, *PrewriteRequest) (*
 }
 func (UnimplementedTitanKVServer) Commit(context.Context, *CommitRequest) (*CommitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Commit not implemented")
+}
+func (UnimplementedTitanKVServer) CheckTxnStatus(context.Context, *CheckTxnStatusRequest) (*CheckTxnStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckTxnStatus not implemented")
 }
 func (UnimplementedTitanKVServer) mustEmbedUnimplementedTitanKVServer() {}
 func (UnimplementedTitanKVServer) testEmbeddedByValue()                 {}
@@ -372,6 +388,24 @@ func _TitanKV_Commit_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitanKV_CheckTxnStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckTxnStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitanKVServer).CheckTxnStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitanKV_CheckTxnStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitanKVServer).CheckTxnStatus(ctx, req.(*CheckTxnStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TitanKV_ServiceDesc is the grpc.ServiceDesc for TitanKV service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -406,6 +440,10 @@ var TitanKV_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Commit",
 			Handler:    _TitanKV_Commit_Handler,
+		},
+		{
+			MethodName: "CheckTxnStatus",
+			Handler:    _TitanKV_CheckTxnStatus_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

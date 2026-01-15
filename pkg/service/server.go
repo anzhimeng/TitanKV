@@ -399,3 +399,17 @@ func (s *Server) Commit(ctx context.Context, req *titankvpb.CommitRequest) (*tit
 
 	return &titankvpb.CommitResponse{}, nil
 }
+
+func (s *Server) CheckTxnStatus(ctx context.Context, req *titankvpb.CheckTxnStatusRequest) (*titankvpb.CheckTxnStatusResponse, error) {
+    // 路由检查...
+    
+    action, commitTS, err := s.store.CheckTxnStatus(req.PrimaryKey, req.LockTs, req.CurrentTs)
+    if err != nil {
+        return nil, err
+    }
+    
+    return &titankvpb.CheckTxnStatusResponse{
+        Action:   titankvpb.CheckTxnStatusResponse_Action(action),
+        CommitTs: commitTS,
+    }, nil
+}

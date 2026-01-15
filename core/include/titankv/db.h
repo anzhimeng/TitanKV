@@ -100,6 +100,11 @@ class DB {
   // start_ts: 事务 StartTS
   // value: 输出参数
   virtual Status MvccGet(const Slice& key, uint64_t start_ts, std::string* value) = 0;
+  // 检查事务状态
+  // 返回 Action 和 CommitTS
+  // 这是一个 Read-Modify-Write 操作，必须加锁
+  virtual Status CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t current_ts,
+                                int* action, uint64_t* commit_ts) = 0;
 };
 
 } // namespace titankv

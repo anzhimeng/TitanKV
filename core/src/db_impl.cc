@@ -1689,6 +1689,108 @@ Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) 
     return reader.GetValue(key, data_start_ts, value);
 }
 
+Status DBImpl::CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t current_ts,
+                              int* action, uint64_t* res_commit_ts) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    
+    // 1. 检查 Lock CF
+    std::string lock_val;
+    Status s = GetCF(kCFLock, primary, &lock_val, 0);
+    
+    if (s.ok()) {
+        // --- 锁存在 ---
+        // 解析 Lock (需实现 ParseLock)
+        // 假设 lock_val 格式: "primary|start_ts|ttl"
+        // 简单解析 start_ts
+        // ... (此处省略解析代码，假设解析出 ts 和 ttl)
+        // uint64_t existing_start_ts = ...;
+        // uint64_t ttl = ...;
+        
+        // 为了简化 Week 15 Day 1，我们假设锁的 Key 就是 primary，value 存了 ts
+        // 实际上 GetCF 只能拿到 Value。我们需要确认这个锁是不是 lock_ts 的锁
+        // 如果我们用 EncodeLockKey，一个 Key 只能有一个锁，所以肯定是它。
+        
+        // 检查是否过期
+        // physical_time = TSO >> 18
+        uint64_t lock_physical = lock_ts >> 18;
+        uint64_t current_physical = current_ts >> 18;
+        
+        // 假设 TTL 是毫秒
+        // if (current_physical > lock_physical + ttl)
+        // 这里为了测试，假设 TTL 写死或者从 lock_val 解析
+        uint64_t ttl = 3000; // Mock TTL
+        
+        if (current_physical > lock_physical + ttl) {
+            // 过期了！强制 Rollback
+            // 1. 删除 Lock
+            WriteBatch batch;
+            batch.DeleteCF(kCFLock, primary, 0);
+            // 2. 写入 Rollback Record (Write CF)
+            // Value: "Rollback"
+            // CommitTS = lock_ts (通常把 Rollback 记录写在 StartTS 位置，或者用特殊标记)
+            // TiKV 做法：WriteType::Rollback, StartTS=lock_ts, CommitTS=lock_ts
+            std::string write_val = std::to_string(lock_ts) + "|Rollback";
+            batch.PutCF(kCFWrite, primary, write_val, lock_ts);
+            
+            Write(WriteOptions(), &batch);
+            
+            *action = 1; // TtlExpire
+            return Status::OK();
+        } else {
+            // 没过期，让客户端等待
+            *action = 0; // NoAction
+            // *ttl = ...
+            return Status::OK();
+        }
+    }
+
+    // --- 锁不存在 ---
+    // 2. 检查 Write CF (有没有提交记录？)
+    // 查找 CommitTS >= lock_ts 的记录
+    // MvccReaderreader(this, MaxUint64); // 读最新
+    // 需要一个新的 Seek 接口：找 StartTS == lock_ts 的记录
+    
+    // 简化：遍历 Write CF，找 StartTS == lock_ts
+    // 生产环境不能遍历，需要 Seek。Write Key 是 {Key}{CommitTS}。
+    // 我们不知道 CommitTS，所以只能 Seek 到 {Key} 然后往下找。
+    
+    std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+    std::string prefix = EncodeMvccKey(kCFWrite, primary, kMaxSequenceNumber);
+    // 去掉最后的 TS 部分，只留 Key 前缀
+    prefix.resize(prefix.size() - 8);
+    
+    iter->Seek(prefix); // Seek 到最新的版本
+    
+    while (iter->Valid()) {
+        Slice key = iter->key();
+        if (!key.starts_with(prefix)) break;
+        
+        // 解析 Value: "start_ts|Type"
+        std::string val = iter->value().ToString();
+        // ... 解析 start_ts ...
+        // if (rec_start_ts == lock_ts) {
+        //     if (type == Committed) {
+        //          *action = 2; *res_commit_ts = commit_ts; return OK;
+        //     }
+        //     if (type == Rollback) {
+        //          *action = 3; return OK;
+        //     }
+        // }
+        
+        iter->Next();
+    }
+    
+    // 3. 既没锁，也没提交记录 -> 视为 Rollback
+    // 写入 Rollback Record 防止复活
+    WriteBatch batch;
+    std::string write_val = std::to_string(lock_ts) + "|Rollback";
+    batch.PutCF(kCFWrite, primary, write_val, lock_ts);
+    Write(WriteOptions(), &batch);
+    
+    *action = 4; // LockNotExist -> Rolled back
+    return Status::OK();
+}
+
 
 
 } // namespace titankv

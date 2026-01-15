@@ -20,9 +20,30 @@ service TitanKV {
     rpc StreamSnapshot(stream SnapshotChunk) returns (RaftResponse);
     rpc Prewrite(PrewriteRequest) returns (PrewriteResponse);
     rpc Commit(CommitRequest) returns (CommitResponse);
+    rpc CheckTxnStatus(CheckTxnStatusRequest) returns (CheckTxnStatusResponse);
 }
 
+message CheckTxnStatusRequest {
+    RegionContext context = 1;
+    bytes primary_key = 2;
+    uint64 lock_ts = 3;     // 锁的 StartTS
+    uint64 current_ts = 4;  // 当前读请求的 StartTS (用于判断 TTL)
+    bool rollback_if_not_exist = 5; // 如果没找到任何记录，是否强制回滚
+}
 
+message CheckTxnStatusResponse {
+    // 事务最终状态
+    enum Action {
+        NoAction = 0;   // 还在运行，TTL 未过期
+        TtlExpire = 1;  // 过期了，已被我 Rollback
+        Commit = 2;     // 已经提交了，CommitTS 在下面
+        Rollback = 3;   // 已经回滚了
+        LockNotExist = 4; // 锁不存在（且没写 Rollback 记录，通常伴随 Action=Rollback）
+    }
+    Action action = 1;
+    uint64 commit_ts = 2; // 如果是 Commit 状态
+    uint64 lock_ttl = 3;  // 如果是 NoAction，返回剩余 TTL
+}
 
 
 message RegionEpoch {
