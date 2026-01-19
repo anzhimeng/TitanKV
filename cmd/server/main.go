@@ -144,10 +144,24 @@ func main() {
 			})
 			cancel()
 			if err != nil {
-				log.Printf("Store heartbeat failed: %v", err)
+				//log.Printf("Store heartbeat failed: %v", err)
 			}
 		}
 	}()
+
+    // 启动 MVCC GC 线程 (每 1 分钟清理一次 10 分钟前的数据)
+    go func() {
+        ticker := time.NewTicker(1 * time.Minute)
+        for range ticker.C {
+            // 【Hack】强制使用 250 作为 SafePoint
+            safePoint := uint64(250) 
+            
+            log.Printf("[GC] Starting MVCC GC. SafePoint: %d", safePoint)
+            if err := db.GC(safePoint); err != nil {
+                log.Printf("[GC] Failed: %v", err)
+            }
+        }
+    }()
 
 	// 5. 初始化 RaftStore (Multi-Raft 核心)
 	log.Printf("Starting RaftStore (Node %d)...", *nodeID)

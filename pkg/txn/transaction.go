@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"log"
 
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
 	"titankv/pkg/client" // Week 8 实现的 Client
 
+	"google.golang.org/grpc/codes"
+     "google.golang.org/grpc/status"
 	"golang.org/x/sync/errgroup" 
 )
 
@@ -137,7 +140,7 @@ func (txn *Transaction) groupMutations(mutations []*titankvpb.Mutation) (map[uin
 }
 
 func (txn *Transaction) Commit(ctx context.Context) error {
-	// 1. 转换 Mutations
+	// 1. 转换 Mutations (Internal struct -> Proto)
 	var pbMutations []*titankvpb.Mutation
 	for _, m := range txn.mutations {
 		op := titankvpb.Mutation_Put
@@ -158,8 +161,9 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 	// 2. 选择 Primary Key
 	primary := pbMutations[0].Key
 
-	// 3. 第一阶段：Prewrite (带重试和锁清理)
-	// 使用无限循环来处理 ResolveLock 重试
+	// 3. 第一阶段：Prewrite (带重试、锁清理和 Epoch 刷新)
+	// 使用无限循环来处理 ResolveLock 和 Epoch 重试
+	log.Printf("[Txn] Start Commit. Mutations: %d", len(pbMutations))
 	for {
 		batches, err := txn.groupMutations(pbMutations)
 		if err != nil { return err }
@@ -167,9 +171,10 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 		g, groupCtx := errgroup.WithContext(ctx)
 		
 		// 错误通道：用于收集 KeyLocked 错误
-		// buffer 大小 = region 数量，足以容纳所有并发错误
 		lockErrCh := make(chan *titankvpb.LockInfo, len(batches))
-		
+		// 错误通道：用于收集 Epoch 错误信号
+		epochErrCh := make(chan bool, 1)
+
 		for _, batch := range batches {
 			batch := batch
 			g.Go(func() error {
@@ -183,16 +188,16 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 					StartTs:    txn.StartTS,
 					LockTtl:    3000,
 				}
-				
-				// 网络重试循环 (这是针对网络错误的)
+				log.Printf("[Txn] Sending Prewrite to Region %d. Epoch: %v", 
+                    batch.region.Id, batch.region.RegionEpoch)
+				// 网络重试循环
 				var lastErr error
 				for i := 0; i < 3; i++ {
 					resp, err := txn.client.SendPrewrite(groupCtx, req)
 					if err == nil {
 						// 检查业务错误
 						if resp.Error != "" {
-							// 【新增】如果是 KeyLocked，收集 LockInfo 并返回 nil (非 Fatal)
-							// 这样其他正常的 Prewrite 可以继续，我们在 g.Wait 后统一处理
+							// A. 如果是 KeyLocked，收集 LockInfo 并返回 nil (非 Fatal)
 							if resp.KeyError != nil {
 								lockErrCh <- resp.KeyError.LockInfo
 								return nil 
@@ -201,6 +206,26 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 						}
 						return nil // 成功
 					}
+					
+					// B. 检查 gRPC 错误中的 EpochNotMatch (Aborted)
+					st, _ := status.FromError(err)
+					if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
+					log.Printf("[Txn] Prewrite Err: %v. Code: %s, Msg: %s", err, st.Code(), st.Message())
+						log.Printf("[Txn] Caught EpochNotMatch! Invalidating cache...")
+						// 1. 刷新该批次所有 Key 的缓存
+						for _, m := range batch.muts {
+							txn.client.GetRegionCache().Invalidate(m.Key)
+						}
+						// 2. 发送信号
+						select {
+						case epochErrCh <- true:
+						log.Printf("[Txn] Sent epoch signal")
+						default:
+						}
+						// 3. 返回错误中断 g.Wait
+						return err
+					}
+
 					lastErr = err
 					time.Sleep(50 * time.Millisecond)
 				}
@@ -209,7 +234,17 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 		}
 
 		if err := g.Wait(); err != nil {
-			return err // 网络错误或非锁的业务错误，直接失败
+			// 检查是否有 Epoch 错误
+			select {
+			case <-epochErrCh:
+				// log.Printf("[Txn] Prewrite EpochNotMatch. Retrying...")
+				time.Sleep(50 * time.Millisecond)
+				continue // 重新 Group，重新 Prewrite
+			default:
+			log.Printf("[Txn] Prewrite failed permanently: %v", err)
+				// 是真正的网络错误
+				return err
+			}
 		}
 		
 		close(lockErrCh)
@@ -218,7 +253,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 		var lockInfo *titankvpb.LockInfo
 		for l := range lockErrCh {
 			lockInfo = l
-			break // 处理第一个遇到的锁即可
+			break 
 		}
 		
 		if lockInfo != nil {
@@ -229,9 +264,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 			if err != nil { return err }
 			
 			if ok {
-				// 成功清理了锁，立即重试 Prewrite (continue loop)
-				// 注意：这里是全量重试。更优的是只重试失败的 Region。
-				// 但全量重试是安全的（Prewrite 是幂等的）。
+				// 成功清理了锁，立即重试 Prewrite
 				time.Sleep(50 * time.Millisecond)
 				continue
 			} else {
@@ -252,16 +285,45 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 	}
 
 	// 5. 第二阶段：Commit Primary
+	// 只有 Primary Key 必须同步提交，决定事务状态
 	commitReq := &titankvpb.CommitRequest{
 		StartTs:    txn.StartTS,
 		CommitTs:   commitTS,
 		Keys:       [][]byte{primary},
 	}
     
-	cResp, err := txn.client.SendCommit(ctx, commitReq)
-	if err != nil {
-         return err
-     }
+	// 增加重试循环处理 EpochNotMatch
+	var cResp *titankvpb.CommitResponse
+	var commitErr error
+    
+	for i := 0; i < 3; i++ {
+		cResp, commitErr = txn.client.SendCommit(ctx, commitReq)
+        
+		// 检查 RPC 错误中的 EpochNotMatch
+		if commitErr != nil {
+			st, _ := status.FromError(commitErr)
+			if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
+				txn.client.GetRegionCache().Invalidate(primary)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			break 
+		}
+        
+		// 检查业务错误
+		if cResp.Error != "" {
+			if cResp.Error == "EpochNotMatch" {
+				txn.client.GetRegionCache().Invalidate(primary)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			break 
+		}
+        
+		break // 成功
+	}
+    
+	if commitErr != nil { return commitErr }
 	if cResp.Error != "" { return fmt.Errorf("commit primary failed: %s", cResp.Error) }
 
 	// 6. 异步 Commit Secondaries
@@ -272,6 +334,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
                 secMutations = append(secMutations, pbMutations[i])
             }
             
+            // 重新 Group，防止 Secondary Keys 分布在不同 Region
             secBatches, _ := txn.groupMutations(secMutations)
             
             for _, batch := range secBatches {
@@ -287,6 +350,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
                     CommitTs: commitTS,
                     Keys:     keys,
                 }
+                // 异步提交，忽略错误 (如果失败，后续读请求会通过 ResolveLock 解决)
                 txn.client.SendCommit(context.Background(), req)
             }
 		}()
@@ -295,7 +359,6 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 	txn.committed = true
 	return nil
 }
-
 func toTitanEpoch(e *pdpb.RegionEpoch) *titankvpb.RegionEpoch {
     if e == nil {
         return nil

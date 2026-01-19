@@ -308,7 +308,7 @@ func (w *StoreWorker) removePeer(p *Peer) {
 	endKey := p.region.EndKey
 
 	go func() {
-		log.Printf("[GC] Clearing data for removed Region %d...", regionID)
+		//log.Printf("[GC] Clearing data for removed Region %d...", regionID)
 
 		// --- 清理 Data ---
 		// 构造物理范围
@@ -346,10 +346,10 @@ func (w *StoreWorker) removePeer(p *Peer) {
 			log.Printf("[GC] Failed to delete raft meta: %v", err)
 		}
 
-		log.Printf("[GC] Region %d cleanup finished.", regionID)
+		//log.Printf("[GC] Region %d cleanup finished.", regionID)
 	}()
 
-	log.Printf("Peer %d removed from Region %d (scheduled for GC)", p.peerID, p.regionID)
+	//log.Printf("Peer %d removed from Region %d (scheduled for GC)", p.peerID, p.regionID)
 }
 
 func (w *StoreWorker) AddPeer(p *Peer) {

@@ -110,6 +110,7 @@ void titan_mvcc_get(titan_db_t* db, const char* key, size_t klen, uint64_t start
 void titan_check_txn_status(titan_db_t* db, const char* pkey, size_t plen, 
                             uint64_t lock_ts, uint64_t current_ts,
                             int* action, uint64_t* commit_ts, char** err);
+void titan_mvcc_gc(titan_db_t* db, uint64_t safe_point, char** err);
 
 #ifdef __cplusplus
 }

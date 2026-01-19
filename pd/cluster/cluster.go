@@ -310,13 +310,12 @@ func (c *RaftCluster) GetRegion(key []byte) (*pdpb.Region, *pdpb.Peer) {
 
 	// 1. 从 B-Tree 查找 Region
 	r := c.regionsTree.Search(key) // 【修复】使用 regionsTree
-	if r == nil {
-		return nil, nil
-	}
-
-	// 2. 获取 Leader (直接从 RegionInfo 获取)
-	// 【修复】leaders map 已被移除，直接用 r.Leader
-	return r.Meta, r.Leader
+    if r != nil {
+        log.Printf("[PD] GetRegion Key=%s -> Region %d, Epoch: %v", string(key), r.Meta.Id, r.Meta.RegionEpoch)
+        return r.Meta, r.Leader
+    }
+    log.Printf("[PD] GetRegion Key=%s -> Not Found", string(key))
+    return nil, nil
 }
 
 // GetRegionByID

@@ -639,10 +639,12 @@ func (tr *TitanRaft) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
 	current := val.(*pdpb.Region)
 
 	if reqEpoch.Version != current.RegionEpoch.Version {
+		log.Printf("[Server] Epoch Version Mismatch! Req: %v, Curr: %v", reqEpoch, current
 		return fmt.Errorf("epoch not match: version %d != %d", reqEpoch.Version, current.RegionEpoch.Version)
 	}
 
 	if reqEpoch.ConfVer != current.RegionEpoch.ConfVer {
+		log.Printf("[Server] Epoch ConfVer Mismatch! Req: %v, Curr: %v", reqEpoch, current)
 		return fmt.Errorf("epoch not match: conf_ver %d != %d", reqEpoch.ConfVer, current.RegionEpoch.ConfVer)
 	}
 

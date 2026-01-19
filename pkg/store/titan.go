@@ -657,3 +657,13 @@ func (s *TitanStore) CheckTxnStatus(primaryKey []byte, lockTS, currentTS uint64)
     
     return int(action), uint64(commitTS), nil
 }
+
+func (s *TitanStore) GC(safePoint uint64) error {
+    var cErr *C.char
+    C.titan_mvcc_gc(s.db, C.uint64_t(safePoint), &cErr)
+    if cErr != nil {
+        defer C.titan_free(unsafe.Pointer(cErr))
+        return errors.New(C.GoString(cErr))
+    }
+    return nil
+}

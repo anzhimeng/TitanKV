@@ -43,9 +43,20 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
 
 	// 2. 缓存未命中，查 PD (RPC)
     req := &pdpb.GetRegionRequest{Key: key}
+    //log.Printf("[Client] Asking PD for key: %s", string(key))
     resp, err := c.pdClient.GetRegion(ctx, req)
+    if err == nil {
+        log.Printf("[Client] PD returned: Region %d, Epoch: %v", resp.Region.Id, resp.Region.RegionEpoch)
+    }
     if err != nil {
         return "", fmt.Errorf("PD GetRegion failed: %v", err)
+    }
+    if resp.Region == nil {
+        return "", fmt.Errorf("PD returned nil region")
+    }
+    // 如果 Leader 为空，可能是正在选举，返回错误让上层重试
+    if resp.Leader == nil {
+        return "", fmt.Errorf("no leader for region %d", resp.Region.Id)
     }
     
     // 3. 更新缓存
@@ -141,8 +152,14 @@ func (c *Client) GetTS(ctx context.Context) (uint64, error) {
 }
 
 func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
+    if len(req.Mutations) == 0 { return &titankvpb.PrewriteResponse{}, nil }
     key := req.Mutations[0].Key
-    regionID := req.Context.RegionId // Transaction 层已经填好了
+    
+    // 2. 获取 RegionID (如果有的话)
+    var regionID uint64
+    if req.Context != nil {
+        regionID = req.Context.RegionId
+    }
 
     // 填充默认 Context (如果 Transaction 层没填)
     if req.Context == nil {
@@ -184,13 +201,19 @@ func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteReques
 // 定向发送 Commit
 func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (*titankvpb.CommitResponse, error) {
     key := req.Keys[0]
-    regionID := req.Context.RegionId
+    var regionID uint64
+    if req.Context != nil {
+        regionID = req.Context.RegionId
+    }
 
     if req.Context == nil {
         req.Context = &titankvpb.RegionContext{RegionId: 1}
     }
 
-    addr, _ := c.getAddrForReq(ctx, regionID, key)
+    addr, err := c.getAddrForReq(ctx, regionID, key)
+    if addr == "" {
+        addr = "127.0.0.1:9091"
+    }
     
     conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
     if err != nil { return nil, err }
@@ -343,8 +366,10 @@ func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo)
 func (c *Client) SendCheckTxnStatus(ctx context.Context, req *titankvpb.CheckTxnStatusRequest) (*titankvpb.CheckTxnStatusResponse, error) {
     key := req.PrimaryKey
     // CheckTxnStatus 可能没传 RegionID (Resolve 逻辑里)，所以主要靠 Key
-    regionID := uint64(0)
-    if req.Context != nil { regionID = req.Context.RegionId }
+    var regionID uint64
+    if req.Context != nil {
+        regionID = req.Context.RegionId
+    }
 
     if req.Context == nil {
         req.Context = &titankvpb.RegionContext{RegionId: 1}
@@ -402,7 +427,10 @@ func (c *Client) getAddrForReq(ctx context.Context, regionID uint64, key []byte)
     
     // 2. 缓存未命中，回退到 LocateKey (这会去 PD 查并更新缓存)
     if len(key) > 0 {
-        return c.LocateLeader(ctx, key)
+        addr, err := c.LocateLeader(ctx, key)
+        if err == nil && addr != "" {
+            return addr, nil
+        }
     }
     
     // 3. 都没有，只能 Blind Guess (单机测试用)

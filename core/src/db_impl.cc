@@ -1544,9 +1544,9 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
             // 【关键修复】幂等性检查
             // 解析 Lock Value 里的 start_ts
             // 假设 lock_val 格式是 "primary|start_ts|ttl"
-            fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
-                    ToHex(m.key.data(), m.key.size()).c_str(), 
-                    lock_val.c_str());
+            //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
+                    //ToHex(m.key.data(), m.key.size()).c_str(), 
+                    //lock_val.c_str());
             // 找到第一个分隔符
             size_t first_sep = lock_val.find('|');
             if (first_sep != std::string::npos) {
@@ -1560,6 +1560,8 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
                              // 是我自己的锁！幂等成功。
                              //fprintf(stderr, "[DBImpl] Idempotent Prewrite hit.\n");
                              continue; // 跳过写入，处理下一个 Mutation
+                        }else {
+                        	//fprintf(stderr, "[DEBUG] Idempotent Fail: LockTS=%lu, MyTS=%lu\n", lock_ts, start_ts);
                         }
                     } catch (...) {}
                 }
@@ -1567,6 +1569,8 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
             // 【新增调试】打印出到底是哪个 Key 冲突了，以及 Lock 里的内容是什么
             //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
                     //m.key.c_str(), lock_val.c_str());
+            // 打印完整的二进制 lock_val
+        	  //fprintf(stderr, "[DEBUG] Lock Val Hex: %s\n", ToHex(lock_val.data(), lock_val.size()).c_str());
             return Status::Aborted("Key is locked");
         }
 
@@ -1576,7 +1580,11 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         // LockInfo 序列化 (primary + ttl + type)
         // 简单起见，我们把 start_ts 也存进去
 		std::string op_type = (m.op == Mutation::Delete) ? "Delete" : "Put";
+		std::string primary_str(primary.data(), primary.size()); 
+		//std::string lock_info = primary_str + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl);
 		std::string lock_info = primary + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl) + "|" + op_type;
+          //fprintf(stderr, "[DEBUG] Writing Lock Hex: %s\n", 
+                //ToHex(lock_info.data(), lock_info.size()).c_str());
         
         batch.PutCF(kCFLock, m.key, lock_info, 0); // PutCF 内部会 Encode
 
@@ -1586,7 +1594,7 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
 
 
     Status s = WriteLocked(WriteOptions(), &batch);
-    fprintf(stderr, "[Verify] Write done. Get result: %s\n", s.ToString().c_str());
+    //fprintf(stderr, "[Verify] Write done. Get result: %s\n", s.ToString().c_str());
     //fprintf(stderr, "[DBImpl] Write batch status: %s\n", s.ToString().c_str());
     return s;
 }
@@ -1594,8 +1602,7 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
 Status DBImpl::MvccCommit(const std::vector<std::string>& keys, 
                           uint64_t start_ts, 
                           uint64_t commit_ts) {
-    // 使用递归锁，防止 WriteLocked 内部死锁
-    fprintf(stderr, "[DEBUG-CPP] MvccCommit called.\n");
+    //fprintf(stderr, "[DEBUG-CPP] MvccCommit called.\n");
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     WriteBatch batch;
 
@@ -1604,7 +1611,7 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
         Status s = GetCF(kCFLock, key, &lock_val, 0);
         
         if (s.ok()) {
-        fprintf(stderr, "[DEBUG-CPP] Lock found, deleting...\n");
+        //fprintf(stderr, "[DEBUG-CPP] Lock found, deleting...\n");
             // =================================================
             // Case 1: 锁存在
             // =================================================
@@ -1642,7 +1649,7 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
             }
 
         } else {
-        fprintf(stderr, "[DEBUG-CPP] Lock NOT found.\n");
+        //fprintf(stderr, "[DEBUG-CPP] Lock NOT found.\n");
             // =================================================
             // Case 2: 锁不存在
             // =================================================
@@ -1682,12 +1689,12 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
 
 Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) {
     // 1. 检查 Lock (Lock CF)
-    fprintf(stderr, "[MvccGet] Checking Lock for Key: %s\n", key.ToString().c_str());
+    //fprintf(stderr, "[MvccGet] Checking Lock for Key: %s\n", key.ToString().c_str());
     std::string lock_val;
     Status s = GetCF(kCFLock, key, &lock_val, 0); 
     
     if (s.ok()) {
-        fprintf(stderr, "[MvccGet] Lock Found!\n");
+        //fprintf(stderr, "[MvccGet] Lock Found!\n");
         // 锁存在！检查锁的 StartTS 是否 <= 我的 StartTS
         // 如果 Lock.StartTS > 我的 StartTS，说明是未来的事务，我可以忽略它
         uint64_t lock_ts = ParseLockStartTs(lock_val);
@@ -1700,7 +1707,7 @@ Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) 
         }
     }
     else {
-         fprintf(stderr, "[MvccGet] Lock NOT Found. Status: %s\n", s.ToString().c_str());
+         //fprintf(stderr, "[MvccGet] Lock NOT Found. Status: %s\n", s.ToString().c_str());
     }
 
     // 2. 查找 Write (Write CF)
@@ -1712,7 +1719,7 @@ Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) 
 
     s = reader.SeekWrite(key, &commit_ts, &write_info);
     if (!s.ok()) {
-        fprintf(stderr, "[MvccGet] Write Record Not Found. Status: %s\n", s.ToString().c_str());
+        //fprintf(stderr, "[MvccGet] Write Record Not Found. Status: %s\n", s.ToString().c_str());
         
         // 【新增调试】全量扫描 Write CF，看看有没有数据
         std::unique_ptr<Iterator> debug_iter(NewIterator(ReadOptions(), kCFWrite));
@@ -1855,6 +1862,90 @@ check_write:
     Write(WriteOptions(), &batch);
 
     *action = 4; // LockNotExist -> RolledBack
+    return Status::OK();
+}
+
+Status DBImpl::MvccGC(uint64_t safe_point) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    
+    // 1. 创建 Write CF 迭代器
+    std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+    //iter->SeekToFirst();
+    std::string start_key;
+    start_key.push_back(kCFWrite); 
+    iter->Seek(start_key);
+    WriteBatch batch;
+    std::string current_user_key;
+    bool keep_next = true; // 是否保留下一个遇到的 <= SafePoint 的版本
+    uint64_t delete_count = 0;
+
+    // 遍历所有 Write 记录 (已按 Key 升序、TS 降序排列)
+    while (iter->Valid()) {
+        Slice key = iter->key(); // w{UserKey}{CommitTS}
+        if (key.empty() || key[0] != kCFWrite) {
+            break; 
+        }
+        // 解析 Key
+        // 【关键修复】NewIterator 返回的是 Internal Key！
+        // 我们需要提取 User Key (即 MVCC Key) 才能进行检查
+        Slice user_key = ExtractUserKey(key);
+        
+        // 检查前缀
+        if (user_key.empty() || user_key[0] != kCFWrite) {
+             break;
+        }
+
+        // 解析 MVCC Key
+        uint64_t commit_ts;
+        Slice real_user_key = DecodeMvccKey(user_key, &commit_ts);
+        //fprintf(stderr, "[MvccGC] MvccKeyHex: %s, CommitTS: %lu\n", 
+                //ToHex(user_key.data(), user_key.size()).c_str(), commit_ts);
+        
+        // 切换了新的 UserKey
+        if (real_user_key.compare(Slice(current_user_key)) != 0) {
+            current_user_key = real_user_key.ToString();
+            keep_next = true; // 新 Key，重置保留标志
+        }
+        
+        // 判断版本
+        if (commit_ts <= safe_point) {
+            if (keep_next) {
+                // 这是 SafePoint 之前的最新版本，必须保留
+                keep_next = false;
+            } else {
+                
+                // 1. 解析 Value 拿到 StartTS
+                uint64_t start_ts;
+                bool is_commit;
+                ParseWriteValue(iter->value().ToString(), &start_ts, &is_commit);
+                
+                // 2. 删除 Default CF 数据 (d{UserKey}{StartTS})
+                if (is_commit) { // 只有 Put 才有数据
+                    std::string data_key = EncodeMvccKey(kCFDefault, real_user_key, start_ts);
+                    batch.Delete(data_key);
+                }
+                
+                // 3. 删除 Write CF 记录
+                batch.Delete(user_key.ToString());
+                delete_count++;
+            }
+        }
+        
+        // 如果 Batch 太大，分批提交
+        if (batch.entries().size() > 1000) {
+            Status s = Write(WriteOptions(), &batch);
+            if (!s.ok()) return s;
+            batch.Clear();
+        }
+
+        iter->Next();
+    }
+    
+    // 提交剩余 Batch
+    if (batch.entries().size() > 0) {
+        return Write(WriteOptions(), &batch);
+    }
+    
     return Status::OK();
 }
 

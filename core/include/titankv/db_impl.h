@@ -49,6 +49,7 @@ class DBImpl : public DB {
                             uint64_t start_ts, 
                             uint64_t commit_ts) override;
   Status MvccGet(const Slice& key, uint64_t start_ts, std::string* value) override;
+  Status MvccGC(uint64_t safe_point) override;
   Status CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t current_ts,
                                 int* action, uint64_t* commit_ts) override;
   

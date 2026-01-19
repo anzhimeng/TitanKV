@@ -105,6 +105,9 @@ class DB {
   // 这是一个 Read-Modify-Write 操作，必须加锁
   virtual Status CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t current_ts,
                                 int* action, uint64_t* commit_ts) = 0;
+  // MVCC GC
+  // safe_point: 清理早于此 TS 的数据
+  virtual Status MvccGC(uint64_t safe_point) = 0;
 };
 
 } // namespace titankv

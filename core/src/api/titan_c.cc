@@ -353,5 +353,13 @@ void titan_check_txn_status(titan_db_t* db, const char* pkey, size_t plen,
     set_error(err, s);
 }
 
+void titan_mvcc_gc(titan_db_t* db, uint64_t safe_point, char** err) {
+    if (db && db->rep) {
+        auto impl = reinterpret_cast<titankv::DBImpl*>(db->rep);
+        titankv::Status s = impl->MvccGC(safe_point);
+        set_error(err, s);
+    }
+}
+
 
 } // extern "C"
