@@ -2,8 +2,7 @@ package pd
 
 import (
 	"net/url"
-	// "fmt"      // 删除
-	// "strings"  // 删除
+	"time"
 
 	"go.etcd.io/etcd/server/v3/embed"
 )
@@ -15,6 +14,8 @@ type Config struct {
 	PeerUrls   []string
 	
 	InitialCluster string 
+	GCInterval     time.Duration
+	GCSafePointLag time.Duration
 }
 
 func (c *Config) GenEmbedEtcdConfig() (*embed.Config, error) {

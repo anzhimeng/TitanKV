@@ -259,6 +259,11 @@ func (s *Server) UpdateConfig(ctx context.Context, req *titankvpb.UpdateConfigRe
     if req.GcThreshold > 0 {
         s.store.SetGCThreshold(req.GcThreshold)
     }
+    if req.GcSafePoint > 0 {
+        if err := s.store.GC(req.GcSafePoint); err != nil {
+            return nil, status.Error(codes.Internal, err.Error())
+        }
+    }
     return &titankvpb.UpdateConfigResponse{}, nil
 }
 

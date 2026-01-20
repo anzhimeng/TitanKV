@@ -290,6 +290,7 @@ message RaftTruncatedState {
 message UpdateConfigRequest {
     // 如果 > 0 则更新，否则忽略
     double gc_threshold = 1;
+    uint64 gc_safe_point = 2;
 }
 
 message RaftSnapshotMetadata {

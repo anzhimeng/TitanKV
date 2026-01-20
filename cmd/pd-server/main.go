@@ -3,16 +3,17 @@ package main
 import (
 	"flag"
 	"log"
-	"net" // 【新增】
+	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"titankv/pd"
-	"titankv/pd/api/pdpb" // 【新增】
+	"titankv/pd/api/pdpb"
 
-	"google.golang.org/grpc" // 【新增】
+	"google.golang.org/grpc"
 )
 
 var (
@@ -22,8 +23,9 @@ var (
 	peerUrls   = flag.String("peer-urls", "http://127.0.0.1:2380", "List of URLs to listen on for peer traffic")
 	cluster    = flag.String("initial-cluster", "pd-1=http://127.0.0.1:2380", "Initial cluster configuration")
 	
-	// 【新增】PD 服务监听地址
 	addr = flag.String("addr", ":9000", "gRPC server address")
+	gcInterval = flag.Duration("gc-interval", 1*time.Minute, "GC interval")
+	gcSafePointLag = flag.Duration("gc-safe-point-lag", 10*time.Minute, "GC safe point lag")
 )
 
 func main() {
@@ -35,6 +37,8 @@ func main() {
 		ClientUrls:     strings.Split(*clientUrls, ","),
 		PeerUrls:       strings.Split(*peerUrls, ","),
 		InitialCluster: *cluster,
+		GCInterval:     *gcInterval,
+		GCSafePointLag: *gcSafePointLag,
 	}
 
 	server := pd.NewServer(cfg)

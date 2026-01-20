@@ -19,30 +19,28 @@ Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string*
     std::unique_ptr<Iterator> iter(db_->NewIterator(ReadOptions(), kCFWrite));
     std::string seek_key = EncodeMvccKey(kCFWrite, key, snapshot_);
     //fprintf(stderr, "[Seek] Target TS: %lu. Target Hex: %s\n", snapshot_, ToHex(seek_key.data(), seek_key.size()).c_str());
-    //iter->Seek(seek_key);
-    iter->SeekToFirst();
+    iter->Seek(seek_key);
     while (iter->Valid()) {
         Slice found_key = iter->key();
-        
-        // 【修复】宽松的长度检查
-        size_t min_len = 1 + key.size() + 8;
-        if (found_key.size() < min_len) break; 
-        
-        // 比较 User Key
-        Slice found_user_key(found_key.data() + 1, key.size());
-        //fprintf(stderr, "[Seek] Found Hex: %s\n", ToHex(found_user_key.data(), found_user_key.size()).c_str());
+        if (found_key.size() < 9) break;
+
+        Slice mvcc_key = ExtractUserKey(found_key);
+        if (mvcc_key.size() < 9 || mvcc_key[0] != kCFWrite) break;
+
+        uint64_t found_commit_ts = 0;
+        Slice found_user_key = DecodeMvccKey(mvcc_key, &found_commit_ts);
         if (found_user_key != key) break;
+        if (found_commit_ts > snapshot_) {
+            iter->Next();
+            continue;
+        }
 
         Slice val = iter->value();
         if (val.empty()) {
             iter->Next();
             continue;
         }
-
-        // 提取 TS (Desc)
-        uint64_t ts_desc = DecodeFixed64BigEndian(found_key.data() + 1 + key.size());
-        *commit_ts = std::numeric_limits<uint64_t>::max() - ts_desc;
-        
+        *commit_ts = found_commit_ts;
         *write_info = val.ToString();
         return Status::OK();
     }

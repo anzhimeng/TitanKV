@@ -7,18 +7,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
 	"titankv/pd/cluster"
 	"titankv/pd/id"
 	"titankv/pd/schedule"
-	"titankv/pd/schedule/schedulers" 
+	"titankv/pd/schedule/schedulers"
 	"titankv/pd/tso"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/server/v3/embed"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -104,10 +107,10 @@ func (s *Server) Run() error {
 
 	// 初始化调度器
 	s.coordinator = schedule.NewCoordinator(s.cluster)
-	
+
 	// 【关键修复 1】使用 schedulers 包名
 	s.coordinator.AddScheduler(schedulers.NewBalanceLeaderScheduler())
-	
+
 	// 【关键修复 2】传入 s.idAllocator
 	s.coordinator.AddScheduler(schedulers.NewBalanceRegionScheduler(s.idAllocator))
 
@@ -177,13 +180,15 @@ func (s *Server) campaignLoop() {
 
 		// 启动 TSO 同步循环
 		go s.tso.SyncLoop(leaderCtx)
-		
+
 		// 启动 调度器循环
 		go s.coordinator.Run(leaderCtx)
-		
+
+		go s.startGCLoop(leaderCtx)
+
 		// 启动 集群监控 (Week 8 Day 3)
 		// 假设你已经在 Cluster 中实现了 StartMonitor
-		// go s.cluster.StartMonitor(leaderCtx) 
+		// go s.cluster.StartMonitor(leaderCtx)
 
 		// 6. 阻塞直到 Session 过期
 		select {
@@ -197,6 +202,76 @@ func (s *Server) campaignLoop() {
 		cancel() // 停止 TSO, Coordinator, Monitor
 		atomic.StoreInt64(&s.isLeader, 0)
 		session.Close()
+	}
+}
+
+func (s *Server) startGCLoop(ctx context.Context) {
+	interval := s.cfg.GCInterval
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !s.IsLeader() {
+				continue
+			}
+			safePoint, err := s.calcGCSafePoint()
+			if err != nil || safePoint == 0 {
+				if err != nil {
+					log.Printf("GC safe point unavailable: %v", err)
+				}
+				continue
+			}
+			stores := s.cluster.GetStores()
+			for _, st := range stores {
+				if st.GetStatus() != cluster.StoreStatusUp {
+					continue
+				}
+				s.triggerStoreGC(ctx, st.Meta.Address, safePoint)
+			}
+		}
+	}
+}
+
+func (s *Server) calcGCSafePoint() (uint64, error) {
+	ts, err := s.tso.Generate(1)
+	if err != nil {
+		return 0, err
+	}
+	lagMs := s.cfg.GCSafePointLag.Milliseconds()
+	safePhysical := ts.Physical - lagMs
+	if safePhysical < 0 {
+		safePhysical = 0
+	}
+	return uint64(safePhysical) << 18, nil
+}
+
+func (s *Server) triggerStoreGC(ctx context.Context, addr string, safePoint uint64) {
+	if addr == "" {
+		return
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(reqCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		log.Printf("GC dial failed (%s): %v", addr, err)
+		return
+	}
+	defer conn.Close()
+
+	client := titankvpb.NewTitanKVClient(conn)
+	_, err = client.UpdateConfig(reqCtx, &titankvpb.UpdateConfigRequest{
+		GcSafePoint: safePoint,
+	})
+	if err != nil {
+		log.Printf("GC trigger failed (%s): %v", addr, err)
 	}
 }
 
@@ -285,8 +360,7 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	resp := &pdpb.RegionHeartbeatResponse{
-	}
+	resp := &pdpb.RegionHeartbeatResponse{}
 
 	// 检查是否有调度指令 (Operator)
 	op := s.coordinator.GetOperator(req.Region.Id)
@@ -337,13 +411,12 @@ func (s *Server) RegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatR
 	return resp, nil
 }
 
-
 func (s *Server) GetStore(ctx context.Context, req *pdpb.GetStoreRequest) (*pdpb.GetStoreResponse, error) {
 	if !s.IsLeader() {
 		return nil, status.Error(codes.Unavailable, "not leader")
 	}
 
-    // 【修改】调用 GetStoreInfoByID
+	// 【修改】调用 GetStoreInfoByID
 	storeInfo := s.cluster.GetStoreInfoByID(req.StoreId)
 	if storeInfo == nil {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("store %d not found", req.StoreId))
@@ -353,4 +426,3 @@ func (s *Server) GetStore(ctx context.Context, req *pdpb.GetStoreRequest) (*pdpb
 		Store: storeInfo.Meta, // storeInfo 已经是 Clone 过的副本，可以直接取 Meta
 	}, nil
 }
-

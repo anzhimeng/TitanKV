@@ -2409,6 +2409,7 @@ type UpdateConfigRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 如果 > 0 则更新，否则忽略
 	GcThreshold   float64 `protobuf:"fixed64,1,opt,name=gc_threshold,json=gcThreshold,proto3" json:"gc_threshold,omitempty"`
+	GcSafePoint   uint64  `protobuf:"varint,2,opt,name=gc_safe_point,json=gcSafePoint,proto3" json:"gc_safe_point,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2446,6 +2447,13 @@ func (*UpdateConfigRequest) Descriptor() ([]byte, []int) {
 func (x *UpdateConfigRequest) GetGcThreshold() float64 {
 	if x != nil {
 		return x.GcThreshold
+	}
+	return 0
+}
+
+func (x *UpdateConfigRequest) GetGcSafePoint() uint64 {
+	if x != nil {
+		return x.GcSafePoint
 	}
 	return 0
 }
@@ -2780,9 +2788,10 @@ const file_titankv_proto_rawDesc = "" +
 	"\x0ftruncated_state\x18\x02 \x01(\v2\x1b.titankv.RaftTruncatedStateR\x0etruncatedState\">\n" +
 	"\x12RaftTruncatedState\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
-	"\x04term\x18\x02 \x01(\x04R\x04term\"8\n" +
+	"\x04term\x18\x02 \x01(\x04R\x04term\"\\\n" +
 	"\x13UpdateConfigRequest\x12!\n" +
-	"\fgc_threshold\x18\x01 \x01(\x01R\vgcThreshold\"w\n" +
+	"\fgc_threshold\x18\x01 \x01(\x01R\vgcThreshold\x12\"\n" +
+	"\rgc_safe_point\x18\x02 \x01(\x04R\vgcSafePoint\"w\n" +
 	"\x14RaftSnapshotMetadata\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x125\n" +
