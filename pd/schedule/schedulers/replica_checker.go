@@ -1,6 +1,7 @@
 package schedulers
 
 import (
+	"context"
 	"log"
 	"titankv/pd/api/pdpb"
 	"titankv/pd/cluster"
@@ -70,7 +71,7 @@ func (s *replicaScheduler) checkRegion(c *cluster.RaftCluster, r *cluster.Region
 			return nil
 		}
 
-		newPeerID, err := s.alloc.Alloc(nil) // 传入 ctx
+		newPeerID, err := s.alloc.Alloc(context.Background())
 		if err != nil { return nil }
 
 		return schedule.NewOperator(
@@ -120,8 +121,13 @@ func (s *replicaScheduler) selectBestStore(c *cluster.RaftCluster, existingPeers
 		}
 		if exist { continue }
 
-		if st.Stats.Available > maxAvail {
-			maxAvail = st.Stats.Available
+		available := uint64(0)
+		if st.Stats != nil {
+			available = st.Stats.Available
+		}
+
+		if bestStore == nil || available > maxAvail {
+			maxAvail = available
 			bestStore = st
 		}
 	}

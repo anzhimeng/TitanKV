@@ -25,7 +25,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -108,13 +110,14 @@ func main() {
 
 	// 【新增】注册 Store
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	meta := &pdpb.MetaStore{
+		Id:      *nodeID,
+		Address: peers[*nodeID],
+		State:   pdpb.StoreState_UP,
+		Version: "v1.0.0",
+	}
 	_, err = pdClient.PutStore(ctx, &pdpb.PutStoreRequest{
-		Store: &pdpb.MetaStore{
-			Id:      *nodeID,
-			Address: peers[*nodeID], // 自己的地址
-			State:   pdpb.StoreState_UP,
-			Version: "v1.0.0",
-		},
+		Store: meta,
 	})
 	cancel()
 	if err != nil {
@@ -144,7 +147,11 @@ func main() {
 			})
 			cancel()
 			if err != nil {
-				//log.Printf("Store heartbeat failed: %v", err)
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					retryCtx, retryCancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_, _ = pdClient.PutStore(retryCtx, &pdpb.PutStoreRequest{Store: meta})
+					retryCancel()
+				}
 			}
 		}
 	}()

@@ -3,6 +3,7 @@ package raftstore
 import (
 	"sync"
 	"context"
+	"time"
 
 	"titankv/pd/api/pdpb"
 )
@@ -53,31 +54,45 @@ func (r *Router) RegisterStore(sender PeerSender) {
 
 func (r *Router) Send(regionID uint64, msg Msg) bool {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	sender, ok := r.regions[regionID]
-	if !ok {
-		return false // Region 不在本节点
+	storeSender := r.storeSender
+	r.mu.RUnlock()
+
+	timeout := 200 * time.Millisecond
+	switch msg.Type {
+	case MsgTypeRaftMessage, MsgTypeRaftCmd, MsgTypeReadIndex:
+		timeout = time.Second
 	}
-	
-	// 非阻塞发送，防止 Worker 卡死导致 gRPC 卡死
-    // 实际生产中可能需要带超时或缓冲区满策略
-	select {
-	case sender <- msg:
-		return true
-	default:
-		return false // 队列满
+	deadline := time.Now().Add(timeout)
+
+	if ok {
+		for {
+			select {
+			case sender <- msg:
+				return true
+			default:
+				if time.Now().After(deadline) {
+					return false
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
 	}
-    // 【新增】如果找不到 Region，发给全局 StoreSender
-    // 只有 RaftMessage 需要全局处理（可能是创建 Peer 的消息）
-    if msg.Type == MsgTypeRaftMessage && r.storeSender != nil {
-        select {
-        case r.storeSender <- msg:
-            return true
-        default:
-            return false
-        }
-    }
-    return false
+
+	if msg.Type == MsgTypeRaftMessage && storeSender != nil {
+		for {
+			select {
+			case storeSender <- msg:
+				return true
+			default:
+				if time.Now().After(deadline) {
+					return false
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}
+	return false
 }
 
 type PeerStateReader interface {

@@ -8,6 +8,9 @@ import (
      "log"
      "fmt"     
      "strconv"
+     "hash"
+     "hash/crc32"
+     "encoding/json"
 	
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -279,14 +282,47 @@ func (s *Server) StreamSnapshot(stream titankvpb.TitanKV_StreamSnapshotServer) e
     var file *os.File
     var regionID uint64
     var raftSnapshot raftpb.Snapshot // 【新增】暂存元数据
+    var hasher hash.Hash32
+    var expectedSize uint64
+    var expectedChecksum uint64
+    var received uint64
+    var nextOffset uint64
     
     // 1. 接收 Loop
     for {
         chunk, err := stream.Recv()
         if err == io.EOF {
+            if file == nil {
+                return stream.SendAndClose(&titankvpb.RaftResponse{})
+            }
+            if received != expectedSize {
+                file.Close()
+                os.Remove(file.Name())
+                return status.Error(codes.InvalidArgument, "snapshot size mismatch")
+            }
+            if expectedChecksum != 0 && hasher.Sum32() != uint32(expectedChecksum) {
+                file.Close()
+                os.Remove(file.Name())
+                return status.Error(codes.InvalidArgument, "snapshot checksum mismatch")
+            }
+            file.Close()
             // 传输完成
             // 把文件路径塞回 Snapshot.Data
-            raftSnapshot.Data = []byte(file.Name())
+            // 尝试反序列化 SnapshotData 以保留 Region 信息
+            var snapData raftstore.SnapshotData
+            if err := json.Unmarshal(raftSnapshot.Data, &snapData); err == nil {
+                // 如果成功，更新 FilePath 并重新序列化
+                snapData.FilePath = file.Name()
+                if newData, err := json.Marshal(snapData); err == nil {
+                    raftSnapshot.Data = newData
+                } else {
+                    // 序列化失败，回退
+                    raftSnapshot.Data = []byte(file.Name())
+                }
+            } else {
+                // 如果不是 JSON（旧格式），直接存路径
+                raftSnapshot.Data = []byte(file.Name())
+            }
             
             s.finishSnapshot(regionID, &raftSnapshot)
             return stream.SendAndClose(&titankvpb.RaftResponse{})
@@ -296,8 +332,35 @@ func (s *Server) StreamSnapshot(stream titankvpb.TitanKV_StreamSnapshotServer) e
         if file == nil {
             regionID = chunk.RegionId
             file, err = os.CreateTemp("", "snap-*.sst")
+            if err != nil {
+                return err
+            }
+            hasher = crc32.NewIEEE()
+            expectedSize = chunk.FileSize
         }
-        file.Write(chunk.Data)
+        if chunk.FileSize != expectedSize {
+            file.Close()
+            os.Remove(file.Name())
+            return status.Error(codes.InvalidArgument, "snapshot file size inconsistent")
+        }
+        if chunk.Offset != nextOffset {
+            file.Close()
+            os.Remove(file.Name())
+            return status.Error(codes.InvalidArgument, "snapshot offset mismatch")
+        }
+        if len(chunk.Data) > 0 {
+            if _, err := file.Write(chunk.Data); err != nil {
+                file.Close()
+                os.Remove(file.Name())
+                return err
+            }
+            hasher.Write(chunk.Data)
+            received += uint64(len(chunk.Data))
+            nextOffset += uint64(len(chunk.Data))
+        }
+        if chunk.IsLast {
+            expectedChecksum = chunk.Checksum
+        }
         
         // 【新增】如果包含元数据，保存下来
         if len(chunk.RaftSnapshotData) > 0 {

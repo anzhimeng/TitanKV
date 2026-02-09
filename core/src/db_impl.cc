@@ -193,6 +193,7 @@ Status DBImpl::Recover() {
   bool save_manifest = false;
   Status s = versions_->Recover(&save_manifest);
   if (!s.ok() && !s.IsNotFound()) return s;
+  last_sequence_.store(versions_->LastSequence(), std::memory_order_release);
 
   // 3. 扫描 WAL 文件 (保持不变)
   uint64_t min_log = versions_->LogNumber();

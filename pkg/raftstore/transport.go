@@ -7,8 +7,9 @@ import (
 	"time"
 	"io"
 	"log"
-     "os"
-
+	"os"
+	"hash/crc32"
+	"encoding/json"
 
 	"titankv/api/titankvpb"
 	"titankv/pd/api/pdpb"
@@ -231,18 +232,28 @@ func (t *Transport) Close() {
 
 func (t *Transport) SendSnapshot(msg *titankvpb.RaftMessage) error {
     // 1. 获取文件路径 (从 msg.Data 反序列化出 Snapshot，再从 Data 获取路径)
-    var snap raftpb.Snapshot
-    if err := snap.Unmarshal(msg.Data); err != nil {
-	   return err
-    }
-    filePath := string(snap.Data) // Day 2 我们把路径存这里了
-    
-    // 2. 打开文件
+	var snap raftpb.Snapshot
+	if err := snap.Unmarshal(msg.Data); err != nil {
+		return err
+	}
+	
+	var filePath string
+	var snapData SnapshotData
+	// 尝试解析为 SnapshotData
+	if err := json.Unmarshal(snap.Data, &snapData); err == nil && snapData.FilePath != "" {
+		filePath = snapData.FilePath
+	} else {
+		// 兼容旧格式（直接存路径）
+		filePath = string(snap.Data)
+	}
+	
+	// 2. 打开文件
     file, err := os.Open(filePath)
     if err != nil { return err }
     defer file.Close()
     
     info, _ := file.Stat()
+    fileSize := uint64(info.Size())
     
     // 3. 建立 Stream
     client, err := t.getClient(msg.ToPeerId)
@@ -250,31 +261,43 @@ func (t *Transport) SendSnapshot(msg *titankvpb.RaftMessage) error {
     
     // 4. 发送 Chunk
     buf := make([]byte, 1024*1024) // 1MB Chunk
+    hasher := crc32.NewIEEE()
+    var offset uint64
     for {
         n, err := file.Read(buf)
         if err == io.EOF { break }
         
         chunk := &titankvpb.SnapshotChunk{
             RegionId: msg.RegionId,
-            FileSize: uint64(info.Size()),
+            FileSize: fileSize,
+            Offset:   offset,
             Data:     buf[:n],
             IsLast:   false,
         }
         stream.Send(chunk)
+        hasher.Write(buf[:n])
+        offset += uint64(n)
     }
     
     // 发送最后一块
-    // 序列化 Snapshot 元数据 (注意：snap.Data 此时是路径，接收端不需要路径，只需要 Metadata)
-    // 我们可以清空 Data 字段只传 Metadata
-    snapToSend := snap
-    snapToSend.Data = nil 
-    snapData, _ := snapToSend.Marshal()
+	// 序列化 Snapshot 元数据
+	// 注意：我们需要保留 Region 信息（在 snap.Data 中），但接收端不需要 Sender 的 FilePath。
+	// 不过为了简单，我们直接把 snap.Data 传过去，接收端会覆盖 FilePath。
+	snapToSend := snap
+	// snapToSend.Data = nil // 不要清空 Data，因为里面包含 Region 信息！
+	
+	// 如果是 SnapshotData JSON，我们可以选择清空 FilePath 以减少传输量，但不是必须的。
+	
+	snapDataBytes, _ := snapToSend.Marshal()
 
-    stream.Send(&titankvpb.SnapshotChunk{
-        RegionId: msg.RegionId,
-        IsLast:   true,
-        RaftSnapshotData: snapData, // 【新增】
-    })
+	stream.Send(&titankvpb.SnapshotChunk{
+		RegionId: msg.RegionId,
+		FileSize: fileSize,
+		Offset:   offset,
+		Checksum: uint64(hasher.Sum32()),
+		IsLast:   true,
+		RaftSnapshotData: snapDataBytes, // 【修改】包含完整元数据和 Region 信息
+	})
     
     
     _, err = stream.CloseAndRecv()

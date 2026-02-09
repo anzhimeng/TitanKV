@@ -45,17 +45,17 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
     req := &pdpb.GetRegionRequest{Key: key}
     //log.Printf("[Client] Asking PD for key: %s", string(key))
     resp, err := c.pdClient.GetRegion(ctx, req)
-    if err == nil {
-        log.Printf("[Client] PD returned: Region %d, Epoch: %v", resp.Region.Id, resp.Region.RegionEpoch)
-    }
     if err != nil {
         return "", fmt.Errorf("PD GetRegion failed: %v", err)
     }
-    if resp.Region == nil {
+    if resp == nil || resp.Region == nil {
+        c.cache.Invalidate(key)
         return "", fmt.Errorf("PD returned nil region")
     }
+    log.Printf("[Client] PD returned: Region %d, Epoch: %v", resp.Region.Id, resp.Region.RegionEpoch)
     // 如果 Leader 为空，可能是正在选举，返回错误让上层重试
     if resp.Leader == nil {
+        c.cache.Invalidate(key)
         return "", fmt.Errorf("no leader for region %d", resp.Region.Id)
     }
     
@@ -73,7 +73,10 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
         if err != nil {
              return "", fmt.Errorf("PD GetStore failed: %v", err)
         }
-        
+        if storeResp == nil || storeResp.Store == nil {
+            return "", fmt.Errorf("PD returned nil store for %d", resp.Leader.StoreId)
+        }
+
         addr := storeResp.Store.Address
         c.cache.UpdateStore(resp.Leader.StoreId, addr)
         return addr, nil
@@ -84,19 +87,37 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
 
 // 智能 Put
 func (c *Client) Put(ctx context.Context, key, value []byte) error {
-	for i := 0; i < 3; i++ {
+	bo := NewBackoffer(ctx)
+	for i := 0; i < 8; i++ {
 		addr, err := c.LocateLeader(ctx, key)
 		if err != nil {
-			addr = "127.0.0.1:9091" 
+			c.cache.Invalidate(key)
+			if bo.Sleep() != nil {
+				return err
+			}
+			addr = "127.0.0.1:9091"
 		}
 
 		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil { return err }
+		if err != nil {
+			if bo.Sleep() != nil {
+				return err
+			}
+			continue
+		}
 		
 		// 【关键】重命名为 kvClient，避免与结构体字段 c.pdClient 混淆，或者与之前的 client 变量冲突
 		kvClient := titankvpb.NewTitanKVClient(conn)
 		
 		region, _ := c.cache.Search(key)
+		if region == nil {
+            conn.Close()
+            c.cache.Invalidate(key)
+			if bo.Sleep() != nil {
+				return fmt.Errorf("region not found")
+			}
+            continue
+        }
         
         // 【新增】RegionEpoch 类型转换
         var epoch *titankvpb.RegionEpoch
@@ -123,13 +144,18 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 
 		if err != nil {
 			c.cache.Invalidate(key)
+			if bo.Sleep() != nil {
+				return err
+			}
 			continue
 		}
 
 		if resp.ErrCode == 1 { 
 			log.Printf("Epoch mismatch for key %s, invalidating cache...", key)
 			c.cache.Invalidate(key)
-			time.Sleep(100 * time.Millisecond)
+			if bo.Sleep() != nil {
+				return fmt.Errorf("epoch mismatch")
+			}
 			continue
 		}
 
@@ -241,15 +267,11 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
         var context *titankvpb.RegionContext
         if region != nil {
             context = &titankvpb.RegionContext{
-                RegionId: region.Id,
-                // 【修复】手动转换 Epoch 类型
-                RegionEpoch: &titankvpb.RegionEpoch{
-                    ConfVer: region.RegionEpoch.ConfVer,
-                    Version: region.RegionEpoch.Version,
-                },
+                RegionId:    region.Id,
+                RegionEpoch: toTitanEpoch(region.RegionEpoch),
             }
         } else {
-             context = &titankvpb.RegionContext{RegionId: 1} // Fallback
+             context = &titankvpb.RegionContext{RegionId: 1}
         }
         
         req := &titankvpb.GetRequest{
