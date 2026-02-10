@@ -46,6 +46,14 @@ func DataKey(regionID uint64, userKey []byte) []byte {
 	return k
 }
 
+func DecodeDataKey(key []byte) (uint64, []byte, bool) {
+	if len(key) < 9 || key[0] != 'z' {
+		return 0, nil, false
+	}
+	regionID := binary.BigEndian.Uint64(key[1:9])
+	return regionID, key[9:], true
+}
+
 // --- Raft Log Encoding: r{RegionID}{LogSuffix}{Index} ---
 
 func RaftLogKey(regionID uint64, index uint64) []byte {

@@ -506,6 +506,10 @@ func (p *Peer) SetAppliedIndex(idx uint64) {
 	p.applyCond.Broadcast()
 }
 
+func (p *Peer) GetRegion() *titankvpb.Region {
+	return p.region
+}
+
 // WaitApplied 阻塞直到 AppliedIndex >= targetIndex
 func (p *Peer) WaitApplied(ctx context.Context, targetIndex uint64) error {
 	// 1. 快速路径：无锁检查原子变量

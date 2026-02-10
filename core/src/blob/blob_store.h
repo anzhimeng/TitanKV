@@ -2,6 +2,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <vector>
 #include <string>
 #include <functional>
@@ -85,6 +86,7 @@ private:
     // 【Day 1 新增】文件元数据缓存: FileID -> Meta
     // 使用 shared_ptr 方便后续 GC 线程访问
     std::map<uint32_t, std::shared_ptr<BlobFileMeta>> files_stats_;
+    std::set<uint32_t> obsolete_files_;
 
     // 【新增】原子变量，默认 0.5
     std::atomic<double> gc_threshold_{0.5};

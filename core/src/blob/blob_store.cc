@@ -282,6 +282,9 @@ bool BlobStore::PickGCVictim(uint32_t* file_number) {
         if (active_writer_ && next_file_id_ - 1 == fid) {
             continue; 
         }
+        if (obsolete_files_.find(fid) != obsolete_files_.end()) {
+            continue;
+        }
 
         double ratio = kv.second->GetValidRatio();
 
@@ -348,25 +351,9 @@ Status BlobStore::RunGC(std::function<bool(const Slice&, const BlobIndex&)> is_v
 
     // 5. 标记 Victim 文件待删除 (Day 2 先不物理删除，只是打印日志)
     fprintf(stderr, "[BlobGC] Rewrite done. %lu records moved.\n", out_new_indexes->size());
-    // 【新增】清理元数据和物理文件
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        files_stats_.erase(victim_file_id); // 从统计中移除，防止下次再选
-    }
-    
-    // 物理删除文件 (C++17)
-    // 注意：在生产环境中，这里应该有一个 ObsoleteFile 机制，延迟删除，防止读请求并发访问。
-    // 但在 Week 7 简化版中，只要我们确定没有 Iterator 正在读这个文件，就可以删。
-    char file_id_str[30]; 
-    snprintf(file_id_str, sizeof(file_id_str), "%06u.blob", victim_file_id);
-    std::filesystem::path p = std::filesystem::path(db_path_) / file_id_str;
-    
-    std::error_code ec;
-    std::filesystem::remove(p, ec); 
-    if (ec) {
-        fprintf(stderr, "[BlobGC] Failed to delete file %s: %s\n", p.c_str(), ec.message().c_str());
-    } else {
-        fprintf(stderr, "[BlobGC] Deleted file %u\n", victim_file_id);
+        obsolete_files_.insert(victim_file_id);
     }
     
     return Status::OK();

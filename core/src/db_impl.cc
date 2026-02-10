@@ -18,18 +18,36 @@
 
 namespace titankv {
 
-// 辅助：解析 Lock Value (Format: "primary|start_ts|ttl")
+namespace {
+constexpr char kValueInlineTag = '\x00';
+constexpr char kValueBlobTag = '\x01';
+}
+
+static bool DecodeLockValue(const std::string& val, std::string* primary, uint64_t* start_ts, uint64_t* ttl, uint8_t* op_type) {
+    if (val.size() < 4 + 8 + 8 + 1) return false;
+    uint32_t primary_len = DecodeFixed32(val.data());
+    size_t offset = 4;
+    if (val.size() < offset + primary_len + 8 + 8 + 1) return false;
+    if (primary != nullptr) {
+        primary->assign(val.data() + offset, primary_len);
+    }
+    offset += primary_len;
+    if (start_ts != nullptr) {
+        *start_ts = DecodeFixed64(val.data() + offset);
+    }
+    offset += 8;
+    if (ttl != nullptr) {
+        *ttl = DecodeFixed64(val.data() + offset);
+    }
+    offset += 8;
+    if (op_type != nullptr) {
+        *op_type = static_cast<uint8_t>(val[offset]);
+    }
+    return true;
+}
+
 static bool ParseLockValue(const std::string& val, uint64_t* start_ts, uint64_t* ttl) {
-    size_t p1 = val.find('|');
-    if (p1 == std::string::npos) return false;
-    size_t p2 = val.find('|', p1 + 1);
-    if (p2 == std::string::npos) return false;
-    
-    try {
-        *start_ts = std::stoull(val.substr(p1 + 1, p2 - p1 - 1));
-        *ttl = std::stoull(val.substr(p2 + 1));
-        return true;
-    } catch (...) { return false; }
+    return DecodeLockValue(val, nullptr, start_ts, ttl, nullptr);
 }
 
 // 辅助：解析 Write Value (Format: "start_ts|Type")
@@ -39,45 +57,28 @@ static bool ParseWriteValue(const std::string& val, uint64_t* start_ts, bool* is
     try {
         *start_ts = std::stoull(val.substr(0, p1));
         std::string type = val.substr(p1 + 1);
-        *is_commit = (type == "Put"); // Put 代表提交，Rollback 代表回滚
+        *is_commit = (type == "Put" || type == "Delete");
         return true;
     } catch (...) { return false; }
 }
 
 static uint64_t ParseLockStartTs(const std::string& lock_val) {
-    // Lock Value 格式: "primary|start_ts|ttl"
-    size_t first_sep = lock_val.find('|');
-    if (first_sep == std::string::npos) return 0;
-    
-    size_t second_sep = lock_val.find('|', first_sep + 1);
-    if (second_sep == std::string::npos) return 0;
-
-    std::string ts_str = lock_val.substr(first_sep + 1, second_sep - first_sep - 1);
-    try {
-        return std::stoull(ts_str);
-    } catch (...) {
+    uint64_t start_ts = 0;
+    if (!DecodeLockValue(lock_val, nullptr, &start_ts, nullptr, nullptr)) {
         return 0;
     }
+    return start_ts;
 }
 
-// 辅助：解析 Lock Value (格式 "primary|start_ts|ttl|type")
-// 返回 true 解析成功
 bool ParseLockInfo(const std::string& val, uint64_t* start_ts, std::string* type) {
-    std::stringstream ss(val);
-    std::string segment;
-    std::vector<std::string> parts;
-    while(std::getline(ss, segment, '|')) {
-        parts.push_back(segment);
-    }
-    if (parts.size() < 4) return false;
-    
-    try {
-        *start_ts = std::stoull(parts[1]);
-        *type = parts[3]; // "Put" or "Delete"
-        return true;
-    } catch (...) {
+    uint8_t op_type = 0;
+    if (!DecodeLockValue(val, nullptr, start_ts, nullptr, &op_type)) {
         return false;
     }
+    if (type != nullptr) {
+        *type = (op_type == 1) ? "Delete" : "Put";
+    }
+    return true;
 }
 
 // --- 静态工厂方法 ---
@@ -344,8 +345,7 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
       
       if (s.ok()) {
           BlobIndex old_idx;
-          Slice input(old_val_idx);
-          if (old_idx.DecodeFrom(&input).ok()) {
+          if (DecodeBlobIndexFromValue(old_val_idx, &old_idx)) {
               // 2. 只有解码成功才通知
               blob_store_->NotifyGarbage(old_idx.file_id, old_idx.size);
               
@@ -367,8 +367,10 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
     s = blob_store_->Add(key, value, &b_index);
     if (!s.ok()) return s;
     b_index.EncodeTo(&value_to_store);
+    value_to_store.insert(value_to_store.begin(), kValueBlobTag);
   } else {
-    value_to_store.assign(value.data(), value.size());
+    value_to_store.assign(1, kValueInlineTag);
+    value_to_store.append(value.data(), value.size());
   }
 
   // 2. 构造 WAL 条目
@@ -732,13 +734,36 @@ Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
   return Status::NotFound("Key not found");
 }
 
+bool DBImpl::DecodeBlobIndexFromValue(const std::string& value, BlobIndex* out) {
+    if (value.empty()) {
+        return false;
+    }
+    if (value[0] == kValueBlobTag) {
+        Slice input(value.data() + 1, value.size() - 1);
+        if (out->DecodeFrom(&input).ok() && input.empty()) {
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 // 【新增】实现 ResolveBlobIndex
 Status DBImpl::ResolveBlobIndex(std::string* value) {
-    BlobIndex b_index;
-    Slice input(*value);
-    // 尝试解码，如果成功且无剩余数据，说明是 BlobIndex
-    if (b_index.DecodeFrom(&input).ok() && input.empty()) {
-        return blob_store_->Get(b_index, value);
+    if (value->empty()) {
+        return Status::OK();
+    }
+    if ((*value)[0] == kValueInlineTag) {
+        value->erase(0, 1);
+        return Status::OK();
+    }
+    if ((*value)[0] == kValueBlobTag) {
+        BlobIndex b_index;
+        Slice input(value->data() + 1, value->size() - 1);
+        if (b_index.DecodeFrom(&input).ok() && input.empty()) {
+            return blob_store_->Get(b_index, value);
+        }
+        return Status::Corruption("BlobIndex decode failed");
     }
     // 否则是普通 Value，直接返回 OK
     return Status::OK();
@@ -817,8 +842,7 @@ Status DBImpl::GarbageCollect() {
         if (!s.ok()) return false;
         
         BlobIndex current_index;
-        Slice input(val);
-        if (current_index.DecodeFrom(&input).ok()) {
+        if (DecodeBlobIndexFromValue(val, &current_index)) {
             return current_index == old_index;
         }
         return false;
@@ -1542,30 +1566,9 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         Status s = GetCFLocked(kCFLock, m.key, &lock_val, 0);
         //fprintf(stderr, "[DBImpl] GetCF Lock done: %s\n", s.ToString().c_str());
         if (s.ok()) {
-            // 【关键修复】幂等性检查
-            // 解析 Lock Value 里的 start_ts
-            // 假设 lock_val 格式是 "primary|start_ts|ttl"
-            //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
-                    //ToHex(m.key.data(), m.key.size()).c_str(), 
-                    //lock_val.c_str());
-            // 找到第一个分隔符
-            size_t first_sep = lock_val.find('|');
-            if (first_sep != std::string::npos) {
-                // 找到第二个分隔符
-                size_t second_sep = lock_val.find('|', first_sep + 1);
-                if (second_sep != std::string::npos) {
-                    std::string ts_str = lock_val.substr(first_sep + 1, second_sep - first_sep - 1);
-                    try {
-                        uint64_t lock_ts = std::stoull(ts_str);
-                        if (lock_ts == start_ts) {
-                             // 是我自己的锁！幂等成功。
-                             //fprintf(stderr, "[DBImpl] Idempotent Prewrite hit.\n");
-                             continue; // 跳过写入，处理下一个 Mutation
-                        }else {
-                        	//fprintf(stderr, "[DEBUG] Idempotent Fail: LockTS=%lu, MyTS=%lu\n", lock_ts, start_ts);
-                        }
-                    } catch (...) {}
-                }
+            uint64_t lock_ts = ParseLockStartTs(lock_val);
+            if (lock_ts == start_ts) {
+                continue;
             }
             // 【新增调试】打印出到底是哪个 Key 冲突了，以及 Lock 里的内容是什么
             //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
@@ -1577,13 +1580,13 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
 
         // --- 写入 ---
         // 1. Lock CF: l{key} -> LockInfo
-        std::string lock_key = EncodeLockKey(m.key);
-        // LockInfo 序列化 (primary + ttl + type)
-        // 简单起见，我们把 start_ts 也存进去
-		std::string op_type = (m.op == Mutation::Delete) ? "Delete" : "Put";
-		std::string primary_str(primary.data(), primary.size()); 
-		//std::string lock_info = primary_str + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl);
-		std::string lock_info = primary + "|" + std::to_string(start_ts) + "|" + std::to_string(ttl) + "|" + op_type;
+        uint8_t op_type = (m.op == Mutation::Delete) ? 1 : 0;
+		std::string lock_info;
+        PutFixed32(&lock_info, static_cast<uint32_t>(primary.size()));
+        lock_info.append(primary.data(), primary.size());
+        PutFixed64(&lock_info, start_ts);
+        PutFixed64(&lock_info, ttl);
+        lock_info.push_back(static_cast<char>(op_type));
           //fprintf(stderr, "[DEBUG] Writing Lock Hex: %s\n", 
                 //ToHex(lock_info.data(), lock_info.size()).c_str());
         

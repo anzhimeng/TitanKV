@@ -181,7 +181,7 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 				req := &titankvpb.PrewriteRequest{
 					Context: &titankvpb.RegionContext{
 						RegionId:    batch.region.Id,
-						RegionEpoch: toTitanEpoch(batch.region.RegionEpoch),
+						RegionEpoch: nil,
 					},
 					Mutations:  batch.muts,
 					PrimaryKey: primary,
@@ -286,10 +286,25 @@ func (txn *Transaction) Commit(ctx context.Context) error {
 
 	// 5. 第二阶段：Commit Primary
 	// 只有 Primary Key 必须同步提交，决定事务状态
+	region, _ := txn.client.GetRegionCache().Search(primary)
+	if region == nil {
+		if _, err := txn.client.LocateLeader(context.Background(), primary); err != nil {
+			return err
+		}
+		region, _ = txn.client.GetRegionCache().Search(primary)
+		if region == nil {
+			return fmt.Errorf("region not found for primary %s", string(primary))
+		}
+	}
+
 	commitReq := &titankvpb.CommitRequest{
-		StartTs:    txn.StartTS,
-		CommitTs:   commitTS,
-		Keys:       [][]byte{primary},
+		StartTs:  txn.StartTS,
+		CommitTs: commitTS,
+		Keys:     [][]byte{primary},
+		Context: &titankvpb.RegionContext{
+			RegionId:    region.Id,
+			RegionEpoch: toTitanEpoch(region.RegionEpoch),
+		},
 	}
     
 	// 增加重试循环处理 EpochNotMatch

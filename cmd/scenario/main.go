@@ -26,6 +26,7 @@ import (
 	"titankv/pkg/client"
 	"titankv/pkg/raftstore"
 	"titankv/pkg/store"
+	"titankv/pkg/txn"
 
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"google.golang.org/grpc"
@@ -34,18 +35,18 @@ import (
 )
 
 var (
-	scenario  = flag.String("scenario", "all", "all|confchange|snapshot|perf")
-	logDir    = flag.String("log-dir", "logs_scenario", "log directory")
-	pdAddr    = flag.String("pd-addr", "127.0.0.1:9000", "pd grpc address")
-	cluster   = flag.String("cluster", "1=127.0.0.1:9091,2=127.0.0.1:9092,3=127.0.0.1:9093,4=127.0.0.1:9094", "cluster config")
-	basePort  = flag.Int("base-port", 9091, "base port")
-	nodes     = flag.Int("nodes", 4, "node count")
-	directIO  = flag.Bool("direct-io", true, "use direct io")
-	duration  = flag.Duration("duration", 2*time.Minute, "perf duration")
+	scenario    = flag.String("scenario", "all", "all|confchange|snapshot|perf|bank")
+	logDir      = flag.String("log-dir", "logs_scenario", "log directory")
+	pdAddr      = flag.String("pd-addr", "127.0.0.1:9000", "pd grpc address")
+	cluster     = flag.String("cluster", "1=127.0.0.1:9091,2=127.0.0.1:9092,3=127.0.0.1:9093,4=127.0.0.1:9094", "cluster config")
+	basePort    = flag.Int("base-port", 9091, "base port")
+	nodes       = flag.Int("nodes", 4, "node count")
+	directIO    = flag.Bool("direct-io", true, "use direct io")
+	duration    = flag.Duration("duration", 2*time.Minute, "perf duration")
 	concurrency = flag.Int("concurrency", 16, "perf concurrency")
-	keySpace  = flag.Int("key-space", 20000, "perf key space")
-	valueSize = flag.Int("value-size", 1024, "perf value size")
-	prefill   = flag.Int("prefill", 5000, "prefill keys for splits")
+	keySpace    = flag.Int("key-space", 20000, "perf key space")
+	valueSize   = flag.Int("value-size", 1024, "perf value size")
+	prefill     = flag.Int("prefill", 5000, "prefill keys for splits")
 )
 
 var (
@@ -62,6 +63,10 @@ func main() {
 	startPD()
 	waitForPDReady(8 * time.Second)
 
+	if strings.ToLower(*scenario) == "bank" {
+		*directIO = false
+	}
+
 	for i := 1; i <= 3; i++ {
 		startNode(i)
 	}
@@ -74,6 +79,8 @@ func main() {
 		runSnapshotScenario()
 	case "perf":
 		runPerfScenario()
+	case "bank":
+		runBankScenario()
 	default:
 		runConfChangeScenario()
 		runSnapshotScenario()
@@ -143,6 +150,24 @@ func waitForPDReady(timeout time.Duration) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	log.Fatalf("pd not ready within %v", timeout)
+}
+
+func waitForRegionForKey(key []byte, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	c, err := client.NewClient(*pdAddr)
+	if err != nil {
+		return err
+	}
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := c.LocateLeader(ctx, key)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("wait region for key failed")
 }
 
 func startNode(id int) {
@@ -337,11 +362,11 @@ func sendSnapshot(addr string, regionID uint64, data []byte, fileSize uint64, ch
 	}
 
 	last := &titankvpb.SnapshotChunk{
-		RegionId:        regionID,
-		FileSize:        fileSize,
-		Offset:          offset,
-		Checksum:        uint64(checksum),
-		IsLast:          true,
+		RegionId:         regionID,
+		FileSize:         fileSize,
+		Offset:           offset,
+		Checksum:         uint64(checksum),
+		IsLast:           true,
 		RaftSnapshotData: raftMeta,
 	}
 	if err := stream.Send(last); err != nil {
@@ -608,12 +633,233 @@ func regionPeersSignature(region *titankvpb.Region) string {
 }
 
 func printNotes() {
-	log.Printf("scenario options: -scenario=all|confchange|snapshot|perf")
+	log.Printf("scenario options: -scenario=all|confchange|snapshot|perf|bank")
 	log.Printf("confchange uses node4 and waits for peer add via PD scheduler")
 	log.Printf("snapshot sends size mismatch, checksum mismatch, then valid snapshot")
 	log.Printf("perf reports throughput, latency percentiles, apply gap stats when available")
 }
 
+func runBankScenario() {
+	log.Println("scenario bank start")
+	c, err := client.NewClient(*pdAddr)
+	if err != nil {
+		log.Printf("bank create client failed: %v", err)
+		return
+	}
+	{
+		conn, err := grpc.Dial(*pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err == nil {
+			pdcli := pdpb.NewPDClient(conn)
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+			region := &pdpb.Region{
+				Id:          1,
+				StartKey:    []byte{},
+				EndKey:      []byte{},
+				RegionEpoch: &pdpb.RegionEpoch{ConfVer: 1, Version: 1},
+				Peers: []*pdpb.Peer{
+					{Id: 1, StoreId: 1},
+					{Id: 2, StoreId: 2},
+					{Id: 3, StoreId: 3},
+				},
+			}
+			leader := &pdpb.Peer{Id: 1, StoreId: 1}
+			_, _ = pdcli.RegionHeartbeat(ctx2, &pdpb.RegionHeartbeatRequest{
+				Region: region,
+				Leader: leader,
+			})
+			cancel2()
+			conn.Close()
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	keyA := []byte("bank:A")
+	keyB := []byte("bank:B")
+
+	if err := waitForRegionForKey(keyA, 60*time.Second); err != nil {
+		log.Printf("bank wait region A failed: %v", err)
+		return
+	}
+	if err := waitForRegionForKey(keyB, 60*time.Second); err != nil {
+		log.Printf("bank wait region B failed: %v", err)
+		return
+	}
+
+	{
+		initTxn, err := txn.NewTransaction(ctx, c)
+		if err != nil {
+			log.Printf("bank init txn create failed: %v", err)
+			return
+		}
+		initTxn.Set(keyA, []byte("1000"))
+		initTxn.Set(keyB, []byte("0"))
+		if err := initTxn.Commit(ctx); err != nil {
+			log.Printf("bank init commit failed: %v", err)
+			return
+		}
+	}
+
+	parseBalance := func(b []byte) int {
+		n := 0
+		for _, c := range b {
+			if c < '0' || c > '9' {
+				return 0
+			}
+			n = n*10 + int(c-'0')
+		}
+		return n
+	}
+	toBalanceBytes := func(n int) []byte {
+		return []byte(fmt.Sprintf("%d", n))
+	}
+
+	var wg sync.WaitGroup
+	workers := 50
+	opsPerWorker := 50
+	errs := uint64(0)
+	violations := int32(0)
+	done := make(chan struct{})
+	progressDone := make(chan struct{})
+	doneOps := uint64(0)
+	totalOps := uint64(workers * opsPerWorker)
+
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				vTxn, err := txn.NewTransaction(ctx, c)
+				if err != nil {
+					continue
+				}
+				aVal, errA := vTxn.Get(ctx, keyA)
+				bVal, errB := vTxn.Get(ctx, keyB)
+				if errA != nil || errB != nil || aVal == nil || bVal == nil {
+					continue
+				}
+				sum := parseBalance(aVal) + parseBalance(bVal)
+				if sum != 1000 {
+					if atomic.CompareAndSwapInt32(&violations, 0, 1) {
+						cancel()
+					}
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				log.Printf("bank progress ops=%d/%d errs=%d", atomic.LoadUint64(&doneOps), totalOps, atomic.LoadUint64(&errs))
+			}
+		}
+	}()
+
+	rand.Seed(time.Now().UnixNano())
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
+			for j := 0; j < opsPerWorker; j++ {
+				func() {
+					defer atomic.AddUint64(&doneOps, 1)
+					if atomic.LoadInt32(&violations) == 1 {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					amt := r.Intn(20) + 1
+					dir := r.Intn(2)
+
+					t, err := txn.NewTransaction(ctx, c)
+					if err != nil {
+						atomic.AddUint64(&errs, 1)
+						time.Sleep(10 * time.Millisecond)
+						return
+					}
+
+					av, errA := t.Get(ctx, keyA)
+					bv, errB := t.Get(ctx, keyB)
+					if errA != nil || errB != nil || av == nil || bv == nil {
+						atomic.AddUint64(&errs, 1)
+						time.Sleep(10 * time.Millisecond)
+						return
+					}
+					aBal := parseBalance(av)
+					bBal := parseBalance(bv)
+
+					if dir == 0 {
+						if aBal >= amt {
+							aBal -= amt
+							bBal += amt
+						} else {
+							return
+						}
+					} else {
+						if bBal >= amt {
+							bBal -= amt
+							aBal += amt
+						} else {
+							return
+						}
+					}
+
+					t.Set(keyA, toBalanceBytes(aBal))
+					t.Set(keyB, toBalanceBytes(bBal))
+
+					if err := t.Commit(ctx); err != nil {
+						atomic.AddUint64(&errs, 1)
+						time.Sleep(5 * time.Millisecond)
+						return
+					}
+				}()
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(done)
+	close(progressDone)
+
+	if ctx.Err() != nil && atomic.LoadInt32(&violations) == 0 {
+		log.Printf("bank aborted: %v", ctx.Err())
+		return
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer verifyCancel()
+	verTxn, err := txn.NewTransaction(verifyCtx, c)
+	if err != nil {
+		log.Printf("bank verify txn create failed: %v", err)
+		return
+	}
+	aVal, _ := verTxn.Get(verifyCtx, keyA)
+	bVal, _ := verTxn.Get(verifyCtx, keyB)
+	sum := parseBalance(aVal) + parseBalance(bVal)
+
+	if sum != 1000 || atomic.LoadInt32(&violations) == 1 {
+		log.Printf("❌ Bank Test FAILED: A+B=%d (errs=%d)", sum, errs)
+	} else {
+		log.Printf("✅ Bank Test PASSED: A+B=%d (errs=%d)", sum, errs)
+	}
+	log.Println("scenario bank end")
+}
 func percentile(data []time.Duration, p float64) time.Duration {
 	if len(data) == 0 {
 		return 0
