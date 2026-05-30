@@ -66,6 +66,11 @@ func (s *Server) Run() error {
 		return err
 	}
 
+	// Register PD Server to Etcd's gRPC server
+	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
+		pdpb.RegisterPDServer(gs, s)
+	}
+
 	// 2. 启动嵌入式 Etcd
 	log.Printf("Starting embedded etcd...")
 	e, err := embed.StartEtcd(etcdCfg)

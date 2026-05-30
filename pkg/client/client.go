@@ -1,34 +1,263 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"titankv/api/titankvpb"
+	"titankv/pd/api/pdpb"
+
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"log"
-	"strings"
-	"time"
-	"titankv/api/titankvpb"
-	"titankv/pd/api/pdpb"
 )
 
+const (
+	tsBatchSize               = 262144
+	grpcReadBufferSize        = 2 * 1024 * 1024
+	grpcWriteBufferSize       = 2 * 1024 * 1024
+	grpcInitialWindowSize     = 16 << 20
+	grpcInitialConnWindowSize = 16 << 20
+)
+
+func dialOptions() []grpc.DialOption {
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithReadBufferSize(grpcReadBufferSize),
+		grpc.WithWriteBufferSize(grpcWriteBufferSize),
+		grpc.WithInitialWindowSize(grpcInitialWindowSize),
+		grpc.WithInitialConnWindowSize(grpcInitialConnWindowSize),
+	}
+}
+
 type Client struct {
-	pdClient pdpb.PDClient
-	cache    *RegionCache
+	pdClient   pdpb.PDClient
+	cache      *RegionCache
+	connMu     sync.Mutex
+	conns      map[string]*grpc.ClientConn
+	kvClients  map[string]titankvpb.TitanKVClient
+	tsMu       sync.Mutex
+	tsPhysical int64
+	tsLogical  int64
+	tsRemain   uint32
+	tsFetching int32
+	tsCond     *sync.Cond
+	stats      ConflictStats
+
+	// Async TSO pre-fetching
+	tsBatchCh chan tsResult
+	tsReqCh   chan struct{}
+}
+
+type tsResult struct {
+	resp *pdpb.GetTSResponse
+	err  error
+}
+
+type ConflictStats struct {
+	PrewriteKeyLocked     uint64
+	PrewriteKeyLockedPri  uint64
+	PrewriteKeyLockedSec  uint64
+	PrewriteWriteConflict uint64
+	PrewriteWritePri      uint64
+	PrewriteWriteSec      uint64
+	PrewriteEpochNotMatch uint64
+	CommitKeyLocked       uint64
+	CommitLockMismatch    uint64
+	CommitEpochNotMatch   uint64
+	GetKeyLocked          uint64
+	GetKeyLockedPri       uint64
+	GetKeyLockedSec       uint64
+	GetEpochNotMatch      uint64
+	ResolveNoAction       uint64
+	ResolveRollback       uint64
+	ResolveCommit         uint64
+	ResolveLockNotExist   uint64
+	ResolveTtlExpire      uint64
+	ResolveError          uint64
+}
+
+func (c *Client) GetConflictStats() ConflictStats {
+	return ConflictStats{
+		PrewriteKeyLocked:     atomic.LoadUint64(&c.stats.PrewriteKeyLocked),
+		PrewriteKeyLockedPri:  atomic.LoadUint64(&c.stats.PrewriteKeyLockedPri),
+		PrewriteKeyLockedSec:  atomic.LoadUint64(&c.stats.PrewriteKeyLockedSec),
+		PrewriteWriteConflict: atomic.LoadUint64(&c.stats.PrewriteWriteConflict),
+		PrewriteWritePri:      atomic.LoadUint64(&c.stats.PrewriteWritePri),
+		PrewriteWriteSec:      atomic.LoadUint64(&c.stats.PrewriteWriteSec),
+		PrewriteEpochNotMatch: atomic.LoadUint64(&c.stats.PrewriteEpochNotMatch),
+		CommitKeyLocked:       atomic.LoadUint64(&c.stats.CommitKeyLocked),
+		CommitLockMismatch:    atomic.LoadUint64(&c.stats.CommitLockMismatch),
+		CommitEpochNotMatch:   atomic.LoadUint64(&c.stats.CommitEpochNotMatch),
+		GetKeyLocked:          atomic.LoadUint64(&c.stats.GetKeyLocked),
+		GetKeyLockedPri:       atomic.LoadUint64(&c.stats.GetKeyLockedPri),
+		GetKeyLockedSec:       atomic.LoadUint64(&c.stats.GetKeyLockedSec),
+		GetEpochNotMatch:      atomic.LoadUint64(&c.stats.GetEpochNotMatch),
+		ResolveNoAction:       atomic.LoadUint64(&c.stats.ResolveNoAction),
+		ResolveRollback:       atomic.LoadUint64(&c.stats.ResolveRollback),
+		ResolveCommit:         atomic.LoadUint64(&c.stats.ResolveCommit),
+		ResolveLockNotExist:   atomic.LoadUint64(&c.stats.ResolveLockNotExist),
+		ResolveTtlExpire:      atomic.LoadUint64(&c.stats.ResolveTtlExpire),
+		ResolveError:          atomic.LoadUint64(&c.stats.ResolveError),
+	}
+}
+type putTask struct {
+	ctx   context.Context
+	key   []byte
+	value []byte
+	resp  chan error
+}
+
+type Pipeline struct {
+	client *Client
+	tasks  chan putTask
+	wg     sync.WaitGroup
+}
+
+type WriteStream struct {
+	client   *Client
+	stream   titankvpb.TitanKV_WriteClient
+	regionID uint64
+}
+
+func NewPipeline(c *Client, workers int, queueSize int) *Pipeline {
+	if workers <= 0 {
+		workers = 4
+	}
+	if queueSize <= 0 {
+		queueSize = 1024
+	}
+	p := &Pipeline{
+		client: c,
+		tasks:  make(chan putTask, queueSize),
+	}
+	for i := 0; i < workers; i++ {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			for task := range p.tasks {
+				err := p.client.Put(task.ctx, task.key, task.value)
+				task.resp <- err
+				close(task.resp)
+			}
+		}()
+	}
+	return p
+}
+
+func (p *Pipeline) PutAsync(ctx context.Context, key, value []byte) <-chan error {
+	ch := make(chan error, 1)
+	p.tasks <- putTask{ctx: ctx, key: key, value: value, resp: ch}
+	return ch
+}
+
+func (p *Pipeline) Close() {
+	close(p.tasks)
+	p.wg.Wait()
+}
+
+func (c *Client) OpenWriteStream(ctx context.Context, regionID uint64, key []byte) (*WriteStream, error) {
+	addr, err := c.getAddrForReq(ctx, regionID, key)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := c.getConn(addr)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := titankvpb.NewTitanKVClient(conn).Write(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteStream{client: c, stream: stream, regionID: regionID}, nil
+}
+
+func (ws *WriteStream) Send(ctx context.Context, mutations []*titankvpb.Mutation) error {
+	if len(mutations) == 0 {
+		return nil
+	}
+	key := mutations[0].Key
+	if ws.regionID == 0 {
+		if len(key) > 0 {
+			_, _ = ws.client.LocateLeader(ctx, key)
+		}
+		if region, _ := ws.client.cache.Search(key); region != nil {
+			ws.regionID = region.Id
+		} else {
+			ws.regionID = 1
+		}
+	}
+	var epoch *titankvpb.RegionEpoch
+	if region, _ := ws.client.cache.Search(key); region != nil && region.RegionEpoch != nil {
+		epoch = &titankvpb.RegionEpoch{
+			ConfVer: region.RegionEpoch.ConfVer,
+			Version: region.RegionEpoch.Version,
+		}
+	}
+	req := &titankvpb.WriteRequest{
+		Context: &titankvpb.RegionContext{
+			RegionId:    ws.regionID,
+			RegionEpoch: epoch,
+		},
+		Mutations: mutations,
+	}
+	if err := ws.stream.Send(req); err != nil {
+		return err
+	}
+	resp, err := ws.stream.Recv()
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		if strings.Contains(resp.Error, "epoch") {
+			ws.client.cache.Invalidate(key)
+		}
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (ws *WriteStream) CloseSend() error {
+	return ws.stream.CloseSend()
 }
 
 func NewClient(pdAddr string) (*Client, error) {
-	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(pdAddr, dialOptions()...)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Client{
-		pdClient: pdpb.NewPDClient(conn),
-		cache:    NewRegionCache(),
-	}, nil
+	c := &Client{
+		pdClient:  pdpb.NewPDClient(conn),
+		cache:     NewRegionCache(),
+		conns:     make(map[string]*grpc.ClientConn),
+		kvClients: make(map[string]titankvpb.TitanKVClient),
+		tsBatchCh: make(chan tsResult, 1),
+		tsReqCh:   make(chan struct{}, 1),
+	}
+	c.tsCond = sync.NewCond(&c.tsMu)
+	
+	// Start TSO pre-fetcher
+	go c.tsLoop()
+	
+	return c, nil
+}
+
+func (c *Client) tsLoop() {
+	for range c.tsReqCh {
+		req := &pdpb.GetTSRequest{Count: tsBatchSize}
+		resp, err := c.pdClient.GetTS(context.Background(), req)
+		c.tsBatchCh <- tsResult{resp: resp, err: err}
+	}
 }
 
 // 核心逻辑：定位 Key 所在的 Leader 地址
@@ -44,43 +273,49 @@ func (c *Client) LocateLeader(ctx context.Context, key []byte) (string, error) {
 
 	// 2. 缓存未命中，查 PD (RPC)
 	req := &pdpb.GetRegionRequest{Key: key}
-	//log.Printf("[Client] Asking PD for key: %s", string(key))
-	resp, err := c.pdClient.GetRegion(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("PD GetRegion failed: %v", err)
-	}
-	if resp == nil || resp.Region == nil {
-		c.cache.Invalidate(key)
-		return "", fmt.Errorf("PD returned nil region")
-	}
-	log.Printf("[Client] PD returned: Region %d, Epoch: %v", resp.Region.Id, resp.Region.RegionEpoch)
-	// 如果 Leader 为空，可能是正在选举，返回错误让上层重试
-	if resp.Leader == nil {
-		c.cache.Invalidate(key)
-		return "", fmt.Errorf("no leader for region %d", resp.Region.Id)
-	}
-
-	// 3. 更新缓存
-	if resp.Region != nil && resp.Leader != nil {
-		c.cache.UpdateRegion(resp.Region, resp.Leader)
-
-		// 还需要获取 Store 地址
-		// 这一步也需要 RPC (GetStore)，或者我们假设 PD 返回的 Leader 包含地址信息？
-		// Proto 中 Peer 只有 ID 和 StoreID。
-		// 我们需要再调一次 GetStore。
-
-		storeReq := &pdpb.GetStoreRequest{StoreId: resp.Leader.StoreId}
-		storeResp, err := c.pdClient.GetStore(ctx, storeReq)
+	var lastErr error
+	// Retry up to 20 times (approx 10 seconds) to handle cluster bootstrap or leader election delays
+	for i := 0; i < 20; i++ {
+		resp, err := c.pdClient.GetRegion(ctx, req)
 		if err != nil {
-			return "", fmt.Errorf("PD GetStore failed: %v", err)
-		}
-		if storeResp == nil || storeResp.Store == nil {
-			return "", fmt.Errorf("PD returned nil store for %d", resp.Leader.StoreId)
+			lastErr = fmt.Errorf("PD GetRegion failed: %v", err)
+			// Don't break immediately on network error, retry might help
+		} else if resp == nil || resp.Region == nil {
+			c.cache.Invalidate(key)
+			lastErr = fmt.Errorf("PD returned nil region")
+		} else if resp.Leader == nil {
+			c.cache.Invalidate(key)
+			lastErr = fmt.Errorf("no leader for region %d", resp.Region.Id)
+		} else {
+			c.cache.UpdateRegion(resp.Region, resp.Leader)
+
+			addr := c.cache.GetStoreAddr(resp.Leader.StoreId)
+			if addr != "" {
+				return addr, nil
+			}
+
+			storeReq := &pdpb.GetStoreRequest{StoreId: resp.Leader.StoreId}
+			storeResp, err := c.pdClient.GetStore(ctx, storeReq)
+			if err != nil {
+				// If GetStore fails, we can retry loop
+				lastErr = fmt.Errorf("PD GetStore failed: %v", err)
+			} else if storeResp == nil || storeResp.Store == nil {
+				lastErr = fmt.Errorf("PD returned nil store for %d", resp.Leader.StoreId)
+			} else {
+				addr = storeResp.Store.Address
+				c.cache.UpdateStore(resp.Leader.StoreId, addr)
+				return addr, nil
+			}
 		}
 
-		addr := storeResp.Store.Address
-		c.cache.UpdateStore(resp.Leader.StoreId, addr)
-		return addr, nil
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(time.Duration(i+1) * 100 * time.Millisecond):
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
 	}
 
 	return "", fmt.Errorf("region not found")
@@ -99,7 +334,7 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 			addr = "127.0.0.1:9091"
 		}
 
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		kvClient, err := c.getKVClient(addr)
 		if err != nil {
 			if bo.Sleep() != nil {
 				return err
@@ -107,12 +342,8 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 			continue
 		}
 
-		// 【关键】重命名为 kvClient，避免与结构体字段 c.pdClient 混淆，或者与之前的 client 变量冲突
-		kvClient := titankvpb.NewTitanKVClient(conn)
-
 		region, _ := c.cache.Search(key)
 		if region == nil {
-			conn.Close()
 			c.cache.Invalidate(key)
 			if bo.Sleep() != nil {
 				return fmt.Errorf("region not found")
@@ -141,7 +372,6 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 
 		// 【关键】使用 kvClient 调用
 		resp, err := kvClient.Put(ctx, req)
-		conn.Close()
 
 		if err != nil {
 			c.cache.Invalidate(key)
@@ -152,7 +382,6 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 		}
 
 		if resp.ErrCode == 1 {
-			log.Printf("Epoch mismatch for key %s, invalidating cache...", key)
 			c.cache.Invalidate(key)
 			if bo.Sleep() != nil {
 				return fmt.Errorf("epoch mismatch")
@@ -167,14 +396,77 @@ func (c *Client) Put(ctx context.Context, key, value []byte) error {
 
 // 获取 TSO
 func (c *Client) GetTS(ctx context.Context) (uint64, error) {
-	req := &pdpb.GetTSRequest{Count: 1}
-	resp, err := c.pdClient.GetTS(ctx, req)
-	if err != nil {
-		return 0, err
+	for {
+		c.tsMu.Lock()
+		
+		// 1. Try to trigger pre-fetch if cache is low
+		if c.tsRemain < tsBatchSize/4 {
+			select {
+			case c.tsReqCh <- struct{}{}:
+			default:
+			}
+		}
+
+		if c.tsRemain > 0 {
+			ts := uint64(c.tsPhysical)<<18 | uint64(c.tsLogical)
+			c.tsLogical++
+			c.tsRemain--
+			c.tsMu.Unlock()
+			return ts, nil
+		}
+		
+		// 2. Cache empty. Need to fetch.
+		// Ensure a request is inflight
+		select {
+		case c.tsReqCh <- struct{}{}:
+		default:
+		}
+
+		// 3. Elect a leader to wait for the batch
+		if atomic.CompareAndSwapInt32(&c.tsFetching, 0, 1) {
+			c.tsMu.Unlock()
+			
+			// Wait for result from pre-fetcher
+			res := <-c.tsBatchCh
+			
+			c.tsMu.Lock()
+			atomic.StoreInt32(&c.tsFetching, 0)
+			
+			if res.err != nil {
+				c.tsCond.Broadcast() // Wake up others (they will retry or fail)
+				c.tsMu.Unlock()
+				return 0, res.err
+			}
+			
+			if res.resp == nil || res.resp.Timestamp == nil || res.resp.Count == 0 {
+				c.tsCond.Broadcast()
+				c.tsMu.Unlock()
+				return 0, fmt.Errorf("invalid pd tso response")
+			}
+
+			c.tsPhysical = res.resp.Timestamp.Physical
+			c.tsLogical = res.resp.Timestamp.Logical - int64(res.resp.Count) + 1
+			c.tsRemain = res.resp.Count
+			
+			// Allocate one for self
+			ts := uint64(c.tsPhysical)<<18 | uint64(c.tsLogical)
+			c.tsLogical++
+			c.tsRemain--
+			
+			c.tsCond.Broadcast()
+			c.tsMu.Unlock()
+			return ts, nil
+			
+		} else {
+			// Follower: wait for leader to fill cache
+			c.tsCond.Wait()
+			c.tsMu.Unlock()
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			continue
+		}
 	}
-	// 组合 Physical + Logical
-	ts := uint64(resp.Timestamp.Physical)<<18 | uint64(resp.Timestamp.Logical)
-	return ts, nil
 }
 
 func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteRequest) (*titankvpb.PrewriteResponse, error) {
@@ -206,7 +498,7 @@ func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteReques
 			addr = "127.0.0.1:9091"
 		}
 
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		kvClient, err := c.getKVClient(addr)
 		if err != nil {
 			lastErr = err
 			if bo.Sleep() != nil {
@@ -214,10 +506,7 @@ func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteReques
 			}
 			continue
 		}
-
-		client := titankvpb.NewTitanKVClient(conn)
-		resp, err := client.Prewrite(ctx, req)
-		conn.Close()
+		resp, err := kvClient.Prewrite(ctx, req)
 
 		if err != nil {
 			// 网络错误，重试
@@ -229,13 +518,90 @@ func (c *Client) SendPrewrite(ctx context.Context, req *titankvpb.PrewriteReques
 			continue
 		}
 
-		// 成功响应 (哪怕包含业务 Error)
+		if resp != nil {
+			if resp.KeyError != nil || resp.Error == "KeyLocked" {
+				atomic.AddUint64(&c.stats.PrewriteKeyLocked, 1)
+				if resp.KeyError != nil && resp.KeyError.LockInfo != nil {
+					if bytes.Equal(resp.KeyError.LockInfo.PrimaryKey, resp.KeyError.LockInfo.Key) {
+						atomic.AddUint64(&c.stats.PrewriteKeyLockedPri, 1)
+					} else {
+						atomic.AddUint64(&c.stats.PrewriteKeyLockedSec, 1)
+					}
+				}
+			}
+			if resp.Conflict != nil || resp.Error == "WriteConflict" {
+				atomic.AddUint64(&c.stats.PrewriteWriteConflict, 1)
+				if resp.Conflict != nil {
+					if bytes.Equal(resp.Conflict.Key, resp.Conflict.Primary) {
+						atomic.AddUint64(&c.stats.PrewriteWritePri, 1)
+					} else {
+						atomic.AddUint64(&c.stats.PrewriteWriteSec, 1)
+					}
+				}
+			}
+			if resp.Error == "EpochNotMatch" {
+				atomic.AddUint64(&c.stats.PrewriteEpochNotMatch, 1)
+			}
+		}
 		return resp, nil
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("send prewrite max retries exceeded")
+}
+
+func (c *Client) AcquirePessimisticLock(ctx context.Context, req *titankvpb.AcquirePessimisticLockRequest) (*titankvpb.AcquirePessimisticLockResponse, error) {
+	if len(req.Mutations) == 0 {
+		return &titankvpb.AcquirePessimisticLockResponse{}, nil
+	}
+	key := req.Mutations[0].Key
+
+	var regionID uint64
+	if req.Context != nil {
+		regionID = req.Context.RegionId
+	}
+
+	if req.Context == nil {
+		req.Context = &titankvpb.RegionContext{RegionId: 1, RegionEpoch: &titankvpb.RegionEpoch{ConfVer: 1, Version: 1}}
+	}
+
+	bo := NewBackoffer(ctx)
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		addr, err := c.getAddrForReq(ctx, regionID, key)
+		if err != nil {
+			if bo.Sleep() != nil {
+				return nil, err
+			}
+			addr = "127.0.0.1:9091"
+		}
+
+		kvClient, err := c.getKVClient(addr)
+		if err != nil {
+			lastErr = err
+			if bo.Sleep() != nil {
+				return nil, lastErr
+			}
+			continue
+		}
+		resp, err := kvClient.AcquirePessimisticLock(ctx, req)
+
+		if err != nil {
+			c.cache.Invalidate(key)
+			lastErr = err
+			if bo.Sleep() != nil {
+				return nil, lastErr
+			}
+			continue
+		}
+
+		return resp, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("acquire pessimistic lock max retries exceeded")
 }
 
 // 定向发送 Commit
@@ -255,33 +621,108 @@ func (c *Client) SendCommit(ctx context.Context, req *titankvpb.CommitRequest) (
 		addr = "127.0.0.1:9091"
 	}
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	kvClient, err := c.getKVClient(addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
-	return titankvpb.NewTitanKVClient(conn).Commit(ctx, req)
+	resp, err := kvClient.Commit(ctx, req)
+	if err != nil {
+		st, _ := status.FromError(err)
+		if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
+			atomic.AddUint64(&c.stats.CommitEpochNotMatch, 1)
+		}
+		return nil, err
+	}
+	if resp != nil && resp.Error != "" {
+		if strings.Contains(resp.Error, "Lock mismatch") {
+			atomic.AddUint64(&c.stats.CommitLockMismatch, 1)
+		}
+		if strings.Contains(resp.Error, "Key is locked") {
+			atomic.AddUint64(&c.stats.CommitKeyLocked, 1)
+		}
+		if resp.Error == "EpochNotMatch" {
+			atomic.AddUint64(&c.stats.CommitEpochNotMatch, 1)
+		}
+	}
+	return resp, nil
+}
+
+func (c *Client) SendCommitBatch(ctx context.Context, reqs []*titankvpb.CommitRequest, workers int) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	if workers <= 0 {
+		workers = 4
+	}
+	if workers > len(reqs) {
+		workers = len(reqs)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	bufferSize := workers * 2
+	if bufferSize > len(reqs) {
+		bufferSize = len(reqs)
+	}
+	if bufferSize < 1 {
+		bufferSize = 1
+	}
+	reqCh := make(chan *titankvpb.CommitRequest, bufferSize)
+
+	for i := 0; i < workers; i++ {
+		g.Go(func() error {
+			for {
+				select {
+				case <-gctx.Done():
+					return gctx.Err()
+				case req, ok := <-reqCh:
+					if !ok {
+						return nil
+					}
+					if _, err := c.SendCommit(gctx, req); err != nil {
+						return err
+					}
+				}
+			}
+		})
+	}
+
+	for _, req := range reqs {
+		select {
+		case <-gctx.Done():
+			close(reqCh)
+			return gctx.Err()
+		case reqCh <- req:
+		}
+	}
+	close(reqCh)
+	return g.Wait()
 }
 
 func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte, error) {
 	bo := NewBackoffer(ctx)
 	for i := 0; i < 3; i++ { // 重试 3 次
 		// 1. 定位路由
-		addr, err := c.LocateLeader(ctx, key)
+		var regionID uint64
+		region, _ := c.cache.Search(key)
+		if region != nil {
+			regionID = region.Id
+		}
+		addr, err := c.getAddrForReq(ctx, regionID, key)
 		if err != nil {
-			addr = "127.0.0.1:9091" // Fallback for test
+			addr = "127.0.0.1:9091"
+		}
+		if region == nil {
+			region, _ = c.cache.Search(key)
 		}
 
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		kvClient, err := c.getKVClient(addr)
 		if err != nil {
 			return nil, err
 		}
-		kvClient := titankvpb.NewTitanKVClient(conn)
 
 		// 2. 构造请求
 		// 填充 RegionContext
-		region, _ := c.cache.Search(key)
 		var context *titankvpb.RegionContext
 		if region != nil {
 			context = &titankvpb.RegionContext{
@@ -300,12 +741,10 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
 
 		// 3. 发送请求
 		resp, err := kvClient.Get(ctx, req)
-		conn.Close()
 
 		if err != nil {
 			// 处理错误
 			st, _ := status.FromError(err)
-			log.Printf("[DEBUG] SnapshotGet Error: Code=%v, Msg=%s", st.Code(), st.Message())
 			if st.Code() == codes.NotFound {
 				return nil, nil
 			}
@@ -313,16 +752,22 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
 				return nil, nil
 			}
 			if st.Code() == codes.Aborted && st.Message() == "KeyLocked" {
-				log.Printf("[Client] SnapshotGet hit lock. Details len: %d", len(st.Details()))
+				atomic.AddUint64(&c.stats.GetKeyLocked, 1)
 				// 解析 Details
 				for _, detail := range st.Details() {
 					if keyErr, ok := detail.(*titankvpb.KeyError); ok {
+						if keyErr.LockInfo != nil {
+							if bytes.Equal(keyErr.LockInfo.PrimaryKey, keyErr.LockInfo.Key) {
+								atomic.AddUint64(&c.stats.GetKeyLockedPri, 1)
+							} else {
+								atomic.AddUint64(&c.stats.GetKeyLockedSec, 1)
+							}
+						}
 						// 捕获 ResolveLocks 的返回值
 						resolved, resolveErr := c.ResolveLocks(ctx, keyErr.LockInfo)
-
-						// 打印 Resolve 的结果，而不是 Get 的错误
-						log.Printf("[Client] Resolve result: %v, Err: %v", resolved, resolveErr)
-
+						if resolveErr != nil {
+							return nil, resolveErr
+						}
 						if resolved {
 							continue // 重试
 						}
@@ -334,6 +779,7 @@ func (c *Client) SnapshotGet(ctx context.Context, key []byte, ts uint64) ([]byte
 				continue
 			}
 			if st.Code() == codes.Aborted && st.Message() == "EpochNotMatch" {
+				atomic.AddUint64(&c.stats.GetEpochNotMatch, 1)
 				c.cache.Invalidate(key)
 				time.Sleep(50 * time.Millisecond)
 				continue
@@ -367,8 +813,6 @@ func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo)
 	if err != nil {
 		return false, err
 	}
-	log.Printf("[Client] Checking Txn Status: Primary=%s, LockTS=%d, CallerTS=%d",
-		string(lockInfo.PrimaryKey), lockInfo.LockVersion, currentTS)
 	checkReq := &titankvpb.CheckTxnStatusRequest{
 		PrimaryKey: lockInfo.PrimaryKey,
 		LockTs:     lockInfo.LockVersion,
@@ -378,11 +822,12 @@ func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo)
 	// 发送 CheckTxnStatus (定向发送给 Primary)
 	checkResp, err := c.SendCheckTxnStatus(ctx, checkReq) // 需实现
 	if err != nil {
+		atomic.AddUint64(&c.stats.ResolveError, 1)
 		return false, err
 	}
-	log.Printf("[Client] Check Result: Action=%v", checkResp.Action)
 	// 2. 根据 Action 决定
 	if checkResp.Action == titankvpb.CheckTxnStatusResponse_NoAction {
+		atomic.AddUint64(&c.stats.ResolveNoAction, 1)
 		return false, nil // 等待，不重试（或者由上层 Backoff）
 	}
 
@@ -396,6 +841,15 @@ func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo)
 		checkResp.Action == titankvpb.CheckTxnStatusResponse_TtlExpire {
 		commitTS = 0
 	}
+	if checkResp.Action == titankvpb.CheckTxnStatusResponse_Rollback {
+		atomic.AddUint64(&c.stats.ResolveRollback, 1)
+	} else if checkResp.Action == titankvpb.CheckTxnStatusResponse_LockNotExist {
+		atomic.AddUint64(&c.stats.ResolveLockNotExist, 1)
+	} else if checkResp.Action == titankvpb.CheckTxnStatusResponse_TtlExpire {
+		atomic.AddUint64(&c.stats.ResolveTtlExpire, 1)
+	} else if checkResp.Action == titankvpb.CheckTxnStatusResponse_Commit {
+		atomic.AddUint64(&c.stats.ResolveCommit, 1)
+	}
 
 	resolveReq := &titankvpb.ResolveLockRequest{
 		StartTs:  lockInfo.LockVersion,
@@ -405,9 +859,9 @@ func (c *Client) ResolveLocks(ctx context.Context, lockInfo *titankvpb.LockInfo)
 
 	// 发送 ResolveLock (定向发送给当前 Key)
 	// 注意：lockInfo.Key 不一定是 Primary，所以要重新路由
-	log.Printf("[Client] Sending ResolveLock: CommitTS=%d (0=Rollback)", commitTS)
 	_, err = c.SendResolveLock(ctx, resolveReq) // 需实现
 	if err != nil {
+		atomic.AddUint64(&c.stats.ResolveError, 1)
 		return false, err
 	}
 
@@ -434,13 +888,12 @@ func (c *Client) SendCheckTxnStatus(ctx context.Context, req *titankvpb.CheckTxn
 	regionID := req.Context.RegionId
 	addr, _ := c.getAddrForReq(ctx, regionID, key)
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	kvClient, err := c.getKVClient(addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
-	return titankvpb.NewTitanKVClient(conn).CheckTxnStatus(ctx, req)
+	return kvClient.CheckTxnStatus(ctx, req)
 }
 
 // 注意：SendResolveLock 已经是 GroupByRegion 的产物了 (Client.ResolveLocks 调用它)
@@ -465,26 +918,89 @@ func (c *Client) SendResolveLock(ctx context.Context, req *titankvpb.ResolveLock
 
 	addr, _ := c.getAddrForReq(ctx, regionID, key)
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	kvClient, err := c.getKVClient(addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
-	return titankvpb.NewTitanKVClient(conn).ResolveLock(ctx, req)
+	return kvClient.ResolveLock(ctx, req)
 }
 
 func (c *Client) GetRegionCache() *RegionCache {
 	return c.cache
 }
 
+// Follower Read Context Key
+type followerReadKey struct{}
+
+// WithFollowerRead returns a context that enables Follower Read
+func WithFollowerRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, followerReadKey{}, true)
+}
+
+func isFollowerRead(ctx context.Context) bool {
+	val := ctx.Value(followerReadKey{})
+	return val != nil && val.(bool)
+}
+
 // 统一的辅助发送逻辑
 func (c *Client) getAddrForReq(ctx context.Context, regionID uint64, key []byte) (string, error) {
+	// 0. Follower Read Logic
+	if isFollowerRead(ctx) && len(key) > 0 {
+		region, leader := c.cache.Search(key)
+		if region != nil {
+			// Select a candidate peer (prefer follower)
+			var candidates []*pdpb.Peer
+			for _, p := range region.Peers {
+				if leader != nil && p.Id == leader.Id {
+					continue
+				}
+				candidates = append(candidates, p)
+			}
+
+			var target *pdpb.Peer
+			if len(candidates) > 0 {
+				// Randomly select a follower
+				target = candidates[rand.Intn(len(candidates))]
+			} else if leader != nil {
+				// Fallback to leader if no followers available
+				target = leader
+			} else if len(region.Peers) > 0 {
+				// Fallback to any peer
+				target = region.Peers[0]
+			}
+
+			if target != nil {
+				addr := c.cache.GetStoreAddr(target.StoreId)
+				if addr != "" {
+					return addr, nil
+				}
+				// If address not in cache, try to fetch from PD
+				storeResp, err := c.pdClient.GetStore(ctx, &pdpb.GetStoreRequest{StoreId: target.StoreId})
+				if err == nil && storeResp != nil && storeResp.Store != nil {
+					c.cache.UpdateStore(target.StoreId, storeResp.Store.Address)
+					return storeResp.Store.Address, nil
+				}
+			}
+		}
+	}
+
 	// 1. 优先尝试通过 RegionID 直接获取
 	if regionID > 0 {
 		addr := c.cache.GetLeaderAddr(regionID)
 		if addr != "" {
 			return addr, nil
+		}
+		leader := c.cache.GetLeader(regionID)
+		if leader != nil {
+			storeResp, err := c.pdClient.GetStore(ctx, &pdpb.GetStoreRequest{StoreId: leader.StoreId})
+			if err != nil {
+				return "", err
+			}
+			if storeResp != nil && storeResp.Store != nil && storeResp.Store.Address != "" {
+				c.cache.UpdateStore(leader.StoreId, storeResp.Store.Address)
+				return storeResp.Store.Address, nil
+			}
 		}
 	}
 
@@ -498,6 +1014,46 @@ func (c *Client) getAddrForReq(ctx context.Context, regionID uint64, key []byte)
 
 	// 3. 都没有，只能 Blind Guess (单机测试用)
 	return "127.0.0.1:9091", nil
+}
+
+func (c *Client) getKVClient(addr string) (titankvpb.TitanKVClient, error) {
+	if addr == "" {
+		addr = "127.0.0.1:9091"
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if client, ok := c.kvClients[addr]; ok {
+		return client, nil
+	}
+	conn, ok := c.conns[addr]
+	if !ok {
+		var err error
+		conn, err = grpc.Dial(addr, dialOptions()...)
+		if err != nil {
+			return nil, err
+		}
+		c.conns[addr] = conn
+	}
+	client := titankvpb.NewTitanKVClient(conn)
+	c.kvClients[addr] = client
+	return client, nil
+}
+
+func (c *Client) getConn(addr string) (*grpc.ClientConn, error) {
+	if addr == "" {
+		addr = "127.0.0.1:9091"
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if conn, ok := c.conns[addr]; ok {
+		return conn, nil
+	}
+	conn, err := grpc.Dial(addr, dialOptions()...)
+	if err != nil {
+		return nil, err
+	}
+	c.conns[addr] = conn
+	return conn, nil
 }
 
 func toPdpbEpoch(e *titankvpb.RegionEpoch) *pdpb.RegionEpoch {

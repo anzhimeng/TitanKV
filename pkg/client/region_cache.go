@@ -61,6 +61,23 @@ func (c *RegionCache) Search(key []byte) (*pdpb.Region, *pdpb.Peer) {
 	return target.region, target.leader
 }
 
+func (c *RegionCache) GetSingleRegion() (*pdpb.Region, *pdpb.Peer) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.tree.Len() != 1 {
+		return nil, nil
+	}
+	var target *regionItem
+	c.tree.Ascend(func(i btree.Item) bool {
+		target = i.(*regionItem)
+		return false
+	})
+	if target == nil {
+		return nil, nil
+	}
+	return target.region, target.leader
+}
+
 // 更新缓存 (通常在 PD 返回新路由或 Server 报错时调用)
 func (c *RegionCache) UpdateRegion(region *pdpb.Region, leader *pdpb.Peer) {
 	c.mu.Lock()
@@ -103,6 +120,12 @@ func (c *RegionCache) GetStoreAddr(storeID uint64) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.stores[storeID]
+}
+
+func (c *RegionCache) GetLeader(regionID uint64) *pdpb.Peer {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.leaders[regionID]
 }
 
 // 通过 RegionID 获取 Leader 的地址

@@ -1,0 +1,14 @@
+Benchmark Result:
+ToCompleted 2000 txns
+Completed 3000 txns
+Completed 4000 txns
+Completed 5000 txns
+Completed 6000 txns
+Completed 7000 txns
+Completed 8000 txns
+Benchmark Result:
+Total Txns: 8023
+Elapsed: 6.981327174s
+TPS: 1149.21
+Avg Latency: 42340.72 us
+Verify k_0_0: v_0_0

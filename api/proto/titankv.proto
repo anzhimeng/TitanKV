@@ -10,6 +10,7 @@ service TitanKV {
     rpc Get(GetRequest) returns (GetResponse);
     rpc Put(PutRequest) returns (PutResponse);
     rpc Delete(DeleteRequest) returns (DeleteResponse);
+    rpc Write(stream WriteRequest) returns (stream WriteResponse);
 
     // 【新增】Raft Node API
     // 用于节点间传输 Raft 消息 (Vote, AppendEntries, etc.)
@@ -22,6 +23,59 @@ service TitanKV {
     rpc Commit(CommitRequest) returns (CommitResponse);
     rpc CheckTxnStatus(CheckTxnStatusRequest) returns (CheckTxnStatusResponse);
     rpc ResolveLock(ResolveLockRequest) returns (ResolveLockResponse);
+    rpc AcquirePessimisticLock(AcquirePessimisticLockRequest) returns (AcquirePessimisticLockResponse);
+    // Coprocessor
+    rpc ExecuteCoprocessor(CoprocessorRequest) returns (CoprocessorResponse);
+}
+
+message CoprocessorRequest {
+    RegionContext context = 1;
+    enum CoprocessorType {
+        COUNT = 0;
+        SUM = 1;
+    }
+    CoprocessorType type = 2;
+    
+    // Scan Range
+    bytes start_key = 3;
+    bytes end_key = 4;
+    uint64 start_ts = 5;
+    
+    // Filter
+    bytes filter_value = 6;
+    
+    enum FilterOperator {
+        EQUAL = 0;
+        NOT_EQUAL = 1;
+        GREATER = 2;
+        LESS = 3;
+        GREATER_OR_EQUAL = 4;
+        LESS_OR_EQUAL = 5;
+    }
+    FilterOperator filter_operator = 7;
+}
+
+message CoprocessorResponse {
+    uint64 count = 1;
+    int64 sum = 2;
+    string error = 3;
+}
+
+message AcquirePessimisticLockRequest {
+    RegionContext context = 1;
+    repeated Mutation mutations = 2; // Only Key and Op matter (Lock/Put/Delete)
+    uint64 start_ts = 3;
+    bytes primary_key = 4;
+    uint64 lock_ttl = 5;
+    uint64 for_update_ts = 6; // Usually same as start_ts for Repeatable Read
+    bool return_values = 7;   // If true, return the current values
+}
+
+message AcquirePessimisticLockResponse {
+    string error = 1;
+    KeyError key_error = 2; // Locked by others
+    repeated bytes values = 3; // Corresponding to mutations
+    repeated bool not_found = 4; // If key doesn't exist
 }
 
 message ResolveLockRequest {
@@ -117,6 +171,16 @@ message PrewriteRequest {
     // Primary Key (用于故障恢复)
     bytes primary_key = 4;
     uint64 lock_ttl = 5;
+    // 1PC 优化标记
+    bool use_1pc = 6;
+    uint64 commit_ts = 7;
+    // Async Commit 字段
+    bool use_async_commit = 8;
+    repeated bytes secondaries = 9;
+    uint64 min_commit_ts = 10;
+    // Pessimistic Transaction
+    repeated bool is_pessimistic_lock = 11; // Corresponding to mutations
+    uint64 for_update_ts = 12;
 }
 
 message Mutation {
@@ -130,6 +194,15 @@ message Mutation {
     bytes value = 3;
 }
 
+message WriteRequest {
+    RegionContext context = 1;
+    repeated Mutation mutations = 2;
+}
+
+message WriteResponse {
+    string error = 1;
+}
+
 message PrewriteResponse {
     // 错误信息
     string error = 1; // 空表示成功
@@ -137,6 +210,11 @@ message PrewriteResponse {
     WriteConflict conflict = 2;
     // 如果有 KeyLocked
     KeyError key_error = 3;
+    // 1PC 结果
+    bool one_pc_committed = 4;
+    uint64 one_pc_commit_ts = 5;
+    // Parallel Commit 结果
+    uint64 min_commit_ts = 6;
 }
 
 message WriteConflict {
@@ -157,6 +235,11 @@ message LockInfo {
     uint64 lock_version = 2;
     bytes key = 3;
     uint64 ttl = 4;
+    bool is_pessimistic_lock = 5;
+    uint64 for_update_ts = 6;
+    bool use_async_commit = 7;
+    uint64 min_commit_ts = 8;
+    repeated bytes secondaries = 9;
 }
 
 message CommitRequest {
@@ -207,6 +290,7 @@ message RaftRequestHeader {
     uint64 region_id = 1;
     RegionEpoch region_epoch = 2;
     Peer peer = 3;
+    bytes uuid = 4; // 用于异步通知结果
 }
 
 message RaftCommand {
@@ -214,6 +298,7 @@ message RaftCommand {
     enum CmdType {
         NORMAL = 0; // Put, Delete
         ADMIN = 1;  // Split, Compact, ConfChange
+        TXN = 2;    // Transaction
     }
     CmdType type = 2;
 
@@ -227,6 +312,12 @@ message RaftCommand {
     // ----------------
 
     AdminRequest admin_request = 6;
+    
+    // Transaction Requests
+    PrewriteRequest prewrite_request = 7;
+    CommitRequest commit_request = 8;
+    ResolveLockRequest resolve_lock_request = 9;
+    AcquirePessimisticLockRequest acquire_pessimistic_lock_request = 10;
 }
 
 message AdminRequest {
@@ -234,10 +325,24 @@ message AdminRequest {
         SPLIT = 0;
         COMPACT = 1;
         CONF_CHANGE = 2;
+        MERGE = 3;
     }
     AdminCmdType cmd_type = 1;
     SplitRequest split = 2;
     ChangePeer change_peer = 3;
+    MergeRequest merge = 4;
+}
+
+message KeyValue {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message MergeRequest {
+    uint64 target_region_id = 1;
+    RegionEpoch target_region_epoch = 2;
+    Region source_region = 3;
+    repeated KeyValue data = 4;
 }
 
 

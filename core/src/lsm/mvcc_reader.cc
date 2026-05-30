@@ -7,7 +7,12 @@
 
 namespace titankv {
 
-MvccReader::MvccReader(DB* db, uint64_t snapshot) : db_(db), snapshot_(snapshot) {}
+constexpr char kValueInlineTag = '\x00';
+constexpr char kValueBlobTag = '\x01';
+
+MvccReader::MvccReader(DB* db, uint64_t snapshot) : db_(db), snapshot_(snapshot) {
+    write_iter_.reset(db_->NewIterator(ReadOptions(), kCFWrite));
+}
 MvccReader::~MvccReader() {}
 
 Status MvccReader::LoadLock(const Slice& key, std::string* lock_info) {
@@ -16,7 +21,10 @@ Status MvccReader::LoadLock(const Slice& key, std::string* lock_info) {
 }
 
 Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string* write_info) {
-    std::unique_ptr<Iterator> iter(db_->NewIterator(ReadOptions(), kCFWrite));
+    if (!write_iter_) {
+        write_iter_.reset(db_->NewIterator(ReadOptions(), kCFWrite));
+    }
+    Iterator* iter = write_iter_.get();
     std::string seek_key = EncodeMvccKey(kCFWrite, key, snapshot_);
     //fprintf(stderr, "[Seek] Target TS: %lu. Target Hex: %s\n", snapshot_, ToHex(seek_key.data(), seek_key.size()).c_str());
     iter->Seek(seek_key);
@@ -41,7 +49,11 @@ Status MvccReader::SeekWrite(const Slice& key, uint64_t* commit_ts, std::string*
             continue;
         }
         *commit_ts = found_commit_ts;
-        *write_info = val.ToString();
+        std::string raw = val.ToString();
+        if (!raw.empty() && (raw[0] == kValueInlineTag || raw[0] == kValueBlobTag)) {
+            raw.erase(0, 1);
+        }
+        *write_info = raw;
         return Status::OK();
     }
     return Status::NotFound("No visible version");

@@ -124,6 +124,9 @@ func (s *PeerStorage) Entries(lo, hi, maxSize uint64) ([]raftpb.Entry, error) {
 		key := RaftLogKey(s.region.Id, i)
 		val, err := s.engine.Get(key)
 		if err != nil {
+			if err.Error() == "key not found" {
+				return nil, raft.ErrUnavailable
+			}
 			return nil, err
 		}
 		
@@ -157,6 +160,9 @@ func (s *PeerStorage) Term(i uint64) (uint64, error) {
 	key := RaftLogKey(s.region.Id, i)
 	val, err := s.engine.Get(key)
 	if err != nil {
+		if err.Error() == "key not found" {
+			return 0, raft.ErrUnavailable
+		}
 		return 0, err
 	}
 	var ent raftpb.Entry
@@ -174,10 +180,7 @@ func (s *PeerStorage) FirstIndex() (uint64, error) {
 }
 
 
-func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) ([]kvPair, error) {
-    var batch []kvPair
-    
-    // 标记状态是否需要更新
+func (s *PeerStorage) AppendBatch(keys *[][]byte, values *[][]byte, entries []raftpb.Entry, raftState *raftpb.HardState) error {
     stateChanged := false
 
     // 1. 处理 Log Entries
@@ -185,7 +188,8 @@ func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState
         for _, ent := range entries {
             key := RaftLogKey(s.region.Id, ent.Index)
             val, _ := ent.Marshal()
-            batch = append(batch, kvPair{key, val})
+            *keys = append(*keys, key)
+            *values = append(*values, val)
         }
         
         // 【关键修复】更新内存中的 LastIndex
@@ -207,9 +211,22 @@ func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState
     if stateChanged {
         key := RaftStateKey(s.region.Id)
         val, _ := proto.Marshal(&s.raftState)
-        batch = append(batch, kvPair{key, val})
+        *keys = append(*keys, key)
+        *values = append(*values, val)
     }
     
+    return nil
+}
+
+func (s *PeerStorage) Append(entries []raftpb.Entry, raftState *raftpb.HardState) ([]kvPair, error) {
+    // Deprecated: Use AppendBatch instead
+    var keys [][]byte
+    var values [][]byte
+    s.AppendBatch(&keys, &values, entries, raftState)
+    var batch []kvPair
+    for i := range keys {
+        batch = append(batch, kvPair{keys[i], values[i]})
+    }
     return batch, nil
 }
 

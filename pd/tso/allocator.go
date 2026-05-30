@@ -65,9 +65,10 @@ func (a *Allocator) Initialize(ctx context.Context) error {
 	if lastSavedTime.After(now) {
 		now = lastSavedTime
 	}
-	
+	now = time.UnixMilli(now.UnixMilli())
+
 	newEnd := now.Add(tsoSaveInterval)
-	
+
 	// 持久化到 Etcd
 	if err := a.saveTsoToEtcd(ctx, newEnd); err != nil {
 		return err
@@ -93,8 +94,8 @@ func (a *Allocator) Generate(count uint32) (pdpb.Timestamp, error) {
 	}
 
 	// 1. 获取物理时间
-	now := time.Now()
-	
+	now := time.UnixMilli(time.Now().UnixMilli())
+
 	// 2. 追赶：如果系统时钟回退，强制使用 lastPhysical
 	if now.Before(a.lastPhysical) {
 		now = a.lastPhysical
@@ -107,15 +108,23 @@ func (a *Allocator) Generate(count uint32) (pdpb.Timestamp, error) {
 
 	// 4. 更新逻辑时钟
 	if now.Equal(a.lastPhysical) {
-		a.lastLogical += int64(count)
-		// 逻辑时钟溢出 (18位 = 262144)
-		if a.lastLogical >= (1 << 18) {
-			time.Sleep(time.Millisecond) // 睡眠 1ms 强制推进物理时间
+		nextLogical := a.lastLogical + int64(count)
+		if nextLogical >= (1 << 18) {
+			time.Sleep(time.Millisecond)
 			now = time.Now()
-			a.lastLogical = 0
+			minNext := time.UnixMilli(a.lastPhysical.UnixMilli() + 1)
+			if now.Before(minNext) {
+				now = minNext
+			}
+			if now.After(a.tsoWindowEnd) {
+				return pdpb.Timestamp{}, errors.New("timestamp window exhausted, waiting for sync")
+			}
+			a.lastLogical = int64(count) - 1
+		} else {
+			a.lastLogical = nextLogical
 		}
 	} else {
-		a.lastLogical = 0
+		a.lastLogical = int64(count) - 1
 	}
 
 	a.lastPhysical = now
@@ -153,7 +162,7 @@ func (a *Allocator) updateTso(ctx context.Context) {
 
 	// 预分配下一个 3秒
 	nextEnd := time.Now().Add(tsoSaveInterval)
-	
+
 	// 写入 Etcd
 	if err := a.saveTsoToEtcd(ctx, nextEnd); err != nil {
 		log.Printf("[TSO] Failed to sync timestamp: %v", err)
@@ -163,7 +172,7 @@ func (a *Allocator) updateTso(ctx context.Context) {
 	a.mu.Lock()
 	a.tsoWindowEnd = nextEnd
 	a.mu.Unlock()
-	
+
 	// log.Printf("[TSO] Window updated to %v", nextEnd) // 调试用
 }
 

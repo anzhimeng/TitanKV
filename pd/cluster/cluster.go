@@ -195,6 +195,10 @@ func (c *RaftCluster) HandleRegionHeartbeat(ctx context.Context, req *pdpb.Regio
 		}
 	}
 
+	if peer == nil && exists && origin.Leader != nil {
+		peer = origin.Leader
+	}
+
 	// 更新倒排索引 (如果 Peer 列表发生了变化，或者这是新 Region)
 	// 简化判断：直接全量更新索引（先删旧的，再加新的），虽然有少许性能损耗但逻辑绝对正确
 	var oldPeers []*pdpb.Peer
@@ -309,13 +313,25 @@ func (c *RaftCluster) GetRegion(key []byte) (*pdpb.Region, *pdpb.Peer) {
 	defer c.mu.RUnlock()
 
 	// 1. 从 B-Tree 查找 Region
-	r := c.regionsTree.Search(key) // 【修复】使用 regionsTree
-    if r != nil {
-        log.Printf("[PD] GetRegion Key=%s -> Region %d, Epoch: %v", string(key), r.Meta.Id, r.Meta.RegionEpoch)
-        return r.Meta, r.Leader
-    }
-    log.Printf("[PD] GetRegion Key=%s -> Not Found", string(key))
-    return nil, nil
+	r := c.regionsTree.Search(key)
+	if r != nil {
+		log.Printf("[PD] GetRegion Key=%s -> Region %d, Epoch: %v", string(key), r.Meta.Id, r.Meta.RegionEpoch)
+		return r.Meta, r.Leader
+	}
+	for _, info := range c.regions {
+		start := info.Meta.GetStartKey()
+		end := info.Meta.GetEndKey()
+		if len(start) > 0 && bytes.Compare(key, start) < 0 {
+			continue
+		}
+		if len(end) > 0 && bytes.Compare(key, end) >= 0 {
+			continue
+		}
+		log.Printf("[PD] GetRegion Key=%s -> Region %d, Epoch: %v", string(key), info.Meta.Id, info.Meta.RegionEpoch)
+		return info.Meta, info.Leader
+	}
+	log.Printf("[PD] GetRegion Key=%s -> Not Found", string(key))
+	return nil, nil
 }
 
 // GetRegionByID

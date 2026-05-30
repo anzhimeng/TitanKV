@@ -4,6 +4,8 @@
 
 namespace titankv {
 
+const size_t BlobRecordHeader::kHeaderSize;
+
 // --- BlobIndex ---
 
 void BlobIndex::EncodeTo(std::string* dst) const {

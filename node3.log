@@ -1,0 +1,44 @@
+nohup: ignoring input
+DEBUG: Entering main
+2026/02/16 15:09:28 ----------------------------------------------------------------
+2026/02/16 15:09:28 My Node ID: 3
+2026/02/16 15:09:28 Cluster Config String: 1=127.0.0.1:9090,2=127.0.0.1:9091,3=127.0.0.1:9092
+2026/02/16 15:09:28 Parsed Peers Map: map[1:127.0.0.1:9090 2:127.0.0.1:9091 3:127.0.0.1:9092]
+2026/02/16 15:09:28 ----------------------------------------------------------------
+2026/02/16 15:09:28 Opening storage at /tmp/node3 (DirectIO: false)...
+[DBImpl] io_uring enabled.
+[BlobStore] Recovered. NextFileID: 1
+2026/02/16 15:09:28 Setting GC Threshold to 0.500000
+[BlobStore] GC Threshold updated to 0.50
+2026/02/16 15:09:28 Successfully registered store 3 to PD
+2026/02/16 15:09:28 Starting RaftStore (Node 3)...
+2026/02/16 15:09:28 Bootstrapping initial region for node 3
+2026/02/16 15:09:28 [DEBUG] PeerStorage InitialState Voters: [1 2 3]
+raft2026/02/16 15:09:28 INFO: 3 switched to configuration voters=(1 2 3)
+raft2026/02/16 15:09:28 INFO: 3 became follower at term 0
+raft2026/02/16 15:09:28 INFO: newRaft 3 [peers: [1,2,3], term: 0, commit: 0, applied: 0, lastindex: 0, lastterm: 0]
+2026/02/16 15:09:28 Server listening on port 9092
+DEBUG: Calling grpcServer.Serve
+2026/02/16 15:09:28 Pprof & Metrics listening on 0.0.0.0:6063
+raft2026/02/16 15:09:32 INFO: 3 is starting a new election at term 0
+raft2026/02/16 15:09:32 INFO: 3 became pre-candidate at term 0
+raft2026/02/16 15:09:32 INFO: 3 received MsgPreVoteResp from 3 at term 0
+raft2026/02/16 15:09:32 INFO: 3 [logterm: 0, index: 0] sent MsgPreVote request to 1 at term 0
+raft2026/02/16 15:09:32 INFO: 3 [logterm: 0, index: 0] sent MsgPreVote request to 2 at term 0
+raft2026/02/16 15:09:32 INFO: 3 received MsgPreVoteResp from 1 at term 0
+raft2026/02/16 15:09:32 INFO: 3 has received 2 MsgPreVoteResp votes and 0 vote rejections
+raft2026/02/16 15:09:32 INFO: 3 became candidate at term 1
+raft2026/02/16 15:09:32 INFO: 3 received MsgVoteResp from 3 at term 1
+raft2026/02/16 15:09:32 INFO: 3 [logterm: 0, index: 0] sent MsgVote request to 1 at term 1
+raft2026/02/16 15:09:32 INFO: 3 [logterm: 0, index: 0] sent MsgVote request to 2 at term 1
+raft2026/02/16 15:09:32 INFO: 3 received MsgVoteResp from 2 at term 1
+raft2026/02/16 15:09:32 INFO: 3 has received 2 MsgVoteResp votes and 0 vote rejections
+raft2026/02/16 15:09:32 INFO: 3 became leader at term 1
+[AcquirePessimisticLock] Writing Lock. Key=z, TS=464316210917146625
+[AcquirePessimisticLock] Conflict! Key=z, LockTS=464316210917146625, MyTS=464316210917146626
+[AcquirePessimisticLock] Conflict! Key=z, LockTS=464316210917146625, MyTS=464316210917146626
+[AcquirePessimisticLock] Conflict! Key=z, LockTS=464316210917146625, MyTS=464316210917146626
+[AcquirePessimisticLock] Conflict! Key=z, LockTS=464316210917146625, MyTS=464316210917146626
+[AcquirePessimisticLock] Conflict! Key=z, LockTS=464316210917146625, MyTS=464316210917146626
+[MvccPrewrite] Lock found for key=z, LockTS=464316210917146625, StartTS=464316210917146625
+[AcquirePessimisticLock] Writing Lock. Key=z, TS=464316210917146627

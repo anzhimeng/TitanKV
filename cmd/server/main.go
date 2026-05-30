@@ -36,6 +36,14 @@ var (
 	nodeID   = flag.Uint64("id", 1, "Raft Node ID")
 	cluster  = flag.String("cluster", "1=127.0.0.1:9090", "Cluster configuration")
 	directIO = flag.Bool("direct_io", false, "Enable Direct IO (io_uring)")
+	pdAddr   = flag.String("pd", "127.0.0.1:2379", "PD address")
+	gcThreshold = flag.Float64("gc_threshold", 0.5, "GC Threshold (0.0-1.0)")
+	
+	// Storage Tuning Flags
+	writeBufferSize = flag.Int("write_buffer_size", 128*1024*1024, "Write buffer size (bytes)")
+	blockCacheSize  = flag.Int("block_cache_size", 0, "Block cache size (bytes)")
+	minBlobSize     = flag.Int("min_blob_size", 4096, "Min blob size (bytes)")
+	bloomFilterBits = flag.Int("bloom_filter_bits", 10, "Bloom filter bits per key")
 )
 
 // 定义 Metrics
@@ -56,6 +64,7 @@ func init() {
 }
 
 func main() {
+	fmt.Println("DEBUG: Entering main")
 	flag.Parse()
 
 	// 1. 解析集群配置
@@ -82,11 +91,23 @@ func main() {
 
 	// 2. 初始化 C++ 存储引擎
 	log.Printf("Opening storage at %s (DirectIO: %v)...", *dbPath, *directIO)
-	db, err := store.Open(*dbPath, *directIO)
+	
+	opts := store.DefaultOptions()
+	opts.UseDirectIO = *directIO
+	opts.WriteBufferSize = *writeBufferSize
+	opts.BlockCacheSize = *blockCacheSize
+	opts.MinBlobSize = *minBlobSize
+	opts.BloomFilterBits = *bloomFilterBits
+	
+	db, err := store.Open(*dbPath, opts)
 	if err != nil {
 		log.Fatalf("Failed to open db: %v", err)
 	}
 	defer db.Close()
+
+	// 4. 设置 GC 阈值
+	log.Printf("Setting GC Threshold to %f", *gcThreshold)
+	db.SetGCThreshold(*gcThreshold)
 
 	// 3. 启动 Metrics 采集
 	go func() {
@@ -99,8 +120,7 @@ func main() {
 	}()
 
 	// 4. 连接 PD 并注册 Store
-	pdAddr := "127.0.0.1:9000"
-	conn, err := grpc.Dial(pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(*pdAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Failed to connect pd: %v", err)
 	}
@@ -109,22 +129,25 @@ func main() {
 	defer conn.Close()
 
 	// 【新增】注册 Store
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	meta := &pdpb.MetaStore{
 		Id:      *nodeID,
 		Address: peers[*nodeID],
 		State:   pdpb.StoreState_UP,
 		Version: "v1.0.0",
 	}
-	_, err = pdClient.PutStore(ctx, &pdpb.PutStoreRequest{
-		Store: meta,
-	})
-	cancel()
-	if err != nil {
-		// 如果 PD 没启动，这里会报错，但我们可以选择只打印日志继续运行 (软依赖)
-		log.Printf("WARNING: Failed to register store to PD: %v", err)
-	} else {
-		log.Printf("Successfully registered store %d to PD", *nodeID)
+	// 尝试多次注册，确保 PD 启动后能注册成功
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err = pdClient.PutStore(ctx, &pdpb.PutStoreRequest{
+			Store: meta,
+		})
+		cancel()
+		if err == nil {
+			log.Printf("Successfully registered store %d to PD", *nodeID)
+			break
+		}
+		log.Printf("WARNING: Failed to register store to PD (attempt %d/10): %v", i+1, err)
+		time.Sleep(1 * time.Second)
 	}
 	
 	// 【可选】启动 Store 心跳 (Week 9 的内容，这里加上更完整)
@@ -213,7 +236,13 @@ func main() {
 	}()
 
 	// 8. 创建 gRPC 服务器
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ReadBufferSize(2*1024*1024),
+		grpc.WriteBufferSize(2*1024*1024),
+		grpc.InitialWindowSize(16<<20),
+		grpc.InitialConnWindowSize(16<<20),
+		grpc.MaxConcurrentStreams(16384),
+	)
 	
 	titanServer := service.NewServer(router, db)
 	
@@ -260,10 +289,12 @@ func main() {
 	}()
 
 	log.Printf("Server listening on port %d", *port)
+	fmt.Println("DEBUG: Calling grpcServer.Serve")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
 
 	<-done
+	fmt.Println("DEBUG: Exiting main after <-done")
 	log.Println("TitanKV Server exit.")
 }

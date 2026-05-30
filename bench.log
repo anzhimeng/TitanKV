@@ -1,0 +1,26 @@
+Completed 1000 txns
+Completed 2000 txns
+Completed 3000 txns
+Completed 4000 txns
+Completed 5000 txns
+Completed 6000 txns
+Completed 7000 txns
+Completed 8000 txns
+Completed 9000 txns
+Completed 10000 txns
+Completed 11000 txns
+Completed 12000 txns
+Completed 13000 txns
+Completed 14000 txns
+Completed 15000 txns
+Completed 16000 txns
+Completed 17000 txns
+Completed 18000 txns
+Completed 19000 txns
+Completed 20000 txns
+Benchmark Result:
+Total Txns: 20000
+Elapsed: 2.18683672s
+TPS: 9145.63
+Avg Latency: 21529.84 us
+Verify k_0_0: v_0_0

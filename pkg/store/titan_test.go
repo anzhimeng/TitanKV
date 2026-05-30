@@ -12,7 +12,7 @@ func TestTitanBasic(t *testing.T) {
 	defer os.RemoveAll(dbPath)
 
 	// 1. Open
-	db, err := Open(dbPath)
+	db, err := Open(dbPath, DefaultOptions())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

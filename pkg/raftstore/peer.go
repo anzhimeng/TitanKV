@@ -3,7 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -26,6 +26,7 @@ var (
 	ErrKeyNotInRegion = errors.New("key not in region")
 	ErrEpochNotMatch  = errors.New("epoch not match")
 )
+const raftCmdBatchPrefix byte = 1
 
 type Peer struct {
 	regionID  uint64
@@ -34,17 +35,24 @@ type Peer struct {
 	raftGroup *raft.RawNode
 	storage   *PeerStorage
 	region    *titankvpb.Region
+	mu        sync.RWMutex // Protects region and other mutable fields
 	stopped   bool
 	// 【新增】ReadIndex 状态维护
-	// key: requestCtx (string), value: callback channel
-	pendingReads map[string]chan uint64
+	// key: requestCtx (string), value: list of callback channels
+	pendingReads map[string][]chan uint64
 	readSeq      uint64 // 用于生成唯一 ctx
 
 	// 【新增】Applied Index (原子变量，供 Server 检查)
 	// 注意：etcd/raft 内部没有这个，我们需要自己维护
-	appliedIndex uint64
-	applyCond    *sync.Cond
-	readMu       sync.Mutex
+	appliedIndex  uint64
+	applyNotifyCh chan struct{}
+	readMu        sync.Mutex
+	// Pending Proposals (UUID -> Callback)
+	pendingProposals sync.Map
+	// 【新增】Pending Merge Target (用于 Source Region 在停止后通知 Target)
+	pendingMerge *titankvpb.MergeRequest
+	// 【新增】Last Active Tick for Merge Idle Check
+	lastActiveTick uint64
 }
 
 func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore) (*Peer, error) {
@@ -76,9 +84,10 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 		ElectionTick:    50,
 		HeartbeatTick:   5,
 		Storage:         ps,
-		MaxSizePerMsg:   4096,
-		MaxInflightMsgs: 256,
+		MaxSizePerMsg:   4 * 1024 * 1024,
+		MaxInflightMsgs: 4096,
 		CheckQuorum:     true,
+		PreVote:         true,
 	}
 
 	// 4. 创建 RawNode (v3.5+ 不需要 peers 参数)
@@ -88,17 +97,15 @@ func NewPeer(storeID uint64, region *titankvpb.Region, engine *store.TitanStore)
 	}
 
 	p := &Peer{
-		regionID:     region.Id,
-		peerID:       peerID,
-		storeID:      storeID,
-		raftGroup:    rn,
-		storage:      ps,
-		region:       region,
-		pendingReads: make(map[string]chan uint64),
+		regionID:      region.Id,
+		peerID:        peerID,
+		storeID:       storeID,
+		raftGroup:     rn,
+		storage:       ps,
+		region:        region,
+		pendingReads:  make(map[string][]chan uint64),
+		applyNotifyCh: make(chan struct{}),
 	}
-
-	// 【新增】初始化 Condition Variable
-	p.applyCond = sync.NewCond(&p.readMu)
 
 	writeRegionState(p.storage.engine, region)
 
@@ -114,6 +121,14 @@ func (p *Peer) step(msg Msg) {
 			p.raftGroup.Step(rMsg)
 		}
 
+	case MsgTypeRaftMessageBatch:
+		for _, m := range msg.RaftMessages {
+			var rMsg raftpb.Message
+			if err := rMsg.Unmarshal(m.Data); err == nil {
+				p.raftGroup.Step(rMsg)
+			}
+		}
+
 	case MsgTypeRaftCmd:
 		if msg.RaftCmd.AdminRequest != nil {
 			req := msg.RaftCmd.AdminRequest
@@ -125,7 +140,7 @@ func (p *Peer) step(msg Msg) {
 				return
 			}
 		}
-		if msg.RaftCmd.Header != nil {
+		if msg.RaftCmd.Header != nil && msg.RaftCmd.Header.RegionEpoch != nil {
 			reqEpoch := &pdpb.RegionEpoch{
 				ConfVer: msg.RaftCmd.Header.RegionEpoch.ConfVer,
 				Version: msg.RaftCmd.Header.RegionEpoch.Version,
@@ -160,8 +175,168 @@ func (p *Peer) step(msg Msg) {
 	case MsgTypeTick:
 		p.raftGroup.Tick()
 	case MsgTypeReadIndex:
-		p.handleReadIndex(msg)
+		p.handleReadIndexBatch([]Msg{msg})
 	}
+}
+
+func (p *Peer) stepBatchCmds(cmds []*titankvpb.RaftCommand, callbacks []func(error)) {
+	if len(cmds) == 0 {
+		return
+	}
+	accepted := make([]*titankvpb.RaftCommand, 0, len(cmds))
+	for i, cmd := range cmds {
+		var cb func(error)
+		if i < len(callbacks) {
+			cb = callbacks[i]
+		}
+		if cmd == nil {
+			if cb != nil {
+				cb(errors.New("nil command"))
+			}
+			continue
+		}
+		if cmd.AdminRequest != nil {
+			req := cmd.AdminRequest
+			if req.CmdType == titankvpb.AdminRequest_CONF_CHANGE {
+				p.proposeConfChange(req.ChangePeer)
+				if cb != nil {
+					cb(nil)
+				}
+				continue
+			}
+		}
+		if cmd.Header != nil && cmd.Header.RegionEpoch != nil {
+			reqEpoch := &pdpb.RegionEpoch{
+				ConfVer: cmd.Header.RegionEpoch.ConfVer,
+				Version: cmd.Header.RegionEpoch.Version,
+			}
+			if err := p.CheckEpoch(reqEpoch); err != nil {
+				if cb != nil {
+					cb(err)
+				}
+				continue
+			}
+		}
+		if cmd.Op == titankvpb.RaftCommand_PUT || cmd.Op == titankvpb.RaftCommand_DELETE {
+			key := cmd.Key
+			if !p.isKeyInRange(key) {
+				if cb != nil {
+					cb(ErrKeyNotInRegion)
+				}
+				continue
+			}
+		}
+
+		// 生成 UUID 并注册 Callback
+		uuid := make([]byte, 16)
+		rand.Read(uuid)
+		if cmd.Header == nil {
+			cmd.Header = &titankvpb.RaftRequestHeader{}
+		}
+		cmd.Header.Uuid = uuid
+
+		if cb != nil {
+			p.pendingProposals.Store(string(uuid), cb)
+		}
+
+		accepted = append(accepted, cmd)
+	}
+	if len(accepted) == 0 {
+		return
+	}
+	batch := &titankvpb.BatchRaftCommand{Commands: accepted}
+	data, _ := proto.Marshal(batch)
+	data = append([]byte{raftCmdBatchPrefix}, data...)
+	p.raftGroup.Propose(data)
+}
+
+func (p *Peer) stepBatch(msgs []Msg) {
+	if len(msgs) == 0 {
+		return
+	}
+
+	// 1. 分离 ReadIndex 请求和 RaftCmd 请求
+	var readIndexMsgs []Msg
+	var raftCmdMsgs []Msg
+
+	for _, msg := range msgs {
+		if msg.Type == MsgTypeReadIndex {
+			readIndexMsgs = append(readIndexMsgs, msg)
+		} else if msg.Type == MsgTypeRaftCmd {
+			raftCmdMsgs = append(raftCmdMsgs, msg)
+		}
+	}
+
+	// 2. 批量处理 ReadIndex
+	if len(readIndexMsgs) > 0 {
+		p.handleReadIndexBatch(readIndexMsgs)
+	}
+
+	// 3. 批量处理 RaftCmd
+	if len(raftCmdMsgs) == 0 {
+		return
+	}
+
+	cmds := make([]*titankvpb.RaftCommand, 0, len(raftCmdMsgs))
+	for _, msg := range raftCmdMsgs {
+		if msg.RaftCmd == nil {
+			continue
+		}
+		if msg.RaftCmd.AdminRequest != nil {
+			req := msg.RaftCmd.AdminRequest
+			if req.CmdType == titankvpb.AdminRequest_CONF_CHANGE {
+				p.proposeConfChange(req.ChangePeer)
+				if msg.Callback != nil {
+					msg.Callback(nil)
+				}
+				continue
+			}
+		}
+		if msg.RaftCmd.Header != nil {
+			reqEpoch := &pdpb.RegionEpoch{
+				ConfVer: msg.RaftCmd.Header.RegionEpoch.ConfVer,
+				Version: msg.RaftCmd.Header.RegionEpoch.Version,
+			}
+			if err := p.CheckEpoch(reqEpoch); err != nil {
+				if msg.Callback != nil {
+					msg.Callback(err)
+				}
+				continue
+			}
+		}
+		if msg.RaftCmd.Type == titankvpb.RaftCommand_NORMAL && (msg.RaftCmd.Op == titankvpb.RaftCommand_PUT || msg.RaftCmd.Op == titankvpb.RaftCommand_DELETE) {
+			key := msg.RaftCmd.Key
+			if !p.isKeyInRange(key) {
+				if msg.Callback != nil {
+					msg.Callback(ErrKeyNotInRegion)
+				}
+				continue
+			}
+		}
+
+		// 生成 UUID 并注册 Callback
+		uuid := make([]byte, 16)
+		rand.Read(uuid)
+		if msg.RaftCmd.Header == nil {
+			msg.RaftCmd.Header = &titankvpb.RaftRequestHeader{}
+		}
+		msg.RaftCmd.Header.Uuid = uuid
+
+		if msg.Callback != nil {
+			p.pendingProposals.Store(string(uuid), msg.Callback)
+		}
+
+		cmds = append(cmds, msg.RaftCmd)
+	}
+
+	if len(cmds) == 0 {
+		return
+	}
+
+	batch := &titankvpb.BatchRaftCommand{Commands: cmds}
+	data, _ := proto.Marshal(batch)
+	data = append([]byte{raftCmdBatchPrefix}, data...)
+	p.raftGroup.Propose(data)
 }
 
 func (p *Peer) proposeConfChange(cp *titankvpb.ChangePeer) {
@@ -178,46 +353,139 @@ func (p *Peer) proposeConfChange(cp *titankvpb.ChangePeer) {
 	p.raftGroup.ProposeConfChange(cc)
 }
 
+func (p *Peer) handleReadIndexBatch(msgs []Msg) {
+	if len(msgs) == 0 {
+		return
+	}
+
+	// 收集所有的 Callback Channels
+	callbacks := make([]chan uint64, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.ReadIndexRet != nil {
+			callbacks = append(callbacks, msg.ReadIndexRet)
+		}
+	}
+	if len(callbacks) == 0 {
+		return
+	}
+
+	p.readMu.Lock()
+	p.readSeq++
+	ctx := fmt.Sprintf("%d-%d", p.peerID, p.readSeq)
+	p.pendingReads[ctx] = callbacks
+	p.readMu.Unlock()
+
+	p.raftGroup.ReadIndex([]byte(ctx))
+}
+
+func (p *Peer) handleReadIndex(msg Msg) {
+	p.handleReadIndexBatch([]Msg{msg})
+}
+
 func (p *Peer) isKeyInRange(key []byte) bool {
-	start := p.region.StartKey
-	end := p.region.EndKey
-	if len(start) > 0 && bytes.Compare(key, start) < 0 {
-		return false
-	}
-	if len(end) > 0 && bytes.Compare(key, end) >= 0 {
-		return false
-	}
-	return true
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	startKey := p.region.StartKey
+	endKey := p.region.EndKey
+	return bytes.Compare(key, startKey) >= 0 &&
+		(len(endKey) == 0 || bytes.Compare(key, endKey) < 0)
 }
 
 func (p *Peer) hasReady() bool {
 	return p.raftGroup.HasReady()
 }
 
-// 应用日志
+func (p *Peer) notifyCallback(cmd *titankvpb.RaftCommand, err error) {
+	if cmd.Header == nil || len(cmd.Header.Uuid) == 0 {
+		return
+	}
+	uuid := string(cmd.Header.Uuid)
+	if val, ok := p.pendingProposals.Load(uuid); ok {
+		if cb, ok := val.(func(error)); ok {
+			cb(err)
+		}
+		p.pendingProposals.Delete(uuid)
+	}
+}
+
+func (p *Peer) applyTxn(cmd *titankvpb.RaftCommand) error {
+	if cmd.PrewriteRequest != nil {
+		req := cmd.PrewriteRequest
+		if req.Use_1Pc {
+			return p.storage.engine.Prewrite1PC(req.Mutations, req.PrimaryKey, req.StartTs, req.CommitTs, req.LockTtl)
+		}
+		if req.UseAsyncCommit {
+			isPessimistic := false
+			if len(req.IsPessimisticLock) > 0 {
+				isPessimistic = req.IsPessimisticLock[0]
+			}
+			return p.storage.engine.PrewriteAsync(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl, req.MinCommitTs, isPessimistic, req.Secondaries)
+		}
+		return p.storage.engine.Prewrite(req.Mutations, req.PrimaryKey, req.StartTs, req.LockTtl)
+	}
+	if cmd.CommitRequest != nil {
+		req := cmd.CommitRequest
+		return p.storage.engine.Commit(req.Keys, req.StartTs, req.CommitTs)
+	}
+	if cmd.ResolveLockRequest != nil {
+		req := cmd.ResolveLockRequest
+		return p.storage.engine.Commit(req.Keys, req.StartTs, req.CommitTs)
+	}
+	if cmd.AcquirePessimisticLockRequest != nil {
+		req := cmd.AcquirePessimisticLockRequest
+		// log.Printf("[Peer] Applying AcquirePessimisticLock: %v", req.Mutations[0].Key)
+		keys := make([][]byte, 0, len(req.Mutations))
+		for _, m := range req.Mutations {
+			keys = append(keys, m.Key)
+		}
+		_, _, err := p.storage.engine.AcquirePessimisticLock(keys, req.PrimaryKey, req.StartTs, req.LockTtl, req.ForUpdateTs, req.ReturnValues)
+		return err
+	}
+	return nil
+}
+
 func (p *Peer) processEntry(entry raftpb.Entry) *Peer {
-	if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
-		var cmd titankvpb.RaftCommand
-		if err := proto.Unmarshal(entry.Data, &cmd); err != nil {
-			return nil
-		}
-
-		if cmd.Type == titankvpb.RaftCommand_NORMAL {
-			p.applyNormal(&cmd)
-		} else if cmd.Type == titankvpb.RaftCommand_ADMIN {
-			// 【修改】调用 applyAdmin 并返回
-			return p.applyAdmin(&cmd, entry.Index, entry.Term)
-		}
-	} else if entry.Type == raftpb.EntryConfChange {
-		// Week 12 Day 1: 处理 ConfChange Apply
+	if entry.Type == raftpb.EntryConfChange {
 		var cc raftpb.ConfChange
-		cc.Unmarshal(entry.Data)
+		if err := cc.Unmarshal(entry.Data); err == nil {
+			p.applyConfChange(cc)
+		}
+		return nil
+	}
 
-		// 1. 更新 Raft 内部状态
-		p.raftGroup.ApplyConfChange(cc)
+	if len(entry.Data) == 0 {
+		return nil
+	}
 
-		// 2. 执行实际变更 (更新元数据)
-		return p.applyConfChange(cc)
+	// 解码 Raft Command
+	var cmd titankvpb.RaftCommand
+	if entry.Data[0] == raftCmdBatchPrefix {
+		// 批量命令
+		var batch titankvpb.BatchRaftCommand
+		if err := proto.Unmarshal(entry.Data[1:], &batch); err == nil {
+			for _, c := range batch.Commands {
+				if c.AdminRequest != nil {
+					if split := p.applyAdmin(c, entry.Index, entry.Term); split != nil {
+						return split
+					}
+				} else {
+					p.applyNormal(c)
+				}
+				p.notifyCallback(c, nil)
+			}
+		}
+	} else {
+		// 单条命令
+		if err := proto.Unmarshal(entry.Data, &cmd); err == nil {
+			if cmd.AdminRequest != nil {
+				if split := p.applyAdmin(&cmd, entry.Index, entry.Term); split != nil {
+					return split
+				}
+			} else {
+				p.applyNormal(&cmd)
+			}
+			p.notifyCallback(&cmd, nil)
+		}
 	}
 	return nil
 }
@@ -289,6 +557,123 @@ func (p *Peer) applyConfChange(cc raftpb.ConfChange) *Peer {
 	return nil
 }
 
+func (p *Peer) ApplyCommittedEntries(entries []raftpb.Entry) []*Peer {
+	var newPeers []*Peer
+	
+	// Track the highest applied index in this batch
+	finalApplied := p.appliedIndex
+
+	// Batch buffers
+	var keys [][]byte
+	var values [][]byte
+	var ops []int
+	var callbacks []func()
+
+	// Flush current batch to storage
+	flush := func() {
+		if len(keys) == 0 {
+			return
+		}
+		if err := p.storage.engine.BatchWriteOps(keys, values, ops); err != nil {
+			log.Fatalf("Batch apply failed: %v", err)
+		}
+		// Notify callbacks after successful write
+		for _, cb := range callbacks {
+			if cb != nil {
+				cb()
+			}
+		}
+		// Reset buffers
+		keys = keys[:0]
+		values = values[:0]
+		ops = ops[:0]
+		callbacks = callbacks[:0]
+	}
+
+	for _, entry := range entries {
+		// Update applied index for every entry (even empty ones)
+		if entry.Index > finalApplied {
+			finalApplied = entry.Index
+		}
+
+		// 1. Handle Empty Entry (e.g. Leader Election)
+		if len(entry.Data) == 0 && entry.Type != raftpb.EntryConfChange {
+			flush() // Flush any pending writes
+			continue
+		}
+
+		// 2. Handle ConfChange
+		if entry.Type == raftpb.EntryConfChange {
+			flush()
+			var cc raftpb.ConfChange
+			if err := cc.Unmarshal(entry.Data); err == nil {
+				p.applyConfChange(cc)
+			}
+			if p.stopped {
+				break
+			}
+			continue
+		}
+
+		// 3. Handle Normal Entry
+		var cmds []*titankvpb.RaftCommand
+		if entry.Data[0] == raftCmdBatchPrefix {
+			var batch titankvpb.BatchRaftCommand
+			if err := proto.Unmarshal(entry.Data[1:], &batch); err == nil {
+				cmds = batch.Commands
+			}
+		} else {
+			var cmd titankvpb.RaftCommand
+			if err := proto.Unmarshal(entry.Data, &cmd); err == nil {
+				cmds = []*titankvpb.RaftCommand{&cmd}
+			}
+		}
+
+		for _, cmd := range cmds {
+			if cmd.AdminRequest != nil {
+				flush()
+				if splitPeer := p.applyAdmin(cmd, entry.Index, entry.Term); splitPeer != nil {
+					newPeers = append(newPeers, splitPeer)
+				}
+				p.notifyCallback(cmd, nil)
+			} else if cmd.PrewriteRequest != nil || cmd.CommitRequest != nil || cmd.ResolveLockRequest != nil || cmd.AcquirePessimisticLockRequest != nil {
+				// Transaction Commands
+				flush()
+				err := p.applyTxn(cmd)
+				p.notifyCallback(cmd, err)
+			} else {
+				// Batch Put/Delete
+				encodedKey := DataKey(p.regionID, cmd.Key)
+				if cmd.Op == titankvpb.RaftCommand_PUT {
+					keys = append(keys, encodedKey)
+					values = append(values, cmd.Value)
+					ops = append(ops, 0) // 0: Put
+				} else if cmd.Op == titankvpb.RaftCommand_DELETE {
+					keys = append(keys, encodedKey)
+					values = append(values, nil)
+					ops = append(ops, 1) // 1: Delete
+				}
+				
+				// Capture callback
+				c := cmd
+				callbacks = append(callbacks, func() {
+					p.notifyCallback(c, nil)
+				})
+			}
+		}
+	}
+	
+	// Flush remaining
+	flush()
+	
+	// Update AppliedIndex atomically and notify waiters
+	if finalApplied > p.appliedIndex {
+		p.SetAppliedIndex(finalApplied)
+	}
+
+	return newPeers
+}
+
 // 增加 engine 参数 (因为 execSplit 需要写 DB)
 func (p *Peer) applyAdmin(cmd *titankvpb.RaftCommand, index, term uint64) *Peer {
 	req := cmd.AdminRequest
@@ -305,6 +690,10 @@ func (p *Peer) applyAdmin(cmd *titankvpb.RaftCommand, index, term uint64) *Peer 
 	case titankvpb.AdminRequest_COMPACT:
 		// Day 3 不需要实现，留空即可
 		return nil
+
+	case titankvpb.AdminRequest_MERGE:
+		log.Printf("[Apply] Executing Merge Source=%d Target=%d", req.Merge.SourceRegion.Id, req.Merge.TargetRegionId)
+		return p.execMerge(req.Merge, p.storage.engine)
 	}
 	return nil
 }
@@ -387,6 +776,85 @@ func (p *Peer) execSplit(req *titankvpb.SplitRequest, engine *store.TitanStore) 
 	return newPeer
 }
 
+func (p *Peer) execMerge(req *titankvpb.MergeRequest, engine *store.TitanStore) *Peer {
+	// 区分 Source (被合并) 和 Target (合并目标)
+	if p.regionID == req.SourceRegion.Id {
+		// I am Source
+		log.Printf("[Merge] Region %d (Source) merging into %d", p.regionID, req.TargetRegionId)
+
+		// 1. 记录 Pending Merge，供 StoreWorker 通知 Target
+		p.pendingMerge = req
+
+		// 2. 标记停止 (Self-destruct)
+		// 注意：Tombstone 持久化逻辑在 removePeer 中处理
+		p.stopped = true
+
+		return nil
+	} else if p.regionID == req.TargetRegionId {
+		// I am Target
+		log.Printf("[Merge] Region %d (Target) absorbing %d", p.regionID, req.SourceRegion.Id)
+
+		// 1. 扩展 Range
+		// 校验 Source 是否相邻
+		if bytes.Equal(p.region.StartKey, req.SourceRegion.EndKey) {
+			// Source 在前: [Source][Target] -> [Source+Target]
+			p.region.StartKey = req.SourceRegion.StartKey
+		} else if bytes.Equal(p.region.EndKey, req.SourceRegion.StartKey) {
+			// Source 在后: [Target][Source] -> [Target+Source]
+			p.region.EndKey = req.SourceRegion.EndKey
+		} else {
+			// 不连续，忽略 (可能已经 Split 或其他并发变更)
+			log.Printf("[Merge] Source %d not adjacent to Target %d, ignore", req.SourceRegion.Id, p.regionID)
+			return nil
+		}
+
+		// 2. 更新 Epoch
+		if p.region.RegionEpoch == nil {
+			p.region.RegionEpoch = &titankvpb.RegionEpoch{}
+		}
+		p.region.RegionEpoch.Version++
+		// ConfVer 也可以增加，表示拓扑变更
+
+		// 3. Prepare Batch
+		var keys [][]byte
+		var values [][]byte
+
+		// Data
+		if len(req.Data) > 0 {
+			for _, kv := range req.Data {
+				// Encode Key: z{TargetID}{UserKey}
+				encodedKey := DataKey(p.regionID, kv.Key)
+				keys = append(keys, encodedKey)
+				values = append(values, kv.Value)
+			}
+		}
+
+		// Metadata: RegionState
+		state := &raft_serverpb.RegionLocalState{
+			State:  raft_serverpb.PeerState_Normal,
+			Region: p.region,
+		}
+		regionVal, _ := proto.Marshal(state)
+		keys = append(keys, RegionStateKey(p.region.Id))
+		values = append(values, regionVal)
+
+		// Metadata: RaftState
+		raftVal, _ := proto.Marshal(&p.storage.raftState)
+		keys = append(keys, RaftStateKey(p.region.Id))
+		values = append(values, raftVal)
+
+		// Atomic Write
+		if err := engine.BatchPut(keys, values); err != nil {
+			log.Fatalf("[Merge] Atomic BatchPut failed: %v", err)
+		}
+		
+		log.Printf("[Merge] Ingested %d keys from Source %d", len(req.Data), req.SourceRegion.Id)
+		
+		return nil
+	}
+	return nil
+}
+
 // 辅助：持久化 RegionLocalState
 func writeRegionState(engine *store.TitanStore, region *titankvpb.Region) {
 	state := &raft_serverpb.RegionLocalState{
@@ -430,27 +898,12 @@ func initRaftState(engine *store.TitanStore, region *titankvpb.Region) {
 	engine.Put(ApplyStateKey(region.Id), val2)
 }
 
-// 检查 Epoch 是否匹配
-func (p *Peer) CheckEpoch(reqEpoch *pdpb.RegionEpoch) error {
-	// 容错：如果请求没带 Epoch (旧 Client)，或者本地还没初始化好，先放行
-	// 生产环境应该严格拒绝
-	if reqEpoch == nil {
-		return nil
+func (p *Peer) CheckEpoch(req *pdpb.RegionEpoch) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if req.ConfVer < p.region.RegionEpoch.ConfVer || req.Version < p.region.RegionEpoch.Version {
+		return ErrEpochNotMatch
 	}
-
-	current := p.region.RegionEpoch
-
-	// 1. Version (Split/Merge)
-	// 如果请求的版本比我的旧，说明 Client 路由过期
-	if reqEpoch.Version < current.Version {
-		return fmt.Errorf("epoch not match: version %d < %d", reqEpoch.Version, current.Version)
-	}
-
-	// 2. ConfVer (成员变更)
-	if reqEpoch.ConfVer < current.ConfVer {
-		return fmt.Errorf("epoch not match: conf_ver %d < %d", reqEpoch.ConfVer, current.ConfVer)
-	}
-
 	return nil
 }
 
@@ -467,29 +920,26 @@ func (p *Peer) applySnapshot(filePath string) {
 	os.Remove(filePath)
 }
 
-// 处理 MsgReadIndex
-func (p *Peer) handleReadIndex(msg Msg) {
-	// 1. 生成唯一 Context
-	seq := atomic.AddUint64(&p.readSeq, 1)
-	ctxBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(ctxBytes, seq)
-
-	// 2. 记录回调
-	p.pendingReads[string(ctxBytes)] = msg.ReadIndexRet
-
-	// 3. 发给 Raft
-	p.raftGroup.ReadIndex(ctxBytes)
-}
-
 // 处理 Raft Ready 中的 ReadStates
 func (p *Peer) handleReadStates(states []raft.ReadState) {
 	for _, rs := range states {
 		ctxStr := string(rs.RequestCtx)
-		if ch, ok := p.pendingReads[ctxStr]; ok {
-			// 通知 Server: 这个 Index 安全了
-			ch <- rs.Index
+		
+		p.readMu.Lock()
+		chs, ok := p.pendingReads[ctxStr]
+		if ok {
 			delete(p.pendingReads, ctxStr)
-			close(ch) // 关闭 channel 表示一次性通知
+		}
+		p.readMu.Unlock()
+		
+		if ok {
+			// 通知: Raft 确认该 Index 安全
+			for _, ch := range chs {
+				select {
+				case ch <- rs.Index:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -502,11 +952,15 @@ func (p *Peer) GetAppliedIndex() uint64 {
 // 设置 AppliedIndex (原子写)
 func (p *Peer) SetAppliedIndex(idx uint64) {
 	atomic.StoreUint64(&p.appliedIndex, idx)
-	log.Printf("[Peer %d] Applied Index Updated to %d. Broadcasting...", p.peerID, idx)
-	p.applyCond.Broadcast()
+	p.readMu.Lock()
+	close(p.applyNotifyCh)
+	p.applyNotifyCh = make(chan struct{})
+	p.readMu.Unlock()
 }
 
 func (p *Peer) GetRegion() *titankvpb.Region {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.region
 }
 
@@ -517,33 +971,20 @@ func (p *Peer) WaitApplied(ctx context.Context, targetIndex uint64) error {
 		return nil
 	}
 
-	// 2. 慢路径：使用 Cond 等待
-	// 需要开一个 goroutine 转换 Cond 阻塞为 Channel 信号，以便 select 处理 context timeout
-	doneC := make(chan struct{})
-
-	go func() {
+	for {
 		p.readMu.Lock()
-		defer p.readMu.Unlock()
-
-		// 循环检查，防止虚假唤醒
-		for atomic.LoadUint64(&p.appliedIndex) < targetIndex {
-			// 【调试】打印等待状态
-			//log.Printf("[Peer %d] Waiting Applied: Current %d < Target %d",
-			//p.peerID, atomic.LoadUint64(&p.appliedIndex), targetIndex)
-			p.applyCond.Wait() // 释放锁并挂起
+		if atomic.LoadUint64(&p.appliedIndex) >= targetIndex {
+			p.readMu.Unlock()
+			return nil
 		}
-		// 【调试】
-		//log.Printf("[Peer %d] Wait Finished! Current %d >= Target %d",
-		//p.peerID, atomic.LoadUint64(&p.appliedIndex), targetIndex)
-		close(doneC)
-	}()
+		ch := p.applyNotifyCh
+		p.readMu.Unlock()
 
-	select {
-	case <-doneC:
-		return nil
-	case <-ctx.Done():
-		// 注意：goroutine 会泄露直到下一次 Broadcast，这是 Go Cond 的已知限制。
-		// 但对于短连接或频繁更新的 Apply，这是可接受的。
-		return ctx.Err()
+		select {
+		case <-ch:
+			continue
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }

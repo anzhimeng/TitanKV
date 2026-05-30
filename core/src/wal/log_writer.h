@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 #include "titankv/slice.h"
 #include "titankv/status.h"
 #include "util/env.h"
@@ -18,6 +19,7 @@ class Writer {
   // 写入一条逻辑记录
   // 数据会被自动切分为一个或多个物理 Fragment
   Status AddRecord(const Slice& slice);
+  Status AddRecordBatch(const std::vector<Slice>& records);
 
  private:
   WritableFile* dest_;
@@ -32,6 +34,7 @@ class Writer {
   // ptr: 数据指针
   // length: 数据长度
   Status EmitPhysicalRecord(RecordType type, const char* ptr, size_t length);
+  Status AddRecordInternal(const Slice& slice, bool flush);
 
   // 禁止拷贝
   Writer(const Writer&) = delete;

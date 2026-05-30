@@ -1,0 +1,43 @@
+DEBUG: Entering main
+2026/02/16 15:43:24 ----------------------------------------------------------------
+2026/02/16 15:43:24 My Node ID: 1
+2026/02/16 15:43:24 Cluster Config String: 1=127.0.0.1:9091
+2026/02/16 15:43:24 Parsed Peers Map: map[1:127.0.0.1:9091]
+2026/02/16 15:43:24 ----------------------------------------------------------------
+2026/02/16 15:43:24 Opening storage at /tmp/node1 (DirectIO: false)...
+[DBImpl] io_uring enabled.
+[BlobStore] Recovered. NextFileID: 1
+2026/02/16 15:43:24 Setting GC Threshold to 0.500000
+[BlobStore] GC Threshold updated to 0.50
+2026/02/16 15:43:24 Successfully registered store 1 to PD
+2026/02/16 15:43:24 Starting RaftStore (Node 1)...
+2026/02/16 15:43:24 Bootstrapping initial region for node 1
+2026/02/16 15:43:24 [DEBUG] PeerStorage InitialState Voters: [1]
+raft2026/02/16 15:43:24 INFO: 1 switched to configuration voters=(1)
+raft2026/02/16 15:43:24 INFO: 1 became follower at term 0
+raft2026/02/16 15:43:24 INFO: newRaft 1 [peers: [1], term: 0, commit: 0, applied: 0, lastindex: 0, lastterm: 0]
+2026/02/16 15:43:24 Server listening on port 9091
+DEBUG: Calling grpcServer.Serve
+2026/02/16 15:43:24 Pprof & Metrics listening on 0.0.0.0:6061
+raft2026/02/16 15:43:31 INFO: 1 is starting a new election at term 0
+raft2026/02/16 15:43:31 INFO: 1 became pre-candidate at term 0
+raft2026/02/16 15:43:31 INFO: 1 received MsgPreVoteResp from 1 at term 0
+raft2026/02/16 15:43:31 INFO: 1 became candidate at term 1
+raft2026/02/16 15:43:31 INFO: 1 received MsgVoteResp from 1 at term 1
+raft2026/02/16 15:43:31 INFO: 1 became leader at term 1
+[MvccPrewrite Key] Size=50 Hex=7a000000000000000170657373696d69737469632d6c6966656379636c652d31373731323237383132353132323634323630
+[MvccGet] Key Locked! Key: z, MyTS: 0x671959e4a800002, LockTS: 0x671959e4a800001, Diff: 1
+2026/02/16 15:43:40 [DEBUG-Server] ResolveLock RPC received. Keys: 1
+2026/02/16 15:43:40 [DEBUG-Server] ResolveLock Store.Commit result: <nil>
+[MvccPrewrite Key] Size=50 Hex=7a000000000000000170657373696d69737469632d6c6966656379636c652d31373731323237383132353132323634323630
+[MvccGet] Key Locked! Key: z, MyTS: 0x671959e4a800005, LockTS: 0x671959e4a800004, Diff: 1
+2026/02/16 15:43:40 [DEBUG-Server] ResolveLock RPC received. Keys: 1
+2026/02/16 15:43:40 [DEBUG-Server] ResolveLock Store.Commit result: <nil>
+[MvccPrewrite Key] Size=40 Hex=7a000000000000000170657373696d69737469632d31373731323237383230393133303331343634
+[DBImpl] Flushed SSTable #5. Entries: 1468065, Size: 26165982
+[DBImpl] Flushed SSTable #5. Entries: 1468065, Seq: 1468065
+2026/02/16 19:12:25 Received shutdown signal...
+2026/02/16 19:12:25 Stopping StoreWorker...
+2026/02/16 19:12:25 Closing Transport...
+2026/02/16 19:12:25 Stopping gRPC server (Graceful)...
+2026/02/16 19:12:30 Graceful stop timed out, forcing Stop.

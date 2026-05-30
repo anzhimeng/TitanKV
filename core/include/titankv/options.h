@@ -69,6 +69,8 @@ struct Options {
     // 【新增】统计对象 (Shared Pointer)
     std::shared_ptr<Statistics> statistics = std::make_shared<Statistics>();
     std::shared_ptr<FilterPolicy> filter_policy = nullptr;
+    size_t wal_sync_bytes = 1 * 1024 * 1024;
+    uint64_t wal_sync_interval_ms = 1000;
 };
 
 // ==========================================

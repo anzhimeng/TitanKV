@@ -1,0 +1,49 @@
+DEBUG: Entering main
+2026/02/16 19:13:21 ----------------------------------------------------------------
+2026/02/16 19:13:21 My Node ID: 1
+2026/02/16 19:13:21 Cluster Config String: 1=127.0.0.1:9091
+2026/02/16 19:13:21 Parsed Peers Map: map[1:127.0.0.1:9091]
+2026/02/16 19:13:21 ----------------------------------------------------------------
+2026/02/16 19:13:21 Opening storage at /tmp/node1 (DirectIO: false)...
+[DBImpl] io_uring enabled.
+[BlobStore] Recovered. NextFileID: 1
+2026/02/16 19:13:21 Setting GC Threshold to 0.500000
+[BlobStore] GC Threshold updated to 0.50
+2026/02/16 19:13:21 Successfully registered store 1 to PD
+2026/02/16 19:13:21 Starting RaftStore (Node 1)...
+2026/02/16 19:13:21 Bootstrapping initial region for node 1
+2026/02/16 19:13:21 [DEBUG] PeerStorage InitialState Voters: [1]
+raft2026/02/16 19:13:21 INFO: 1 switched to configuration voters=(1)
+raft2026/02/16 19:13:21 INFO: 1 became follower at term 1
+raft2026/02/16 19:13:21 INFO: newRaft 1 [peers: [1], term: 1, commit: 17, applied: 0, lastindex: 17, lastterm: 1]
+2026/02/16 19:13:21 Server listening on port 9091
+DEBUG: Calling grpcServer.Serve
+2026/02/16 19:13:21 Pprof & Metrics listening on 0.0.0.0:6061
+2026/02/16 19:13:21 listen tcp 0.0.0.0:6061: bind: address already in use
+[DecodeLockValue:TooShort] Size=0 Hex=
+[MvccPrewrite Key] Size=50 Hex=7a000000000000000170657373696d69737469632d6c6966656379636c652d31373731323237383132353132323634323630
+[DecodeLockValue:TooShort] Size=0 Hex=
+[DecodeLockValue:TooShort] Size=0 Hex=
+[DecodeLockValue:TooShort] Size=0 Hex=
+[DecodeLockValue:TooShort] Size=0 Hex=
+[MvccPrewrite Key] Size=50 Hex=7a000000000000000170657373696d69737469632d6c6966656379636c652d31373731323237383132353132323634323630
+[DecodeLockValue:TooShort] Size=0 Hex=
+[DecodeLockValue:TooShort] Size=0 Hex=
+[DecodeLockValue:TooShort] Size=0 Hex=
+[MvccPrewrite Key] Size=40 Hex=7a000000000000000170657373696d69737469632d31373731323237383230393133303331343634
+raft2026/02/16 19:13:29 INFO: 1 no leader at term 1; dropping proposal
+raft2026/02/16 19:13:30 INFO: 1 is starting a new election at term 1
+raft2026/02/16 19:13:30 INFO: 1 became pre-candidate at term 1
+raft2026/02/16 19:13:30 INFO: 1 received MsgPreVoteResp from 1 at term 1
+raft2026/02/16 19:13:30 INFO: 1 became candidate at term 2
+raft2026/02/16 19:13:30 INFO: 1 received MsgVoteResp from 1 at term 2
+raft2026/02/16 19:13:30 INFO: 1 became leader at term 2
+[DBImpl] Flushed SSTable #10. Entries: 1467997, Size: 26161096
+[DBImpl] Flushed SSTable #10. Entries: 1467997, Seq: 2936062
+[DBImpl] Flushed SSTable #12. Entries: 1468469, Size: 26169472
+[DBImpl] Flushed SSTable #12. Entries: 1468469, Seq: 4404531
+2026/02/16 19:35:01 Received shutdown signal...
+2026/02/16 19:35:01 Stopping StoreWorker...
+2026/02/16 19:35:01 Closing Transport...
+2026/02/16 19:35:01 Stopping gRPC server (Graceful)...
+2026/02/16 19:35:06 Graceful stop timed out, forcing Stop.

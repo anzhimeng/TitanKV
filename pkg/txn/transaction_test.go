@@ -40,8 +40,11 @@ func TestTxnBuffer(t *testing.T) {
     // 5. Get (Should be nil/not found)
     // 根据我们的实现，Get 返回 nil, nil 表示删除，或者返回 error
     // check implementation: if val==nil -> error("key not found")
-    _, err = txn.Get(context.Background(), key)
-    if err == nil || err.Error() != "key not found (deleted in txn)" {
-        t.Errorf("Expected deleted error, got %v", err)
-    }
+	val, err = txn.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Expected nil after delete, got error: %v", err)
+	}
+	if val != nil {
+		t.Fatalf("Expected nil after delete, got %v", val)
+	}
 }

@@ -19,6 +19,23 @@ Writer::Writer(WritableFile* dest) : dest_(dest), block_offset_(0) {
 }
 
 Status Writer::AddRecord(const Slice& slice) {
+  return AddRecordInternal(slice, true);
+}
+
+Status Writer::AddRecordBatch(const std::vector<Slice>& records) {
+  if (records.empty()) {
+    return Status::OK();
+  }
+  for (const auto& record : records) {
+    Status s = AddRecordInternal(record, false);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return dest_->Flush();
+}
+
+Status Writer::AddRecordInternal(const Slice& slice, bool flush) {
   const char* ptr = slice.data();
   size_t left = slice.size();
 
@@ -86,6 +103,9 @@ Status Writer::AddRecord(const Slice& slice) {
 
   } while (left > 0); // 只要还有数据没写完，就继续切分
 
+  if (flush) {
+    return dest_->Flush();
+  }
   return Status::OK();
 }
 
@@ -119,13 +139,6 @@ Status Writer::EmitPhysicalRecord(RecordType type, const char* ptr, size_t lengt
   if (s.ok()) {
     // 3. 写入 Payload
     s = dest_->Append(Slice(ptr, length));
-    if (s.ok()) {
-      // 4. 刷新到 OS Cache
-      // 注意：这里没有调用 Sync()，因为 Sync 太慢。
-      // 我们依赖 WriteOptions.sync 决定是否在 Batch 结束后调用 Sync。
-      // 但这里必须 Flush，确保数据进入内核缓冲区。
-      s = dest_->Flush();
-    }
   }
 
   // 5. 更新 Block 偏移量

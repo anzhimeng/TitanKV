@@ -13,9 +13,9 @@ func TestRegionTreeSearch(t *testing.T) {
 	// Region 2: ["k1", "k5")
 	// Region 3: ["k5", nil)  -- k5 到 正无穷
 	
-	r1 := &pdpb.Region{Id: 1, StartKey: []byte{}, EndKey: []byte("k1")}
-	r2 := &pdpb.Region{Id: 2, StartKey: []byte("k1"), EndKey: []byte("k5")}
-	r3 := &pdpb.Region{Id: 3, StartKey: []byte("k5"), EndKey: []byte{}}
+	r1 := NewRegionInfo(&pdpb.Region{Id: 1, StartKey: []byte{}, EndKey: []byte("k1")}, nil)
+	r2 := NewRegionInfo(&pdpb.Region{Id: 2, StartKey: []byte("k1"), EndKey: []byte("k5")}, nil)
+	r3 := NewRegionInfo(&pdpb.Region{Id: 3, StartKey: []byte("k5"), EndKey: []byte{}}, nil)
 
 	tree.Update(r1)
 	tree.Update(r2)
@@ -38,8 +38,8 @@ func TestRegionTreeSearch(t *testing.T) {
 		res := tree.Search([]byte(tt.key))
 		if res == nil {
 			t.Errorf("Search(%s) returned nil", tt.key)
-		} else if res.Id != tt.expectID {
-			t.Errorf("Search(%s) expected Region %d, got %d", tt.key, tt.expectID, res.Id)
+		} else if res.Meta.Id != tt.expectID {
+			t.Errorf("Search(%s) expected Region %d, got %d", tt.key, tt.expectID, res.Meta.Id)
 		}
 	}
 }
@@ -52,8 +52,8 @@ func TestRegionTreeHole(t *testing.T) {
 	// Region 3: ["c", "d")
 	// 缺失 ["b", "c")
 	
-	tree.Update(&pdpb.Region{Id: 1, StartKey: []byte("a"), EndKey: []byte("b")})
-	tree.Update(&pdpb.Region{Id: 3, StartKey: []byte("c"), EndKey: []byte("d")})
+	tree.Update(NewRegionInfo(&pdpb.Region{Id: 1, StartKey: []byte("a"), EndKey: []byte("b")}, nil))
+	tree.Update(NewRegionInfo(&pdpb.Region{Id: 3, StartKey: []byte("c"), EndKey: []byte("d")}, nil))
 
 	// Search "b" (Hole)
 	if r := tree.Search([]byte("b")); r != nil {

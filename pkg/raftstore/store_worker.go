@@ -1,8 +1,10 @@
 package raftstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -17,12 +19,12 @@ import (
 )
 
 const (
-	batchSize = 128
-	// Region 最大阈值 (96MB)
-	MaxRegionSize = /*96*/ 1 * 1024 * 1024
+	batchSize = 1024
+	// Region 最大阈值 (128MB)
+	MaxRegionSize = 128 * 1024 * 1024
 	// 检查间隔 (每隔多少次 Tick 检查一次，避免频繁调用 CGO)
-	SplitCheckInterval      = 10
-	PDHeartbeatTickInterval = 50
+	SplitCheckInterval      = 100
+	PDHeartbeatTickInterval = 20
 	TickBucketCount         = 8
 )
 
@@ -43,9 +45,32 @@ type StoreWorker struct {
 	heartbeatCounter map[uint64]uint64
 	peerStoreCache   map[uint64]uint64
 
-	tickCount uint64
+	// Reuse buffers
+	batchKeys   [][]byte
+	batchValues [][]byte
+	messages    []*titankvpb.RaftMessage
+	prioMessages []*titankvpb.RaftMessage // Buffer for high priority messages
+	tickCount   uint64
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// 【新增】Async Apply Channel
+	applyCh chan *ApplyTask
+	// 【新增】Pending Apply Tasks (Unbounded Buffer)
+	pendingApplyTasks []*ApplyTask
+}
+
+type ApplyTask struct {
+	RegionID         uint64
+	Peer             *Peer
+	CommittedEntries []raftpb.Entry
+	Snapshot         raftpb.Snapshot
+}
+
+type ApplyResult struct {
+	RegionID uint64
+	NewPeer  *Peer // For Split
+	Removed  bool  // For RemovePeer
 }
 
 func NewStoreWorker(router *Router, trans *Transport, s *store.TitanStore, client pdpb.PDClient) *StoreWorker {
@@ -54,20 +79,29 @@ func NewStoreWorker(router *Router, trans *Transport, s *store.TitanStore, clien
 	for i := range tickBuckets {
 		tickBuckets[i] = make(map[uint64]*Peer)
 	}
-	return &StoreWorker{
+	w := &StoreWorker{
 		peers:            make(map[uint64]*Peer),
-		receiver:         make(PeerSender, 4096),
+		receiver:         make(PeerSender, batchSize),
 		router:           router,
 		pendingPeers:     make(map[uint64]*Peer),
 		store:            s,
-		transport:        trans,  // 赋值
-		pdClient:         client, // 赋值
+		transport:        trans,
+		pdClient:         client,
 		tickBuckets:      tickBuckets,
 		heartbeatCounter: make(map[uint64]uint64),
 		peerStoreCache:   make(map[uint64]uint64),
+		batchKeys:        make([][]byte, 0, 4096),
+		batchValues:      make([][]byte, 0, 4096),
+		messages:         make([]*titankvpb.RaftMessage, 0, 1024),
+		prioMessages:     make([]*titankvpb.RaftMessage, 0, 1024),
+		tickCount:        0,
 		ctx:              ctx,
 		cancel:           cancel,
+		applyCh:          make(chan *ApplyTask, 1024),
+		pendingApplyTasks: make([]*ApplyTask, 0, 1024),
 	}
+	go w.runApplyWorker()
+	return w
 }
 
 func (w *StoreWorker) Stop() {
@@ -137,6 +171,83 @@ func (w *StoreWorker) cacheRegionPeers(region *titankvpb.Region) {
 	}
 }
 
+func (w *StoreWorker) runApplyWorker() {
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case task := <-w.applyCh:
+			w.handleApplyTask(task)
+		}
+	}
+}
+
+func (w *StoreWorker) handleApplyTask(task *ApplyTask) {
+	if task == nil {
+		return
+	}
+	peer := task.Peer
+
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+
+	// 使用 Batch Apply 优化写入性能
+	newPeers := peer.ApplyCommittedEntries(task.CommittedEntries)
+
+	// 检查 Peer 状态
+	if peer.stopped {
+		// 如果 Peer 停止了，不需要做更多处理
+		// 【新增】检查是否有 Pending Merge (Source Region Merge 后停止)
+		if peer.pendingMerge != nil {
+			// 通知 Target Region 执行 Merge
+			req := peer.pendingMerge
+			log.Printf("[Worker] Region %d merged into %d, notifying Target...", peer.regionID, req.TargetRegionId)
+			
+			// 构造发给 Target 的 Admin Request
+			// 注意：这里我们复用 MergeRequest，Target 收到后会发现自己是 TargetRegionId
+			cmd := &titankvpb.RaftCommand{
+				Header: &titankvpb.RaftRequestHeader{
+					RegionId:    req.TargetRegionId,
+					RegionEpoch: req.TargetRegionEpoch,
+				},
+				AdminRequest: &titankvpb.AdminRequest{
+					CmdType: titankvpb.AdminRequest_MERGE,
+					Merge:   req,
+				},
+			}
+			
+			// 发送给 StoreWorker 路由到 Target Peer
+			// 注意：这只是 Propose，需要 Target Leader 处理
+			w.receiver <- Msg{
+				Type:     MsgTypeRaftCmd,
+				RegionID: req.TargetRegionId,
+				RaftCmd:  cmd,
+			}
+			// 清除状态
+			peer.pendingMerge = nil
+		}
+
+		// Notify StoreWorker to remove this peer (Asynchronously to avoid deadlock)
+		go func(p *Peer) {
+			w.receiver <- NewMsgPeerStopped(p)
+		}(peer)
+
+		return
+	}
+
+	for _, newPeer := range newPeers {
+		if newPeer != nil {
+			// 通知 StoreWorker 注册新 Peer
+			// 注意：这里是在 ApplyWorker goroutine，不能直接写 w.peers
+			// 通过 channel 发送 MsgAddPeer
+			// 为了防止死锁 (w.receiver 可能满)，起一个 goroutine
+			go func(np *Peer) {
+				w.receiver <- Msg{Type: MsgTypeAddPeer, Peer: np}
+			}(newPeer)
+		}
+	}
+}
+
 func (w *StoreWorker) Run() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -144,29 +255,40 @@ func (w *StoreWorker) Run() {
 	msgs := make([]Msg, 0, batchSize)
 
 	for {
+		var applyTask *ApplyTask
+		var applyCh chan *ApplyTask
+		if len(w.pendingApplyTasks) > 0 {
+			applyTask = w.pendingApplyTasks[0]
+			applyCh = w.applyCh
+		}
+
 		select {
 		case msg := <-w.receiver:
 			msgs = append(msgs, msg)
 		case <-ticker.C:
 			w.onTick()
+			w.handleReady()
+		case applyCh <- applyTask:
+			w.pendingApplyTasks = w.pendingApplyTasks[1:]
 		case <-w.ctx.Done(): // 【新增】退出信号
 			return
 		}
 
 		pending := len(w.receiver)
-		if pending > batchSize {
-			pending = batchSize
-		}
-		for i := 0; i < pending; i++ {
-			msgs = append(msgs, <-w.receiver)
+		if pending > 0 {
+			if pending > batchSize {
+				pending = batchSize
+			}
+			for i := 0; i < pending; i++ {
+				msgs = append(msgs, <-w.receiver)
+			}
 		}
 
-		for _, msg := range msgs {
-			w.processMsg(msg)
+		if len(msgs) > 0 {
+			w.processMsgs(msgs)
+			msgs = msgs[:0]
+			w.handleReady()
 		}
-		msgs = msgs[:0]
-
-		w.handleReady()
 	}
 }
 
@@ -190,6 +312,17 @@ func (w *StoreWorker) processMsg(msg Msg) {
 		w.onSplitCheck(msg.RegionID)
 		return
 	}
+	// 【Day 5 新增】处理 MergeCheck
+	if msg.Type == MsgTypeMergeCheck {
+		w.onMergeCheck(msg.RegionID)
+		return
+	}
+	if msg.Type == MsgTypeRaftCmdBatch {
+		peer.lastActiveTick = w.tickCount
+		peer.stepBatchCmds(msg.RaftCmds, msg.Callbacks)
+		w.pendingPeers[msg.RegionID] = peer
+		return
+	}
 
 	// 处理其他消息 (RaftMessage, RaftCmd, Tick)
 	peer.step(msg)
@@ -197,11 +330,77 @@ func (w *StoreWorker) processMsg(msg Msg) {
 	// 标记为活跃，以便后续 handleReady 处理 IO
 	w.pendingPeers[msg.RegionID] = peer
 }
+
+func (w *StoreWorker) processMsgs(msgs []Msg) {
+	batched := make(map[uint64][]Msg)
+
+	flush := func(regionID uint64) {
+		cmds := batched[regionID]
+		if len(cmds) == 0 {
+			return
+		}
+		peer, ok := w.peers[regionID]
+		if !ok || peer == nil {
+			return
+		}
+
+		// Update activity timestamp for Merge idle check
+		peer.lastActiveTick = w.tickCount
+
+		if len(cmds) == 1 {
+			peer.step(cmds[0])
+		} else {
+			peer.stepBatch(cmds)
+		}
+		w.pendingPeers[regionID] = peer
+		batched[regionID] = batched[regionID][:0]
+	}
+
+	for _, msg := range msgs {
+		if msg.Type == MsgTypeTick {
+			w.onTick()
+			continue
+		}
+		if msg.Type == MsgTypeSplitCheck {
+			w.onSplitCheck(msg.RegionID)
+			continue
+		}
+		if msg.Type == MsgTypeAddPeer {
+			if msg.Peer != nil {
+				w.registerPeer(msg.Peer)
+			}
+			continue
+		}
+		if msg.Type == MsgTypePeerStopped {
+			if msg.Peer != nil {
+				w.removePeer(msg.Peer)
+			}
+			continue
+		}
+
+		if msg.Type == MsgTypeRaftCmd {
+			batched[msg.RegionID] = append(batched[msg.RegionID], msg)
+			continue
+		}
+		// 【新增】ReadIndex Batching
+		if msg.Type == MsgTypeReadIndex {
+			batched[msg.RegionID] = append(batched[msg.RegionID], msg)
+			continue
+		}
+		flush(msg.RegionID)
+		w.processMsg(msg)
+	}
+
+	for regionID := range batched {
+		flush(regionID)
+	}
+}
+
 func (w *StoreWorker) onTick() {
 	w.tickCount++
-	bucket := int(w.tickCount % uint64(TickBucketCount))
+	bucket := int(w.tickCount % TickBucketCount)
 	for _, peer := range w.tickBuckets[bucket] {
-		if peer == nil {
+		if peer.stopped {
 			continue
 		}
 		// 1. Raft Tick
@@ -216,24 +415,26 @@ func (w *StoreWorker) onTick() {
 			w.sendRegionHeartbeat(peer)
 		}
 	}
-	// 2. Split Check (低频执行)
+	// 3. Split Check (低频执行)
 	if w.tickCount%SplitCheckInterval == 0 {
 		w.checkSplit()
+		w.checkMerge() // 【新增】检查 Merge
 	}
 }
 
 func (w *StoreWorker) handleReady() {
-	var messages []*titankvpb.RaftMessage
-
+	// Reuse messages buffer
+	w.messages = w.messages[:0]
+	w.prioMessages = w.prioMessages[:0]
 	type readyData struct {
 		peer *Peer
 		rd   raft.Ready
 	}
 	var readies []readyData
 
-	// CGO Batch Write 需要的切片
-	var batchKeys [][]byte
-	var batchValues [][]byte
+	// Clear buffers
+	w.batchKeys = w.batchKeys[:0]
+	w.batchValues = w.batchValues[:0]
 
 	// 1. 预处理阶段：收集 Ready，处理 Snapshot/WAL
 	for _, peer := range w.pendingPeers {
@@ -281,69 +482,34 @@ func (w *StoreWorker) handleReady() {
 			}
 		}
 
-		kvPairs, err := peer.storage.Append(rd.Entries, &rd.HardState)
-		if err != nil {
-			log.Fatalf("Append failed: %v", err)
-		}
-
-		// 拆解 kvPair 到两个切片
-		for _, kv := range kvPairs {
-			batchKeys = append(batchKeys, kv.key)
-			batchValues = append(batchValues, kv.value)
+		// 使用 AppendBatch 直接写入 buffer
+		if err := peer.storage.AppendBatch(&w.batchKeys, &w.batchValues, rd.Entries, &rd.HardState); err != nil {
+			log.Fatalf("AppendBatch failed: %v", err)
 		}
 
 		// 注意：这里不再收集网络消息，推迟到 Apply 之后
 	}
 
 	// 2. 执行阶段：批量写盘 (Atomic & Batch)
-	if len(batchKeys) > 0 {
+	if len(w.batchKeys) > 0 {
 		//start := time.Now()
 		// 调用 CGO BatchPut
-		err := w.store.BatchPut(batchKeys, batchValues)
+		err := w.store.BatchPut(w.batchKeys, w.batchValues)
 		if err != nil {
 			log.Fatalf("BatchPut failed: %v", err)
 		}
 		//log.Printf("[Worker] Batch Write done. Items=%d, Cost=%v", len(batchKeys), time.Since(start))
 	}
 
-	// 3. 后处理阶段：Apply & Collect Messages & Advance
+	// 3. 发送消息阶段：在 Apply 之前发送，减少延迟
 	for _, item := range readies {
 		peer := item.peer
 		rd := item.rd
-
-		if peer == nil {
-			continue
-		}
-		w.cacheRegionPeers(peer.region)
-
-		// Apply CommittedEntries (Updates RegionState)
-		for _, entry := range rd.CommittedEntries {
-			newPeer := peer.processEntry(entry)
-			if peer != nil {
-				if entry.Index > peer.GetAppliedIndex() {
-					peer.SetAppliedIndex(entry.Index)
-				}
-			}
-			// 检查是否被移除
-			if peer.stopped {
-				w.removePeer(peer)
-				break
-			}
-			// 如果产生了分裂，注册新 Peer
-			if peer == nil {
-				log.Printf("!!! PANIC ALERT !!! peer became nil in loop!")
-				break
-			}
-			if newPeer != nil {
-				w.registerPeer(newPeer)
-			}
-		}
-
-		if peer.stopped {
+		if peer == nil || peer.stopped {
 			continue
 		}
 
-		// B. 收集网络消息 (现在 PeerState 已经更新)
+		// B. 收集网络消息
 		for _, msg := range rd.Messages {
 			// 查找目标 Peer 的 StoreID
 			toStoreId := uint64(0)
@@ -354,10 +520,8 @@ func (w *StoreWorker) handleReady() {
 				}
 			}
 
-			log.Printf("[StoreWorker] Processing msg Type=%s To=%d ResolvedStoreId=%d", msg.Type, msg.To, toStoreId)
-
 			if toStoreId == 0 {
-				log.Printf("Peer %d not found in region %d (Peers: %v). MsgType: %s. Attempting fallback...", msg.To, peer.regionID, peer.region.Peers, msg.Type)
+				// 尝试刷新
 				refreshed := w.refreshRegionFromPD(peer)
 				if refreshed != nil {
 					for _, p := range refreshed.Peers {
@@ -372,7 +536,6 @@ func (w *StoreWorker) handleReady() {
 				}
 			}
 			if toStoreId == 0 {
-				log.Printf("Peer %d still not found in region %d after fallback (Peers: %v). MsgType: %s", msg.To, peer.regionID, peer.region.Peers, msg.Type)
 				if cached, ok := w.peerStoreCache[msg.To]; ok {
 					toStoreId = cached
 				}
@@ -381,59 +544,150 @@ func (w *StoreWorker) handleReady() {
 				continue
 			}
 
-			log.Printf("[StoreWorker] Sending msg %s to Peer %d (Store %d)", msg.Type, msg.To, toStoreId)
-
 			if msg.Type == raftpb.MsgSnap {
 				snapBytes, err := msg.Snapshot.Marshal()
 				if err != nil {
 					log.Printf("Failed to marshal snapshot: %v", err)
 					continue
 				}
-				tm := &titankvpb.RaftMessage{
-					RegionId:   peer.regionID,
-					FromPeerId: msg.From,
-					ToPeerId:   msg.To,
-					ToStoreId:  toStoreId,
-					Data:       snapBytes,
-				}
+				tm := AcquireRaftMessage()
+				tm.RegionId = peer.regionID
+				tm.FromPeerId = msg.From
+				tm.ToPeerId = msg.To
+				tm.ToStoreId = toStoreId
+				tm.Data = snapBytes
+				
 				if err := w.transport.SendSnapshot(tm); err != nil {
 					log.Printf("SendSnapshot failed: %v", err)
 				}
+				ReleaseRaftMessage(tm)
 				continue
 			}
 
 			data, _ := msg.Marshal()
-			tm := &titankvpb.RaftMessage{
-				RegionId:   peer.regionID,
-				FromPeerId: msg.From,
-				ToPeerId:   msg.To,
-				ToStoreId:  toStoreId,
-				Data:       data,
+			tm := AcquireRaftMessage()
+			tm.RegionId = peer.regionID
+			tm.FromPeerId = msg.From
+			tm.ToPeerId = msg.To
+			tm.ToStoreId = toStoreId
+			tm.Data = data
+
+			if msg.Type == raftpb.MsgHeartbeat || msg.Type == raftpb.MsgHeartbeatResp ||
+				msg.Type == raftpb.MsgVote || msg.Type == raftpb.MsgVoteResp ||
+				msg.Type == raftpb.MsgPreVote || msg.Type == raftpb.MsgPreVoteResp {
+				w.prioMessages = append(w.prioMessages, tm)
+			} else {
+				w.messages = append(w.messages, tm)
 			}
-
-			messages = append(messages, tm)
 		}
-
-		// Advance
-		peer.raftGroup.Advance(rd)
 	}
 
 	// 4. 执行阶段：批量发送
-	if len(messages) > 0 {
-		//start := time.Now()
-		w.transport.Send(messages)
-		//log.Printf("[Worker] Batch Send done. Msgs=%d, Cost=%v", len(messages), time.Since(start))
+	if len(w.messages) > 0 {
+		w.transport.Send(w.messages)
+	}
+	if len(w.prioMessages) > 0 {
+		w.transport.SendPrioritized(w.prioMessages)
+	}
+
+	// 5. 后处理阶段：Apply & Advance
+	for _, item := range readies {
+		peer := item.peer
+		rd := item.rd
+
+		if peer == nil {
+			continue
+		}
+		w.cacheRegionPeers(peer.GetRegion())
+
+		// Async Apply
+		if len(rd.CommittedEntries) > 0 {
+			// 将 CommittedEntries 拷贝一份，因为 rd.CommittedEntries 可能被复用
+			entries := make([]raftpb.Entry, len(rd.CommittedEntries))
+			copy(entries, rd.CommittedEntries)
+			
+			task := &ApplyTask{
+				RegionID:         peer.regionID,
+				Peer:             peer,
+				CommittedEntries: entries,
+				Snapshot:         rd.Snapshot,
+			}
+			// 发送到 Apply Buffer
+			w.pendingApplyTasks = append(w.pendingApplyTasks, task)
+		}
+
+		// 【新增】处理 ReadStates (ReadIndex)
+		if len(rd.ReadStates) > 0 {
+			peer.handleReadStates(rd.ReadStates)
+		}
+
+		// Check Stopped (RemovePeer 在 handleReady 前可能已经标记 stopped?)
+		// 这里主要检查 snapshot 可能导致的 stopped
+		if peer.stopped {
+			w.removePeer(peer)
+			continue
+		}
+
+		// Advance
+		// 注意：Async Apply 模式下，我们立即 Advance，允许 Raft 继续
+		// 前提是 Log 已经持久化 (step 2 done)
+		peer.raftGroup.Advance(rd)
 	}
 
 	w.pendingPeers = make(map[uint64]*Peer)
 }
 
 func (w *StoreWorker) removePeer(p *Peer) {
-	// 1. 从内存移除 (停止服务)
 	delete(w.peers, p.regionID)
 	delete(w.pendingPeers, p.regionID)
-	delete(w.tickBuckets[w.bucketForRegion(p.regionID)], p.regionID)
+	// 【修复】tickBuckets 删除逻辑可能有点问题，因为 bucket 是 slice
+	// 正确做法：delete map in bucket
+	bucketID := w.bucketForRegion(p.regionID)
+	if bucketID < len(w.tickBuckets) {
+		delete(w.tickBuckets[bucketID], p.regionID)
+	}
+	
 	w.router.Unregister(p.regionID)
+
+	// 【新增】处理 Merge 数据迁移
+	if p.pendingMerge != nil {
+		targetID := p.pendingMerge.TargetRegionId
+		// 检查 Target Region 是否在本地
+		if targetPeer, ok := w.peers[targetID]; ok {
+			log.Printf("[Merge] Migrating data from Source %d to Local Target %d...", p.regionID, targetID)
+			
+			// 1. 迁移数据 (通过 MergeRequest 发送给 Target)
+			data, err := w.collectData(p)
+			if err != nil {
+				log.Printf("[Merge] Failed to collect data: %v", err)
+			}
+			
+			// 2. 向 Target Region 发起 "Commit Merge" (扩展 Range + 写入数据)
+			// 注意：这里需要 Target Leader 处理。如果本地 Target Peer 不是 Leader，
+			// Propose 会转发给 Leader。
+			// 构造 MergeRequest (Target Side)
+			// 我们复用 MergeRequest，Target 收到后会发现 TargetRegionId == SelfID
+			req := p.pendingMerge // 已经是 MergeRequest
+			req.Data = data       // 附带数据
+			
+			cmd := &titankvpb.RaftCommand{
+				Type: titankvpb.RaftCommand_ADMIN,
+				AdminRequest: &titankvpb.AdminRequest{
+					CmdType: titankvpb.AdminRequest_MERGE,
+					Merge:   req,
+				},
+			}
+			
+			cmdBytes, _ := proto.Marshal(cmd)
+			// 必须通过 Raft Propose，不能直接修改状态
+			targetPeer.raftGroup.Propose(cmdBytes)
+			log.Printf("[Merge] Proposed CommitMerge to Target Region %d", targetID)
+		} else {
+			log.Printf("[Merge] Target Region %d not found locally. Data for Source %d will be deleted (Assumed replicated elsewhere).", targetID, p.regionID)
+			// 如果 Target 不在本地，说明此 Store 不需要保留该范围的数据
+			// (或者需要发送 Snapshot 给 Target，这里简化为直接删除)
+		}
+	}
 
 	tombstone := &raft_serverpb.RegionLocalState{
 		State:  raft_serverpb.PeerState_Tombstone,
@@ -448,64 +702,147 @@ func (w *StoreWorker) removePeer(p *Peer) {
 		log.Printf("Failed to persist tombstone state for region %d: %v", p.regionID, err)
 	}
 
-	// 2. 异步执行物理清理 (避免阻塞 Worker 主循环)
+	// 3. 异步执行物理清理 (避免阻塞 Worker 主循环)
 	// 我们需要清理两部分数据：
 	// A. Data (z{RegionID}...)
-	// B. Raft Log/State (r{RegionID}...)
+	// B. Raft Log (r{RegionID}...)
+	// 注意：保留 RegionState (Tombstone) 以防旧消息导致 Peer 重启
 
-	// 为了在 goroutine 中使用，拷贝需要的数据
+	// 捕获需要的变量
 	store := w.store
 	regionID := p.regionID
-	startKey := p.region.StartKey
-	endKey := p.region.EndKey
-
-	go func() {
-		//log.Printf("[GC] Clearing data for removed Region %d...", regionID)
-
-		// --- 清理 Data ---
-		// 构造物理范围
-		dataStart := DataKey(regionID, startKey)
-		var dataEnd []byte
-		if len(endKey) > 0 {
-			dataEnd = DataKey(regionID, endKey)
-		} else {
-			// 如果 EndKey 无穷大，物理上是下一个 RegionID 的开始
-			// DataKey 编码规则: 'z' + RegionID(8B) + UserKey
-			// 所以下一个 Region 的前缀是 'z' + (RegionID+1)
-			dataEnd = DataKey(regionID+1, nil)
-		}
-
-		if err := store.DeleteRange(dataStart, dataEnd); err != nil {
-			log.Printf("[GC] Failed to delete data range: %v", err)
-		}
-
-		// --- 清理 Raft Log ---
-		logStart := RaftLogKey(regionID, 0)
-		logEnd := RaftStateKey(regionID)
-		if err := store.DeleteRange(logStart, logEnd); err != nil {
-			log.Printf("[GC] Failed to delete raft logs: %v", err)
-		}
-
-		//log.Printf("[GC] Region %d cleanup finished.", regionID)
-	}()
+	
+	// 启动后台清理
+	go w.deletePeerData(store, regionID)
 
 	//log.Printf("Peer %d removed from Region %d (scheduled for GC)", p.peerID, p.regionID)
+}
+
+func (w *StoreWorker) deletePeerData(store *store.TitanStore, regionID uint64) {
+	//log.Printf("[GC] Clearing data for removed Region %d...", regionID)
+
+	// --- 清理 Data (z{RegionID}...) ---
+	// 构造物理范围
+	// DataKey 前缀: 'z' + RegionID
+	dataStart := DataKey(regionID, nil)
+	// 下一个 Region 的 Start
+	dataEnd := DataKey(regionID+1, nil)
+
+	if err := store.DeleteRange(dataStart, dataEnd); err != nil {
+		log.Printf("[GC] Failed to delete data range for region %d: %v", regionID, err)
+	}
+
+	// --- 清理 Raft Log (r{RegionID}...) ---
+	// RaftLogKey 格式: r{RegionID}{0x01}{Index}
+	// RaftStateKey 格式: r{RegionID}{0x02}
+	// 我们删除 [LogStart, RaftStateKey) 范围，即删除所有 Log，保留 State (State 会被后续 BatchPut 更新为 Tombstone 相关，或者被删除)
+	// 等等，我们在 removePeer 中已经更新了 RaftStateKey (持久化 Tombstone 时也写了 RaftState)。
+	// 如果这里删除 RaftStateKey，可能会丢数据。
+	// 但 Raft Log 是可以删的。
+	
+	logStart := RaftLogKey(regionID, 0)
+	// Log 结束位置可以用 RaftStateKey 作为边界 (因为 0x01 < 0x02)
+	logEnd := RaftStateKey(regionID)
+	
+	if err := store.DeleteRange(logStart, logEnd); err != nil {
+		log.Printf("[GC] Failed to delete raft logs for region %d: %v", regionID, err)
+	}
+	
+	// ApplyStateKey (r{RegionID}{0x03}) 也可以删
+	if err := store.Delete(ApplyStateKey(regionID)); err != nil {
+		// Ignore not found
+		if err.Error() != "key not found" {
+			log.Printf("[GC] Failed to delete ApplyState for region %d: %v", regionID, err)
+		}
+	}
+
+	//log.Printf("[GC] Region %d cleanup finished.", regionID)
 }
 
 func (w *StoreWorker) AddPeer(p *Peer) {
 	w.peers[p.regionID] = p
 	w.pendingPeers[p.regionID] = p
 	w.tickBuckets[w.bucketForRegion(p.regionID)][p.regionID] = p
+	w.sendRegionHeartbeat(p)
 }
 
 func (w *StoreWorker) registerPeer(p *Peer) {
 	w.peers[p.regionID] = p
 	w.router.Register(p.regionID, w.receiver, p) // 注册路由
 	w.tickBuckets[w.bucketForRegion(p.regionID)][p.regionID] = p
+	w.sendRegionHeartbeat(p)
 
 	// 如果新 Peer 也是本 Worker 管理，需要启动心跳吗？
 	// onTick 会遍历 w.peers，所以自动生效
 	log.Printf("Registered new peer for Region %d", p.regionID)
+}
+
+func (w *StoreWorker) collectData(sourcePeer *Peer) ([]*titankvpb.KeyValue, error) {
+	// 扫描 Source Region 的所有数据
+	start := DataKey(sourcePeer.regionID, sourcePeer.region.StartKey)
+	var end []byte
+	if len(sourcePeer.region.EndKey) > 0 {
+		end = DataKey(sourcePeer.regionID, sourcePeer.region.EndKey)
+	} else {
+		end = DataKey(sourcePeer.regionID+1, nil)
+	}
+
+	// 使用 Iterator 扫描
+	iter := w.store.NewIterator(start, end)
+	defer iter.Close()
+
+	var data []*titankvpb.KeyValue
+	count := 0
+	
+	// Max Raft Msg Size: 2MB (Safe limit for Raft log replication)
+	// Larger regions should use Snapshot-based Merge (future optimization)
+	maxSize := 2 * 1024 * 1024
+	currentSize := 0
+
+	for iter.Seek(start); iter.Valid(); iter.Next() {
+		// 1. 获取原始 Key (z{SourceID}{UserKey})
+		srcKey := iter.Key()
+		// Debug logging for key issue
+		// log.Printf("[Merge] srcKey: %x (len: %d)", srcKey, len(srcKey))
+
+		// Check bounds (NewIterator doesn't enforce end yet)
+		if len(end) > 0 && bytes.Compare(srcKey, end) >= 0 {
+			break
+		}
+
+		val := iter.Value()
+
+		// 2. 解码出 UserKey
+		// DataKey 格式: 'z' + RegionID(8B) + UserKey
+		// 跳过前缀 'z' (1B) + RegionID (8B) = 9B
+		if len(srcKey) < 9 {
+			continue
+		}
+		userKey := srcKey[9:]
+
+		// 3. 构造 KeyValue (UserKey)
+		// 需要 Copy，因为 iter.Key/Value 在 Next 后失效
+		k := make([]byte, len(userKey))
+		copy(k, userKey)
+		v := make([]byte, len(val))
+		copy(v, val)
+		
+		kv := &titankvpb.KeyValue{
+			Key:   k,
+			Value: v,
+		}
+
+		data = append(data, kv)
+		count++
+		
+		currentSize += len(k) + len(v) + 16 // Approximate overhead
+		if currentSize >= maxSize {
+			return nil, fmt.Errorf("source region %d data size %d exceeds limit %d, abort merge", sourcePeer.regionID, currentSize, maxSize)
+		}
+	}
+
+	log.Printf("[Merge] Collected %d keys (%d bytes) from Region %d", count, currentSize, sourcePeer.regionID)
+	return data, nil
 }
 
 func (w *StoreWorker) bucketForRegion(regionID uint64) int {
@@ -603,6 +940,86 @@ func (w *StoreWorker) onSplitCheck(regionID uint64) {
 	peer.raftGroup.Propose(data)
 
 	log.Printf("[Split] Proposing split at key %s for Region %d", string(splitKey), regionID)
+}
+
+func (w *StoreWorker) checkMerge() {
+	for _, peer := range w.peers {
+		if peer.raftGroup.Status().Lead != peer.peerID {
+			continue
+		}
+
+		// Check Idle (e.g. 600 ticks = 1 minute if tick is 100ms)
+		// We only merge idle regions to avoid impacting active traffic
+		if w.tickCount > peer.lastActiveTick && (w.tickCount-peer.lastActiveTick) < 600 {
+			continue
+		}
+
+		// 检查 Region 大小
+		start := DataKey(peer.regionID, peer.region.StartKey)
+		var end []byte
+		if len(peer.region.EndKey) > 0 {
+			end = DataKey(peer.regionID, peer.region.EndKey)
+		} else {
+			end = DataKey(peer.regionID+1, nil)
+		}
+
+		sizes := w.store.GetApproximateSizes([][]byte{start}, [][]byte{end})
+		if len(sizes) == 0 {
+			continue
+		}
+		size := sizes[0]
+
+		// 阈值：假设小于 1MB 且 key 数量少 (这里只看 size)
+		if size < 1*1024*1024 { // 1MB
+			// 避免频繁检查，可以使用随机或计数器
+			w.processMsg(NewMsgMergeCheck(peer.regionID))
+		}
+	}
+}
+
+func (w *StoreWorker) onMergeCheck(regionID uint64) {
+	peer, ok := w.peers[regionID]
+	if !ok {
+		return
+	}
+
+	// 1. 寻找相邻 Region (Target)
+	// 策略：优先合并到后一个 Region
+	if len(peer.region.EndKey) == 0 {
+		// 最后一个 Region，尝试合并到前一个 (暂不实现)
+		return
+	}
+
+	// 从 PD 获取后一个 Region
+	// EndKey 就是下一个 Region 的 StartKey
+	targetRegion := w.fetchRegionFromPD(peer.region.EndKey)
+	if targetRegion == nil {
+		return
+	}
+
+	// 校验连续性
+	if bytes.Compare(targetRegion.StartKey, peer.region.EndKey) != 0 {
+		return
+	}
+
+	// 2. 发起 Merge 请求 (Propose to Source)
+	req := &titankvpb.MergeRequest{
+		TargetRegionId:    targetRegion.Id,
+		TargetRegionEpoch: targetRegion.RegionEpoch,
+		SourceRegion:      peer.region,
+	}
+
+	cmd := &titankvpb.RaftCommand{
+		Type: titankvpb.RaftCommand_ADMIN,
+		AdminRequest: &titankvpb.AdminRequest{
+			CmdType: titankvpb.AdminRequest_MERGE,
+			Merge:   req,
+		},
+	}
+
+	data, _ := proto.Marshal(cmd)
+	peer.raftGroup.Propose(data)
+	log.Printf("[Merge] Proposing merge Region %d into %d", regionID, targetRegion.Id)
 }
 
 func (w *StoreWorker) askPDAllocID() (uint64, error) {

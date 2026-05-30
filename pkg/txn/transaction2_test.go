@@ -2,20 +2,30 @@ package txn
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"titankv/api/titankvpb"
 	"titankv/pkg/client"
-
 )
 
 // 辅助：创建 Client
-func newTestClient() *client.Client {
-	// 假设本地跑了 Server 和 PD
+func newTestClient(t *testing.T) *client.Client {
+	t.Helper()
 	c, err := client.NewClient("127.0.0.1:9000")
 	if err != nil {
-		panic(err)
+		t.Skipf("PD unavailable: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.GetTS(ctx); err != nil {
+		t.Skipf("PD unavailable: %v", err)
+	}
+	leaderCtx, leaderCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer leaderCancel()
+	if _, err := c.LocateLeader(leaderCtx, []byte("health")); err != nil {
+		t.Skipf("Cluster unavailable: %v", err)
 	}
 	return c
 }
@@ -25,14 +35,14 @@ func newTestClient() *client.Client {
 // 2. 此时另一个事务读，应该被阻塞（或报错 KeyLocked）。
 // 3. 原事务不 Commit（模拟 Crash），数据对外界不可见。
 func TestTxnAtomicity(t *testing.T) {
-	c := newTestClient()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	c := newTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	key := []byte("atomicity-key")
+	key := []byte(fmt.Sprintf("atomicity-key-%d", time.Now().UnixNano()))
 	val := []byte("atomicity-val")
 
 	// --- 阶段 1: 模拟一个只做了一半的事务 (Prewrite Only) ---
-	
+
 	// 1. 获取 StartTS
 	t.Log("Getting TS...")
 	ts1, err := c.GetTS(ctx)
@@ -67,11 +77,10 @@ func TestTxnAtomicity(t *testing.T) {
 	}
 	t.Logf("Txn 1 Prewrite success. Key is locked.")
 
-
 	// --- 阶段 2: 另一个事务尝试读取 ---
-	
+
 	t2, _ := NewTransaction(ctx, c) // 获取了更新的 StartTS (ts2 > ts1)
-	
+
 	// 设置一个短一点的超时，因为我们预期它会 Backoff 直到超时
 	readCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()

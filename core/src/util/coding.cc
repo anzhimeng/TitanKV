@@ -286,6 +286,7 @@ Slice DecodeMvccKey(const Slice& internal_key, uint64_t* ts) {
     // 提取 TS
     uint64_t ts_desc = DecodeFixed64BigEndian(data + size - 8);
     *ts = std::numeric_limits<uint64_t>::max() - ts_desc;
+    
     return Slice(data + 1, size - 9);
 }
 

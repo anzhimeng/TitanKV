@@ -1,0 +1,23 @@
+Starting Benchmark with GC_THRESHOLD=0.5, DIRECT_IO=false, CONCURRENCY=50, REQUESTS=200
+Starting PD...
+Starting Nodes...
+Waiting for cluster to bootstrap (10s)...
+Running Benchmark...
+🔥 TitanKV 性能压测工具
+配置: Concurrency=50, ReqPerWorker=200, Total=10000, KeysPerTxn=4
+------------------------------------------------
+2026/02/13 12:43:31 Txn commit failed: no leader for region 1
+2026/02/13 12:43:31 Txn commit failed: no leader for region 1
+2026/02/13 12:43:31 Txn commit failed: no leader for region 1
+2026/02/13 12:43:31 Txn commit failed: no leader for region 1
+2026/02/13 12:43:31 Txn commit failed: no leader for region 1
+
+================ 压测结果 (Txn) ================
+总耗时:     6.584978083s
+成功事务:   9341
+失败事务:   659
+Txn TPS:    1418.53 txn/s
+冲突细分:   prewrite_key_locked=0 prewrite_key_locked_pri=0 prewrite_key_locked_sec=0 prewrite_write_conflict=459 prewrite_write_pri=458 prewrite_write_sec=1 prewrite_epoch_not_match=0 commit_key_locked=0 commit_lock_mismatch=0 commit_epoch_not_match=0 get_key_locked=0 get_key_locked_pri=0 get_key_locked_sec=0 get_epoch_not_match=0 resolve_no_action=0 resolve_rollback=0 resolve_commit=0 resolve_lock_not_exist=0 resolve_ttl_expire=0 resolve_error=0
+=================================================
+Cleaning up...
+Benchmark Finished.

@@ -19,6 +19,117 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+var batchRaftMsgPool = sync.Pool{
+	New: func() interface{} {
+		return &titankvpb.BatchRaftMessage{}
+	},
+}
+
+func acquireBatchRaftMessage() *titankvpb.BatchRaftMessage {
+	return batchRaftMsgPool.Get().(*titankvpb.BatchRaftMessage)
+}
+
+func releaseBatchRaftMessage(msg *titankvpb.BatchRaftMessage) {
+	msg.Reset()
+	batchRaftMsgPool.Put(msg)
+}
+
+type transportWorker struct {
+	storeID   uint64
+	transport *Transport
+	ch        chan *titankvpb.RaftMessage
+	prioCh    chan *titankvpb.RaftMessage
+	ctx       context.Context
+	cancel    context.CancelFunc
+}
+
+func (w *transportWorker) run() {
+	const maxBatchSize = 256
+	batch := make([]*titankvpb.RaftMessage, 0, maxBatchSize)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		// 1. Draining Priority Channel Aggressively
+		// Check for priority messages and flush them immediately after draining
+		forceFlush := false
+		for {
+			select {
+			case msg := <-w.prioCh:
+				batch = append(batch, msg)
+				forceFlush = true
+				if len(batch) >= maxBatchSize {
+					w.flush(batch)
+					batch = batch[:0]
+					forceFlush = false // Batch flushed
+				}
+				continue
+			default:
+			}
+			break
+		}
+
+		if forceFlush && len(batch) > 0 {
+			w.flush(batch)
+			batch = batch[:0]
+		}
+
+		select {
+		case <-w.ctx.Done():
+			for _, msg := range batch {
+				ReleaseRaftMessage(msg)
+			}
+			return
+		case msg := <-w.prioCh:
+			batch = append(batch, msg)
+			// Trigger strict priority handling
+			// Loop back to top to drain potential burst and flush
+			continue
+		case msg := <-w.ch:
+			batch = append(batch, msg)
+			if len(batch) >= maxBatchSize {
+				w.flush(batch)
+				batch = batch[:0]
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				w.flush(batch)
+				batch = batch[:0]
+			}
+		}
+	}
+}
+
+func (w *transportWorker) flush(msgs []*titankvpb.RaftMessage) {
+	// 1. Get Batch from Pool
+	batchMsg := acquireBatchRaftMessage()
+	// 注意：这里我们直接引用 msgs slice，但是 Proto Marshal 会处理。
+	// 不过 BatchRaftMessage.Msgs 是 []*RaftMessage。
+	// 为了避免 slice 引用问题，我们可以 append。
+	batchMsg.Msgs = append(batchMsg.Msgs, msgs...)
+
+	// 2. Get Stream
+	stream, err := w.transport.getStream(w.storeID)
+	if err != nil {
+		log.Printf("Get stream for store %d failed: %v", w.storeID, err)
+		w.transport.closeStream(w.storeID)
+	} else {
+		// 3. Send
+		if err := stream.Send(batchMsg); err != nil {
+			log.Printf("Send batch to store %d failed: %v", w.storeID, err)
+			w.transport.closeStream(w.storeID)
+		}
+	}
+
+	// 4. Release Batch
+	releaseBatchRaftMessage(batchMsg)
+
+	// 5. Release Messages
+	for _, msg := range msgs {
+		ReleaseRaftMessage(msg)
+	}
+}
+
 type Transport struct {
 	storeAddrs map[uint64]string
 	pdClient   pdpb.PDClient
@@ -29,6 +140,9 @@ type Transport struct {
 	conns   map[uint64]*grpc.ClientConn
 	failedStores map[uint64]time.Time
 	streamCancels map[uint64]context.CancelFunc
+	
+	// 【新增】Workers
+	workers sync.Map // map[uint64]*transportWorker
 }
 
 func NewTransport(storeAddrs map[uint64]string, pdClient pdpb.PDClient) *Transport {
@@ -43,39 +157,68 @@ func NewTransport(storeAddrs map[uint64]string, pdClient pdpb.PDClient) *Transpo
 }
 // 批量发送消息
 func (t *Transport) Send(msgs []*titankvpb.RaftMessage) {
-	// 1. 按 Store 分组
-	batches := make(map[uint64]*titankvpb.BatchRaftMessage)
 	for _, msg := range msgs {
-		sid := msg.ToStoreId // 现在直接用这个
-		if _, ok := batches[sid]; !ok {
-			batches[sid] = &titankvpb.BatchRaftMessage{}
+		storeID := msg.ToStoreId
+		if storeID == 0 {
+			ReleaseRaftMessage(msg)
+			continue
 		}
-		batches[sid].Msgs = append(batches[sid].Msgs, msg)
-	}
-
-	// 2. 并发发送
-	for storeID, batch := range batches {
-		go t.sendBatch(storeID, batch)
+		worker := t.getWorker(storeID)
+		select {
+		case worker.ch <- msg:
+		default:
+			log.Printf("Worker channel full for store %d, dropping message", storeID)
+			ReleaseRaftMessage(msg)
+		}
 	}
 }
 
-func (t *Transport) sendBatch(storeID uint64, batch *titankvpb.BatchRaftMessage) {
-	stream, err := t.getStream(storeID)
-	if err != nil {
-		// 连接失败，尝试重连或丢弃
-		if err.Error() != "silent_cooldown" {
-
+// SendPrioritized sends messages to the priority channel (e.g., heartbeats)
+func (t *Transport) SendPrioritized(msgs []*titankvpb.RaftMessage) {
+	for _, msg := range msgs {
+		storeID := msg.ToStoreId
+		if storeID == 0 {
+			ReleaseRaftMessage(msg)
+			continue
 		}
-		log.Printf("Get stream for store %d failed: %v", storeID, err)
-		t.closeStream(storeID) // 清理坏连接
-		return
-	}
-
-	if err := stream.Send(batch); err != nil {
-		log.Printf("Send batch to store %d failed: %v", storeID, err)
-		t.closeStream(storeID) // 发生错误，关闭流，下次重连
+		// Skip getWorker if not found? No, getWorker creates it.
+		// Note: getWorker is thread-safe.
+		worker := t.getWorker(storeID)
+		select {
+		case worker.prioCh <- msg:
+		default:
+			log.Printf("Priority Worker channel full for store %d, dropping message", storeID)
+			ReleaseRaftMessage(msg)
+		}
 	}
 }
+
+func (t *Transport) getWorker(storeID uint64) *transportWorker {
+	if v, ok := t.workers.Load(storeID); ok {
+		return v.(*transportWorker)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &transportWorker{
+		storeID:   storeID,
+		transport: t,
+		ch:        make(chan *titankvpb.RaftMessage, 4096),
+		prioCh:    make(chan *titankvpb.RaftMessage, 4096), // Priority channel
+		ctx:       ctx,
+		cancel:    cancel,
+	}
+
+	actual, loaded := t.workers.LoadOrStore(storeID, w)
+	if loaded {
+		cancel()
+		return actual.(*transportWorker)
+	}
+
+	go w.run()
+	return w
+}
+
+// sendBatch is replaced by worker.flush, removing it.
 
 
 // 获取或创建流
@@ -213,10 +356,17 @@ func (t *Transport) getClient(storeID uint64) (titankvpb.TitanKVClient, error) {
 }
 
 func (t *Transport) Close() {
-    t.mu.Lock()
-    defer t.mu.Unlock()
-    
-    // 1. 先取消所有 Stream
+	// 0. Stop workers
+	t.workers.Range(func(key, value interface{}) bool {
+		w := value.(*transportWorker)
+		w.cancel()
+		return true
+	})
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// 1. 先取消所有 Stream
     for id, cancel := range t.streamCancels {
         cancel()
         delete(t.streamCancels, id)

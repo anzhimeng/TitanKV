@@ -4,6 +4,7 @@
 #include "lsm/mvcc_reader.h"
 #include "util/filename.h"
 #include <string>
+#include "titankv/db_impl.h"
 #include <filesystem>
 
 using namespace titankv;
@@ -50,6 +51,30 @@ TEST_F(MvccIntegrationTest, CFIsolation) {
     // 读 Lock
     ASSERT_TRUE(db_->GetCF(kCFLock, "key1", &val, 0).ok());
     ASSERT_EQ(val, "val_l");
+}
+
+TEST_F(MvccIntegrationTest, CheckConflict) {
+    DBImpl* impl = dynamic_cast<DBImpl*>(db_);
+    ASSERT_NE(impl, nullptr);
+
+    // 1. Write a committed version at TS=100
+    ASSERT_TRUE(db_->PutCF(kCFWrite, "key_c", "write_info_100", 100).ok());
+
+    // 2. Check Conflict with StartTS=90 (Older than 100)
+    std::vector<std::string> keys = {"key_c"};
+    Status s = impl->CheckConflict(keys, 90);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(s.ToString(), "IO error: Write conflict");
+
+    // 3. Check Conflict with StartTS=110 (Newer than 100)
+    s = impl->CheckConflict(keys, 110);
+    ASSERT_TRUE(s.ok());
+
+    // 4. Check Lock Conflict
+    ASSERT_TRUE(db_->PutCF(kCFLock, "key_c", "lock_info", 0).ok());
+    s = impl->CheckConflict(keys, 110);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(s.ToString(), "IO error: Key is locked");
 }
 
 // 验证 MVCC 排序：最新的版本应该先被读到 (Seek)

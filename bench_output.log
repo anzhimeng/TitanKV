@@ -1,0 +1,11 @@
+Async Commit path taken
+Async Commit path taken
+Async Commit path taken
+Async Commit path taken
+Async Commit path taken
+Benchmark Result:
+Total Txns: 5
+Elapsed: 3.651133248s
+TPS: 1.37
+Avg Latency: 730216.80 us
+Verify k_0_0: v_0_0

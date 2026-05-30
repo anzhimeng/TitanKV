@@ -58,11 +58,12 @@ TEST(BlobGCTest, ValidRatioStats) {
 }
 
 TEST(BlobGCTest, RewriteLogic) {
-    // ... 初始化 store ...
-    // 设置小一点的 blob size limit，强制切文件
+    // 1. Setup
+    std::string dbname = "/tmp/titankv_gc_rewrite";
+    std::filesystem::remove_all(dbname);
+
     Options options; 
     options.max_blob_file_size = 1000;
-    std::string dbname = "/tmp/titankv_gc_rewrite";
     IoUringExecutor executor;
     BlobStore store(dbname, options, &executor);
 

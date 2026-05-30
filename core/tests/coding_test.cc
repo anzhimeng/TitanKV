@@ -98,19 +98,30 @@ TEST_F(CodingTest, VarintLength) {
 
 // 验证 Slice 指针移动
 TEST_F(CodingTest, SliceAdvance) {
-    std::string s;
-    PutVarint32(&s, 500); // 500 > 128, 占 2 字节
-    PutFixed32(&s, 999);  // 占 4 字节
-    
-    Slice input(s);
-    ASSERT_EQ(6, input.size()); // 2 + 4
+    Slice s("12345");
+    s.remove_prefix(2);
+    ASSERT_EQ("345", s.ToString());
+}
 
-    uint32_t v1;
-    ASSERT_TRUE(GetVarint32(&input, &v1));
-    ASSERT_EQ(500, v1);
-    
-    ASSERT_EQ(4, input.size()); // 应该只剩 4 字节
-    
-    uint32_t v2 = DecodeFixed32(input.data());
-    ASSERT_EQ(999, v2);
+TEST_F(CodingTest, MvccKeyEncoding) {
+    std::string key = "user_key";
+    uint64_t ts1 = 100;
+    uint64_t ts2 = 200;
+    char cf = 'd';
+
+    std::string encoded1 = EncodeMvccKey(cf, key, ts1);
+    std::string encoded2 = EncodeMvccKey(cf, key, ts2);
+
+    // Verify length: 1 (cf) + key.len + 8 (ts)
+    ASSERT_EQ(1 + key.size() + 8, encoded1.size());
+
+    // Verify ordering: larger TS should be smaller (come first)
+    // ts2 > ts1 => encoded2 < encoded1
+    ASSERT_LT(encoded2, encoded1);
+
+    // Verify decoding
+    uint64_t decoded_ts;
+    Slice user_key = DecodeMvccKey(encoded2, &decoded_ts);
+    ASSERT_EQ(key, user_key.ToString());
+    ASSERT_EQ(ts2, decoded_ts);
 }

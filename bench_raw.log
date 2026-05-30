@@ -1,0 +1,65 @@
+Starting Benchmark with GC_THRESHOLD=0.5, DIRECT_IO=false, CONCURRENCY=200, REQUESTS=2000, USE_TXN=false
+Starting PD...
+Starting Nodes...
+Waiting for cluster to bootstrap (20s)...
+Running Benchmark...
+2026/02/14 17:16:43 Starting benchmark: c=200, n=2000, keys=100000, v=128, pd=127.0.0.1:2379, txn=false
+2026/02/14 17:16:48 Progress: 194618 ops (0 errors), rate: 38923.6 ops/s
+2026/02/14 17:16:53 Progress: 374161 ops (0 errors), rate: 35908.6 ops/s
+2026/02/14 17:16:58 Progress: 374161 ops (0 errors), rate: 0.0 ops/s
+2026/02/14 17:17:03 Progress: 374161 ops (0 errors), rate: 0.0 ops/s
+2026/02/14 17:17:08 Progress: 374361 ops (200 errors), rate: 40.0 ops/s
+2026/02/14 17:17:13 Progress: 374361 ops (200 errors), rate: 0.0 ops/s
+2026/02/14 17:17:18 Progress: 374361 ops (200 errors), rate: 0.0 ops/s
+2026/02/14 17:17:23 Progress: 374595 ops (400 errors), rate: 46.8 ops/s
+2026/02/14 17:17:28 Progress: 374855 ops (400 errors), rate: 52.0 ops/s
+2026/02/14 17:17:33 Progress: 374855 ops (400 errors), rate: 0.0 ops/s
+2026/02/14 17:17:38 Progress: 374855 ops (400 errors), rate: 0.0 ops/s
+2026/02/14 17:17:43 Progress: 375055 ops (600 errors), rate: 40.0 ops/s
+2026/02/14 17:17:48 Progress: 375055 ops (600 errors), rate: 0.0 ops/s
+2026/02/14 17:17:53 Progress: 375055 ops (600 errors), rate: 0.0 ops/s
+2026/02/14 17:17:58 Progress: 375255 ops (800 errors), rate: 40.0 ops/s
+2026/02/14 17:18:03 Progress: 375255 ops (800 errors), rate: 0.0 ops/s
+2026/02/14 17:18:08 Progress: 375255 ops (800 errors), rate: 0.0 ops/s
+2026/02/14 17:18:13 Progress: 375455 ops (1000 errors), rate: 40.0 ops/s
+2026/02/14 17:18:18 Progress: 375455 ops (1000 errors), rate: 0.0 ops/s
+2026/02/14 17:18:23 Progress: 375455 ops (1000 errors), rate: 0.0 ops/s
+2026/02/14 17:18:28 Progress: 375655 ops (1200 errors), rate: 40.0 ops/s
+2026/02/14 17:18:33 Progress: 375655 ops (1200 errors), rate: 0.0 ops/s
+2026/02/14 17:18:38 Progress: 375655 ops (1200 errors), rate: 0.0 ops/s
+2026/02/14 17:18:43 Progress: 375855 ops (1400 errors), rate: 40.0 ops/s
+2026/02/14 17:18:48 Progress: 375855 ops (1400 errors), rate: 0.0 ops/s
+2026/02/14 17:18:53 Progress: 375855 ops (1400 errors), rate: 0.0 ops/s
+2026/02/14 17:18:58 Progress: 376055 ops (1600 errors), rate: 40.0 ops/s
+2026/02/14 17:19:03 Progress: 376055 ops (1600 errors), rate: 0.0 ops/s
+2026/02/14 17:19:08 Progress: 376055 ops (1600 errors), rate: 0.0 ops/s
+2026/02/14 17:19:13 Progress: 376255 ops (1800 errors), rate: 40.0 ops/s
+2026/02/14 17:19:18 Progress: 376255 ops (1800 errors), rate: 0.0 ops/s
+2026/02/14 17:19:23 Progress: 376255 ops (1800 errors), rate: 0.0 ops/s
+2026/02/14 17:19:28 Progress: 376455 ops (2000 errors), rate: 40.0 ops/s
+2026/02/14 17:19:33 Progress: 376455 ops (2000 errors), rate: 0.0 ops/s
+2026/02/14 17:19:38 Progress: 376455 ops (2000 errors), rate: 0.0 ops/s
+2026/02/14 17:19:43 Progress: 376655 ops (2200 errors), rate: 40.0 ops/s
+2026/02/14 17:19:48 Progress: 376655 ops (2200 errors), rate: 0.0 ops/s
+2026/02/14 17:19:53 Progress: 376655 ops (2200 errors), rate: 0.0 ops/s
+2026/02/14 17:19:58 Progress: 376855 ops (2400 errors), rate: 40.0 ops/s
+2026/02/14 17:20:03 Progress: 376855 ops (2400 errors), rate: 0.0 ops/s
+2026/02/14 17:20:08 Progress: 376855 ops (2400 errors), rate: 0.0 ops/s
+2026/02/14 17:20:13 Progress: 377055 ops (2600 errors), rate: 40.0 ops/s
+2026/02/14 17:20:18 Progress: 377055 ops (2600 errors), rate: 0.0 ops/s
+2026/02/14 17:20:23 Progress: 377055 ops (2600 errors), rate: 0.0 ops/s
+2026/02/14 17:20:28 Progress: 377255 ops (2800 errors), rate: 40.0 ops/s
+2026/02/14 17:20:33 Progress: 377255 ops (2800 errors), rate: 0.0 ops/s
+2026/02/14 17:20:38 Progress: 377255 ops (2800 errors), rate: 0.0 ops/s
+2026/02/14 17:20:43 Progress: 377455 ops (3000 errors), rate: 40.0 ops/s
+2026/02/14 17:20:48 Progress: 377455 ops (3000 errors), rate: 0.0 ops/s
+2026/02/14 17:20:53 Progress: 377455 ops (3000 errors), rate: 0.0 ops/s
+2026/02/14 17:20:58 Progress: 377655 ops (3200 errors), rate: 40.0 ops/s
+2026/02/14 17:21:03 Progress: 377655 ops (3200 errors), rate: 0.0 ops/s
+2026/02/14 17:21:08 Progress: 377655 ops (3200 errors), rate: 0.0 ops/s
+2026/02/14 17:21:13 Progress: 377855 ops (3400 errors), rate: 40.0 ops/s
+2026/02/14 17:21:18 Progress: 377855 ops (3400 errors), rate: 0.0 ops/s
+2026/02/14 17:21:23 Progress: 377855 ops (3400 errors), rate: 0.0 ops/s
+2026/02/14 17:21:28 Progress: 378055 ops (3600 errors), rate: 40.0 ops/s
+2026/02/14 17:21:33 Progress: 378055 ops (3600 errors), rate: 0.0 ops/s
+2026/02/14 17:21:38 Progress: 378055 ops (3600 errors), rate: 0.0 ops/s

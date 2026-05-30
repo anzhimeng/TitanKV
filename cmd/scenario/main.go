@@ -222,7 +222,9 @@ func runConfChangeScenario() {
 }
 
 func loadRegionState(dbPath string, regionID uint64) (*raft_serverpb.RegionLocalState, *titankvpb.RaftLocalState, error) {
-	s, err := store.Open(dbPath, false)
+	opts := store.DefaultOptions()
+	opts.CreateIfMissing = false
+	s, err := store.Open(dbPath, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -466,7 +468,9 @@ type applyMonitor struct {
 }
 
 func startApplyMonitor(dbPath string, regionID uint64, interval time.Duration) *applyMonitor {
-	s, err := store.Open(dbPath, false)
+	opts := store.DefaultOptions()
+	opts.CreateIfMissing = false
+	s, err := store.Open(dbPath, opts)
 	if err != nil {
 		log.Printf("apply monitor open store failed: %v", err)
 		return nil

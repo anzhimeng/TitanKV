@@ -11,10 +11,12 @@
 #include "util/filename.h"
 #include "util/cache.h"
 #include <filesystem>
+#include <chrono>
 #include <iostream>
 #include <algorithm>
 #include <vector>
 #include <sstream>
+#include <limits>
 
 namespace titankv {
 
@@ -23,11 +25,29 @@ constexpr char kValueInlineTag = '\x00';
 constexpr char kValueBlobTag = '\x01';
 }
 
-static bool DecodeLockValue(const std::string& val, std::string* primary, uint64_t* start_ts, uint64_t* ttl, uint8_t* op_type) {
-    if (val.size() < 4 + 8 + 8 + 1) return false;
+#include <iomanip>
+#include <iostream>
+
+static void PrintHex(const std::string& label, const std::string& val) {
+    std::cerr << "[" << label << "] Size=" << val.size() << " Hex=";
+    for (unsigned char c : val) {
+        std::cerr << std::hex << std::setw(2) << std::setfill('0') << (int)c;
+    }
+    std::cerr << std::dec << std::endl;
+}
+
+static bool DecodeLockValue(const std::string& val, std::string* primary, uint64_t* start_ts, uint64_t* ttl, uint8_t* op_type, uint64_t* min_commit_ts = nullptr, uint64_t* for_update_ts = nullptr, std::vector<std::string>* secondaries = nullptr) {
+    if (val.size() < 4 + 8 + 8 + 1) {
+        PrintHex("DecodeLockValue:TooShort", val);
+        return false;
+    }
     uint32_t primary_len = DecodeFixed32(val.data());
     size_t offset = 4;
-    if (val.size() < offset + primary_len + 8 + 8 + 1) return false;
+    if (val.size() < offset + primary_len + 8 + 8 + 1) {
+        std::cerr << "[DecodeLockValue:LenMismatch] PrimaryLen=" << primary_len << std::endl;
+        PrintHex("DecodeLockValue:LenMismatch", val);
+        return false;
+    }
     if (primary != nullptr) {
         primary->assign(val.data() + offset, primary_len);
     }
@@ -43,6 +63,45 @@ static bool DecodeLockValue(const std::string& val, std::string* primary, uint64
     if (op_type != nullptr) {
         *op_type = static_cast<uint8_t>(val[offset]);
     }
+    offset += 1;
+    
+    // Attempt to read min_commit_ts if present
+    if (val.size() >= offset + 8) {
+         if (min_commit_ts != nullptr) *min_commit_ts = DecodeFixed64(val.data() + offset);
+         offset += 8;
+    } else {
+         if (min_commit_ts != nullptr) *min_commit_ts = 0;
+    }
+
+    // Attempt to read for_update_ts if present
+    if (val.size() >= offset + 8) {
+         if (for_update_ts != nullptr) *for_update_ts = DecodeFixed64(val.data() + offset);
+         offset += 8;
+    } else {
+         if (for_update_ts != nullptr) *for_update_ts = 0;
+    }
+
+    // Attempt to read secondaries if present
+    if (val.size() > offset && secondaries != nullptr) {
+        secondaries->clear();
+        const char* p = val.data() + offset;
+        const char* limit = val.data() + val.size();
+        uint32_t count = 0;
+        const char* p_count = GetVarint32Ptr(p, limit, &count);
+        if (p_count != nullptr) {
+            p = p_count;
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t sec_len = 0;
+                const char* p_len = GetVarint32Ptr(p, limit, &sec_len);
+                if (p_len == nullptr) break;
+                p = p_len;
+                if (p + sec_len > limit) break;
+                secondaries->emplace_back(p, sec_len);
+                p += sec_len;
+            }
+        }
+    }
+    
     return true;
 }
 
@@ -116,6 +175,8 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
       mem_(nullptr),
       blob_store_(nullptr),
       last_sequence_(0),
+      wal_pending_bytes_(0),
+      wal_last_sync_(std::chrono::steady_clock::now()),
       imm_(nullptr),
       table_cache_(nullptr),
       versions_(nullptr),
@@ -157,7 +218,12 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
 
 void DBImpl::StartBackgroundThread() {
     // 启动后台线程
+    bg_running_ = true; // Ensure this is set
     bg_thread_ = std::thread(&DBImpl::BGWork, this);
+    
+    // Start GC Thread
+    bg_gc_running_ = true;
+    bg_gc_thread_ = std::thread(&DBImpl::BGGC, this);
 }
 
 DBImpl::~DBImpl() {
@@ -170,6 +236,17 @@ DBImpl::~DBImpl() {
   if (bg_thread_.joinable()) {
     bg_thread_.join();
   }
+  
+  // Stop GC Thread
+  {
+      std::lock_guard<std::mutex> lock(bg_gc_mutex_);
+      bg_gc_running_ = false;
+      bg_gc_cv_.notify_all();
+  }
+  if (bg_gc_thread_.joinable()) {
+      bg_gc_thread_.join();
+  }
+
   if (mem_) mem_->Unref();
   if (imm_) imm_->Unref();
   delete blob_store_;
@@ -385,6 +462,8 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
     
     logfile_ = std::move(lfile);
     log_ = std::make_unique<log::Writer>(logfile_.get());
+    wal_pending_bytes_ = 0;
+    wal_last_sync_ = std::chrono::steady_clock::now();
     
     VersionEdit edit;
     edit.SetLogNumber(new_log_num);
@@ -395,10 +474,8 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, ValueType type, const Slice&
   s = log_->AddRecord(log_record);
   if (!s.ok()) return s;
 
-  if (opt.sync) {
-    s = logfile_->Sync();
-    if (!s.ok()) return s;
-  }
+  s = MaybeSyncWAL(log_record.size(), opt.sync);
+  if (!s.ok()) return s;
 
   // 4. 写入 MemTable
   last_sequence_++;
@@ -416,6 +493,8 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, WriteBatch* batch) {
     
     logfile_ = std::move(lfile);
     log_ = std::make_unique<log::Writer>(logfile_.get());
+    wal_pending_bytes_ = 0;
+    wal_last_sync_ = std::chrono::steady_clock::now();
     
     VersionEdit edit;
     edit.SetLogNumber(new_log_num);
@@ -436,20 +515,24 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, WriteBatch* batch) {
     // 这样虽然 WAL 是多条，但物理上它们会在一次 write 中落盘（如果 OS buffer 够大），
     // 且只有最后 Sync 成功了才算成功。
     
-    Status s;
+    std::vector<std::string> records;
+    records.reserve(batch->entries().size());
+    std::vector<Slice> slices;
+    slices.reserve(batch->entries().size());
     for (const auto& entry : batch->entries()) {
-    // fprintf(stderr, "[WriteLocked] Writing Key: %s, Type: %d\n", ToHex(entry.key).c_str(), entry.type);
         ValueType type = (entry.type == kTypeDeletion) ? kTypeDeletion : kTypeValue;
-        std::string log_record = EncodeLogRecord(type, entry.key, entry.value);
-        s = log_->AddRecord(log_record); // 只是 copy 到 buffer
-        if (!s.ok()) return s;
+        records.push_back(EncodeLogRecord(type, entry.key, entry.value));
+        slices.emplace_back(records.back());
     }
+    size_t total_bytes = 0;
+    for (const auto& rec : records) {
+        total_bytes += rec.size();
+    }
+    Status s = log_->AddRecordBatch(slices);
+    if (!s.ok()) return s;
 
-    // 3. 【关键】最后统一 Sync
-    if (opt.sync) {
-        s = logfile_->Sync();
-        if (!s.ok()) return s;
-    }
+    s = MaybeSyncWAL(total_bytes, opt.sync);
+    if (!s.ok()) return s;
 
     // 4. 写入 MemTable (内存操作绝不会失败)
     for (const auto& entry : batch->entries()) {
@@ -458,6 +541,38 @@ Status DBImpl::WriteLocked(const WriteOptions& opt, WriteBatch* batch) {
         mem_->Add(last_sequence_, type, entry.key, entry.value);
     }
 
+    return Status::OK();
+}
+
+Status DBImpl::MaybeSyncWAL(size_t bytes_written, bool force_sync) {
+    if (!logfile_) {
+        return Status::OK();
+    }
+    wal_pending_bytes_ += bytes_written;
+    auto now = std::chrono::steady_clock::now();
+    if (force_sync) {
+        Status s = logfile_->Sync();
+        if (!s.ok()) return s;
+        wal_pending_bytes_ = 0;
+        wal_last_sync_ = now;
+        return Status::OK();
+    }
+    bool need_sync = false;
+    if (options_.wal_sync_bytes > 0 && wal_pending_bytes_ >= options_.wal_sync_bytes) {
+        need_sync = true;
+    }
+    if (!need_sync && options_.wal_sync_interval_ms > 0) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - wal_last_sync_).count();
+        if (elapsed >= static_cast<int64_t>(options_.wal_sync_interval_ms)) {
+            need_sync = true;
+        }
+    }
+    if (need_sync) {
+        Status s = logfile_->Sync();
+        if (!s.ok()) return s;
+        wal_pending_bytes_ = 0;
+        wal_last_sync_ = now;
+    }
     return Status::OK();
 }
 
@@ -698,22 +813,21 @@ Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
   LookupKey lkey(key, snapshot);
   Status s;
 
-  // 1. 查 MemTable
-  if (mem_->Get(lkey, val_buf, &s)) return s;
-
-  // 2. 查 Immutable
-  if (imm_ != nullptr) {
-    if (imm_->Get(lkey, val_buf, &s)) return s;
-  }
-
-  // 3. 查 Version (L0 - L6)
-  Version* current;
+  // 1. 查 MemTable & Immutable & Get Version (需加锁)
+  Version* current = nullptr;
   {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
+      if (mem_->Get(lkey, val_buf, &s)) return s;
+
+      if (imm_ != nullptr) {
+        if (imm_->Get(lkey, val_buf, &s)) return s;
+      }
+      
       current = versions_->current();
       current->Ref();
   }
 
+  // 2. 查 Version (L0 - L6) - 锁外执行
   bool found = false;
   
   // 定义一个“空”的 BlobGetter
@@ -725,7 +839,14 @@ Status DBImpl::GetLSMValue(const Slice& key, std::string* val_buf) {
   // 复用 Version::Get 的多层查找逻辑
   s = current->Get(ReadOptions(), lkey, val_buf, &found, table_cache_, noop_blob_getter);
   
-  current->Unref();
+  // 必须在锁外 Unref? VersionSet::Unref 需要锁吗？
+  // Version::Unref 只是减引用计数，如果为0则删除。
+  // 删除 Version 可能涉及 VersionSet 的链表操作?
+  // 通常 Unref 需要锁。
+  {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      current->Unref();
+  }
 
   if (s.ok() && found) {
       return Status::OK();
@@ -771,48 +892,66 @@ Status DBImpl::ResolveBlobIndex(std::string* value) {
 
 
 Status DBImpl::FinishGC(const std::vector<GCRecord>& gc_records) {
-    // 这一步需要加锁，确保原子写入 WriteBatch
-    // 但查询 GetLSMValue 是否需要加锁？
-    // 为了保证 Check-And-Set 的原子性，我们在检查期间持有锁。
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    int success_count = 0;
+    // Optimization: Use WriteBatch and batching to reduce lock contention and WAL I/O.
+    // We process in chunks to yield the lock periodically.
     
+    WriteBatch batch;
+    int batch_count = 0;
+    int success_count = 0;
+    const int kBatchLimit = 128; 
+
+    // Use unique_lock to allow manual unlocking
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+
     for (const auto& rec : gc_records) {
+        // If batch is full, write it and yield
+        if (batch_count >= kBatchLimit) {
+            Status s = WriteLocked(WriteOptions(), &batch);
+            if (!s.ok()) {
+                fprintf(stderr, "[GC] Batch write failed: %s\n", s.ToString().c_str());
+            }
+            batch.Clear();
+            batch_count = 0;
+            
+            // Yield lock to allow other writers/readers
+            lock.unlock();
+            std::this_thread::yield(); 
+            lock.lock();
+        }
+
         std::string current_val_str;
         
-        // 1. Check: 查询当前 LSM 中的值
+        // 1. Check: GetLSMValue (Safe under recursive lock)
         Status s = GetLSMValue(rec.key, &current_val_str);
         
         bool can_update = false;
         
         if (s.ok()) {
-            // 解析当前值是否为 BlobIndex
             BlobIndex current_index;
             Slice input(current_val_str);
             if (current_index.DecodeFrom(&input).ok()) {
-                // 2. Compare: 比较是否等于 GC 前的旧索引
+                // 2. Compare: Check if it still matches the old index
                 if (current_index == rec.old_index) {
                     can_update = true;
                 }
             }
         }
         
-        // 3. Set: 如果匹配，则更新为新索引
+        // 3. Set: Add to batch if matched
         if (can_update) {
             std::string new_val_str;
             rec.new_index.EncodeTo(&new_val_str);
-            
-            // 复用 WriteLocked 写入 WAL 和 MemTable
-            // 注意：这里我们是在循环里多次调用 WriteLocked，这会产生多条 WAL 日志。
-            // 生产环境通常使用 WriteBatch 一次性写入。
-            // 但为了复用现有逻辑，循环写是可以接受的（只是性能稍差）。
-            WriteLocked(WriteOptions(), kTypeValue, rec.key, new_val_str);
+            batch.Put(rec.key, new_val_str);
             success_count++;
-        } else {
-            // 冲突！用户已经更新或删除了该 Key，放弃回填。
-            // 新写入 BlobStore 的数据变成了垃圾（浪费了一点空间），下次 GC 会清理它。
-            // fprintf(stderr, "[GC] Conflict detected for key: %s\n", rec.key.c_str());
+            batch_count++;
+        }
+    }
+    
+    // Flush remaining
+    if (batch_count > 0) {
+        Status s = WriteLocked(WriteOptions(), &batch);
+         if (!s.ok()) {
+            fprintf(stderr, "[GC] Final batch write failed: %s\n", s.ToString().c_str());
         }
     }
     
@@ -954,6 +1093,11 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
     };
 
     const InternalKeyComparator* icmp = versions_->icmp();
+
+    // MVCC GC State
+    std::string current_real_key;
+    bool has_kept_safe_version = false;
+    uint64_t safe_point = gc_safe_point_.load(std::memory_order_relaxed);
     
     for (; input->Valid(); input->Next()) {
         Slice key = input->key();
@@ -967,7 +1111,22 @@ Status DBImpl::DoCompactionWork(Compaction* c) {
 
         bool drop = false;
         
-        if (has_current_user_key && 
+        // MVCC GC Logic
+        if (user_key.size() > 9 && (user_key[0] == kCFWrite || user_key[0] == kCFDefault)) {
+             uint64_t ts = 0;
+             Slice real_key = DecodeMvccKey(user_key, &ts);
+             if (real_key.compare(Slice(current_real_key)) != 0) {
+                 current_real_key = real_key.ToString();
+                 has_kept_safe_version = (ts <= safe_point);
+             } else {
+                 if (ts <= safe_point) {
+                     if (has_kept_safe_version) drop = true;
+                     else has_kept_safe_version = true;
+                 }
+             }
+        }
+
+        if (!drop && has_current_user_key && 
             icmp->user_key_compare(user_key, Slice(current_user_key)) == 0) {
             drop = true;
             BlobIndex blob_idx;
@@ -1120,7 +1279,15 @@ void DBImpl::BGWork() {
         } else {
             // --- Idle ---
             lock.unlock();
-            GarbageCollect();
+            
+            // Trigger Async GC instead of blocking
+            // GarbageCollect();
+            {
+                std::lock_guard<std::mutex> l(bg_gc_mutex_);
+                bg_gc_scheduled_ = true;
+                bg_gc_cv_.notify_one();
+            }
+
             lock.lock();
             
             if (!bg_running_) break;
@@ -1539,43 +1706,100 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options, CFType cf) {
 Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations, 
                             const std::string& primary,
                             uint64_t start_ts, 
-                            uint64_t ttl) {
+                            uint64_t ttl,
+                            uint64_t min_commit_ts,
+                            bool is_pessimistic_lock,
+                            const std::vector<std::string>& secondaries) {
     //fprintf(stderr, "[DBImpl] MvccPrewrite: Waiting for lock...\n");
     std::lock_guard<std::recursive_mutex> lock(mutex_);
      //fprintf(stderr, "[DBImpl] MvccPrewrite: Lock acquired.\n");
 
+    // 0. Update MaxTS (Parallel Commit / Async Commit)
+    // If min_commit_ts is provided (Async Commit), we must ensure it's > max_ts_.
+    // Also we update max_ts_ to at least start_ts (though strictly read updates max_ts, write might too?)
+    // Actually, for Async Commit, min_commit_ts should be max(current_ts, max_ts + 1).
+    if (min_commit_ts > 0) {
+        uint64_t current_max_ts = max_ts_.load(std::memory_order_acquire);
+        if (min_commit_ts <= current_max_ts) {
+            min_commit_ts = current_max_ts + 1;
+        }
+    }
+
     // 1. 创建 WriteBatch (所有操作原子生效)
+
     WriteBatch batch;
     MvccReader reader(this, start_ts); // 复用 Reader
+    auto find_write_conflict = [&](const std::string& key, uint64_t start_ts, uint64_t* conflict_ts) -> bool {
+        std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+        // Seek to the latest version (Max TS) to check all versions >= start_ts
+        std::string seek_key = EncodeMvccKey(kCFWrite, key, std::numeric_limits<uint64_t>::max());
+        std::string prefix = EncodeMvccKey(kCFWrite, key, kMaxSequenceNumber);
+        prefix.resize(prefix.size() - 8);
+        iter->Seek(seek_key);
+        while (iter->Valid()) {
+            Slice k_internal = iter->key();
+            // 提取 UserKey (即 MvccKey)
+            Slice k = ExtractUserKey(k_internal);
+            
+            if (!k.starts_with(prefix)) break;
+            uint64_t commit_ts = 0;
+            Slice decoded_key = DecodeMvccKey(k, &commit_ts);
+            if (decoded_key != key) break;
+            
+            // If we found a commit_ts < start_ts, then all subsequent records (which are older)
+            // will also be < start_ts. So we are safe.
+            if (commit_ts < start_ts) break;
+            
+            // Found a commit_ts >= start_ts -> Conflict!
+            uint64_t rec_start_ts;
+            bool is_commit;
+            if (ParseWriteValue(iter->value().ToString(), &rec_start_ts, &is_commit) && is_commit) {
+                if (rec_start_ts == start_ts) {
+                    // Idempotency: If this is my own commit, it's not a conflict.
+                    iter->Next();
+                    continue;
+                }
+                // fprintf(stderr, "[DEBUG] Write Conflict Found! Key=%s, StartTS=%lu, FoundCommitTS=%lu, RecStartTS=%lu\n", key.c_str(), start_ts, commit_ts, rec_start_ts);
+                
+                if (conflict_ts) {
+                    *conflict_ts = commit_ts;
+                }
+                return true;
+            }
+            iter->Next();
+        }
+        return false;
+    };
 
     for (const auto& m : mutations) {
-    	//fprintf(stderr, "[DBImpl] MvccPrewrite: Processing key %s\n", m.key.c_str());
-        // --- 检查 Write Conflict ---
-        // 查找 [StartTS, +inf] 的 Write 记录
-        // 我们的 Reader.SeekWrite 找的是 <= snapshot 的。
-        // 这里我们需要一个新的接口：找 >= StartTS 的。
-        // 简单实现：使用 Iterator 遍历 Write CF。
-        
-        // 为了简化，我们假设 DB 提供了 CheckWriteConflict 辅助函数
-        // 实际上这需要构建 WriteCF 的 Iterator 并 Seek(Key)
-        // 检查找到的 Write.CommitTS 是否 >= StartTS
-        // 如果有，返回 Conflict 错误。
-        
+    	// PrintHex("MvccPrewrite Key", m.key);
         // --- 检查 Lock Conflict ---
         std::string lock_val;
         Status s = GetCFLocked(kCFLock, m.key, &lock_val, 0);
-        //fprintf(stderr, "[DBImpl] GetCF Lock done: %s\n", s.ToString().c_str());
+        bool own_lock = false;
+        
         if (s.ok()) {
             uint64_t lock_ts = ParseLockStartTs(lock_val);
             if (lock_ts == start_ts) {
-                continue;
+                // If lock exists (retry or pessimistic), we own it.
+                // We proceed to update the lock and write data.
+                own_lock = true;
+            } else {
+                return Status::Aborted("Key is locked");
             }
-            // 【新增调试】打印出到底是哪个 Key 冲突了，以及 Lock 里的内容是什么
-            //fprintf(stderr, "[DEBUG] Lock Conflict! Key: %s, LockVal: %s\n", 
-                    //m.key.c_str(), lock_val.c_str());
-            // 打印完整的二进制 lock_val
-        	  //fprintf(stderr, "[DEBUG] Lock Val Hex: %s\n", ToHex(lock_val.data(), lock_val.size()).c_str());
-            return Status::Aborted("Key is locked");
+        }
+        
+        if (is_pessimistic_lock && !own_lock) {
+            return Status::Aborted("Pessimistic lock not found");
+        }
+
+        // --- 检查 Write Conflict ---
+        // Only if we don't own the lock.
+        if (!own_lock) {
+            uint64_t conflict_ts = 0;
+            if (find_write_conflict(m.key, start_ts, &conflict_ts)) {
+                return Status::Aborted("Write conflict: start_ts=" + std::to_string(start_ts) + " conflict_ts=" + std::to_string(conflict_ts));
+            }
         }
 
         // --- 写入 ---
@@ -1587,6 +1811,27 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
         PutFixed64(&lock_info, start_ts);
         PutFixed64(&lock_info, ttl);
         lock_info.push_back(static_cast<char>(op_type));
+        
+        // Append min_commit_ts if > 0 or if we have secondaries (alignment)
+        if (min_commit_ts > 0 || !secondaries.empty()) {
+            PutFixed64(&lock_info, min_commit_ts);
+        }
+
+        // Append for_update_ts (0 for now, or from somewhere?) and Secondaries
+        if (!secondaries.empty()) {
+            // If min_commit_ts was not written above (because it was 0), we have a problem with alignment.
+            // But we handled it: if !secondaries.empty(), we wrote min_commit_ts.
+            
+            // Write for_update_ts placeholder (0)
+            PutFixed64(&lock_info, 0); 
+
+            // Write Secondaries
+            PutVarint32(&lock_info, secondaries.size());
+            for (const auto& sec : secondaries) {
+                PutVarint32(&lock_info, sec.size());
+                lock_info.append(sec);
+            }
+        }
           //fprintf(stderr, "[DEBUG] Writing Lock Hex: %s\n", 
                 //ToHex(lock_info.data(), lock_info.size()).c_str());
         
@@ -1603,12 +1848,262 @@ Status DBImpl::MvccPrewrite(const std::vector<Mutation>& mutations,
     return s;
 }
 
+Status DBImpl::MvccPrewrite1PC(const std::vector<Mutation>& mutations, 
+                               const std::string& primary,
+                               uint64_t start_ts, 
+                               uint64_t commit_ts,
+                               uint64_t ttl) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    WriteBatch batch;
+    
+    auto find_write_conflict = [&](const std::string& key, uint64_t start_ts, uint64_t* conflict_ts) -> bool {
+        std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+        // Seek to the latest version (Max TS)
+        std::string seek_key = EncodeMvccKey(kCFWrite, key, kMaxSequenceNumber);
+        iter->Seek(seek_key);
+        
+        while (iter->Valid()) {
+            Slice internal_key = iter->key();
+            Slice user_key = ExtractUserKey(internal_key);
+            
+            if (user_key.size() < 9 || user_key[0] != kCFWrite) break;
+            
+            uint64_t existing_commit_ts = 0;
+            Slice real_key = DecodeMvccKey(user_key, &existing_commit_ts);
+            
+            if (real_key != key) break;
+
+            if (existing_commit_ts > start_ts) {
+                // Check if it is a valid commit (not Rollback)
+                uint64_t rec_start_ts;
+                bool is_commit;
+                if (ParseWriteValue(iter->value().ToString(), &rec_start_ts, &is_commit) && is_commit) {
+                    if (rec_start_ts == start_ts) {
+                        // Idempotency: If this is my own commit, it's not a conflict.
+                        // We can overwrite it (or just succeed).
+                        iter->Next();
+                        continue;
+                    }
+                    if (conflict_ts) {
+                        *conflict_ts = existing_commit_ts;
+                    }
+                    return true;
+                }
+                // If it is a Rollback, we ignore it and continue?
+                // Wait, if there is a Rollback at TS=110.
+                // Is it possible there is a Commit at TS=105?
+                // Yes.
+                // So we MUST continue iterating!
+                iter->Next();
+                continue;
+            }
+            // Since sorted by TS descending, if we met a commit_ts <= start_ts,
+            // all subsequent versions are also safe.
+            break;
+        }
+        return false;
+    };
+
+    for (const auto& m : mutations) {
+        // 1. Check Lock Conflict
+        std::string lock_val;
+        Status s = GetCFLocked(kCFLock, m.key, &lock_val, 0);
+        if (s.ok()) {
+            uint64_t lock_ts = ParseLockStartTs(lock_val);
+            if (lock_ts == start_ts) {
+                // If lock exists (retry), we must delete it as we are committing now.
+                batch.DeleteCF(kCFLock, m.key, 0);
+            } else {
+                return Status::Aborted("Key is locked");
+            }
+        }
+
+        // 2. Check Write Conflict
+        uint64_t conflict_ts = 0;
+        if (find_write_conflict(m.key, start_ts, &conflict_ts)) {
+            return Status::Aborted("Write conflict: start_ts=" + std::to_string(start_ts) + " conflict_ts=" + std::to_string(conflict_ts));
+        }
+
+        // 3. Write Data (Default CF)
+        batch.PutCF(kCFDefault, m.key, m.value, start_ts);
+
+        // 4. Write Commit Record (Write CF)
+        std::string write_val = std::to_string(start_ts) + "|";
+        if (m.op == Mutation::Delete) {
+            write_val += "Delete";
+        } else {
+            write_val += "Put";
+        }
+        batch.PutCF(kCFWrite, m.key, write_val, commit_ts);
+    }
+
+    return WriteLocked(WriteOptions(), &batch);
+}
+
+Status DBImpl::AcquirePessimisticLock(const std::vector<std::string>& keys,
+                                      const std::string& primary,
+                                      uint64_t start_ts,
+                                      uint64_t ttl,
+                                      uint64_t for_update_ts,
+                                      bool return_values,
+                                      std::vector<std::string>* values,
+                                      std::vector<bool>* not_found) {
+    UpdateMaxTS(std::max(start_ts, for_update_ts));
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    WriteBatch batch;
+
+    auto find_write_conflict = [&](const std::string& key, uint64_t check_ts) -> int {
+        std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+        // Seek to the latest version (Max TS)
+        std::string seek_key = EncodeMvccKey(kCFWrite, key, std::numeric_limits<uint64_t>::max());
+        std::string prefix = EncodeMvccKey(kCFWrite, key, kMaxSequenceNumber);
+        prefix.resize(prefix.size() - 8);
+        iter->Seek(seek_key);
+        
+        while (iter->Valid()) {
+            Slice k = iter->key();
+            if (!k.starts_with(prefix)) break;
+            
+            uint64_t commit_ts = 0;
+            Slice decoded_key = DecodeMvccKey(k, &commit_ts);
+            if (decoded_key != key) break;
+
+            if (commit_ts > check_ts) {
+                uint64_t rec_start_ts;
+                bool is_commit;
+                if (ParseWriteValue(iter->value().ToString(), &rec_start_ts, &is_commit)) {
+                     if (rec_start_ts == start_ts) {
+                        return 2; // Already committed
+                    }
+                    if (is_commit) {
+                        return 1; // Conflict
+                    }
+                }
+            }
+            if (commit_ts <= check_ts) break;
+            
+            iter->Next();
+        }
+        return 0;
+    };
+
+    auto get_value = [&](const std::string& key, uint64_t snapshot_ts, std::string* val) -> bool {
+        std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+        std::string seek_key = EncodeMvccKey(kCFWrite, key, snapshot_ts);
+        iter->Seek(seek_key);
+        
+        std::string prefix = EncodeMvccKey(kCFWrite, key, kMaxSequenceNumber);
+        prefix.resize(prefix.size() - 8);
+
+        if (iter->Valid()) {
+             Slice k = iter->key();
+             if (k.starts_with(prefix)) {
+                 uint64_t commit_ts = 0;
+                 Slice decoded_key = DecodeMvccKey(k, &commit_ts);
+                 if (decoded_key == key) {
+                     uint64_t rec_start_ts;
+                     bool is_commit;
+                     if (ParseWriteValue(iter->value().ToString(), &rec_start_ts, &is_commit)) {
+                         if (is_commit) {
+                             return GetCF(kCFDefault, key, val, rec_start_ts).ok();
+                         }
+                     }
+                 }
+             }
+        }
+        return false;
+    };
+
+    for (const auto& key : keys) {
+        // PrintHex("AcquirePessimisticLock Key", key);
+        // 1. Check Lock Conflict
+        std::string lock_val;
+        Status s = GetCFLocked(kCFLock, key, &lock_val, 0);
+        bool skip_lock = false;
+
+        if (s.ok()) {
+            uint64_t lock_ts = ParseLockStartTs(lock_val);
+            if (lock_ts != start_ts) {
+                return Status::Aborted("Key is locked by other txn");
+            }
+            // Already locked by me. Success (idempotent).
+            skip_lock = true;
+        } else {
+            // 2. Check Write Conflict
+            uint64_t check_ts = (for_update_ts > 0) ? for_update_ts : start_ts;
+            int conflict = find_write_conflict(key, check_ts);
+            if (conflict == 1) {
+                return Status::Aborted("Write conflict");
+            }
+            if (conflict == 2) {
+                // Already committed, skip locking
+                skip_lock = true;
+            }
+        }
+            
+        if (!skip_lock) {
+            // 3. Write Pessimistic Lock
+            std::string lock_info;
+            PutFixed32(&lock_info, static_cast<uint32_t>(primary.size()));
+            lock_info.append(primary.data(), primary.size());
+            PutFixed64(&lock_info, start_ts);
+            PutFixed64(&lock_info, ttl);
+            lock_info.push_back(static_cast<char>(3)); // OpType=3 (Pessimistic)
+            
+            PutFixed64(&lock_info, 0); // min_commit_ts placeholder
+            if (for_update_ts > 0) {
+                 PutFixed64(&lock_info, for_update_ts);
+            }
+            
+            batch.PutCF(kCFLock, key, lock_info, 0);
+        }
+        
+        // 4. Return Value (if requested)
+        if (return_values) {
+             std::string val;
+             uint64_t read_ts = (for_update_ts > 0) ? for_update_ts : start_ts;
+             bool found = get_value(key, read_ts, &val);
+             if (values) values->push_back(found ? val : "");
+             if (not_found) not_found->push_back(!found);
+        }
+    }
+    
+    return WriteLocked(WriteOptions(), &batch);
+}
+
 Status DBImpl::MvccCommit(const std::vector<std::string>& keys, 
                           uint64_t start_ts, 
                           uint64_t commit_ts) {
     //fprintf(stderr, "[DEBUG-CPP] MvccCommit called.\n");
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     WriteBatch batch;
+    auto find_write_record = [&](const std::string& key, uint64_t target_start_ts, uint64_t* found_commit_ts, bool* found_is_commit) -> bool {
+        std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+        std::string prefix = EncodeMvccKey(kCFWrite, key, kMaxSequenceNumber);
+        prefix.resize(prefix.size() - 8);
+        iter->Seek(prefix);
+        while (iter->Valid()) {
+            Slice k = iter->key();
+            if (!k.starts_with(prefix)) break;
+            uint64_t commit_ts_decoded;
+            DecodeMvccKey(k, &commit_ts_decoded);
+            uint64_t rec_start_ts;
+            bool is_commit;
+            if (ParseWriteValue(iter->value().ToString(), &rec_start_ts, &is_commit)) {
+                if (rec_start_ts == target_start_ts) {
+                    if (found_commit_ts) {
+                        *found_commit_ts = commit_ts_decoded;
+                    }
+                    if (found_is_commit) {
+                        *found_is_commit = is_commit;
+                    }
+                    return true;
+                }
+            }
+            iter->Next();
+        }
+        return false;
+    };
 
     for (const auto& key : keys) {
         std::string lock_val;
@@ -1629,11 +2124,14 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
             
             // 关键校验：锁是不是我的？
             if (lock_ts != start_ts) {
-                // 锁被别人占了 (StartTS 不匹配)
-                // 这种情况通常发生在：
-                // 1. 我的锁过期被清除了。
-                // 2. 另一个新事务抢占了锁。
-                // 此时我不能操作这个 Key，返回失败（如果是 Rollback，可能算成功？不，还是失败安全）
+                uint64_t existing_commit_ts = 0;
+                bool is_commit = false;
+                if (find_write_record(key, start_ts, &existing_commit_ts, &is_commit)) {
+                    if (is_commit && existing_commit_ts > 0) {
+                        return Status::OK();
+                    }
+                    return Status::NotFound("Txn rolled back");
+                }
                 return Status::Aborted("Lock mismatch (TS not match)");
             }
 
@@ -1675,13 +2173,11 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
                 std::string write_val = std::to_string(start_ts) + "|Rollback";
                 batch.PutCF(kCFWrite, key, write_val, start_ts);
             } else {
-                // Commit 请求，但锁没了。
-                // 必须检查 Write CF 是否已经提交 (幂等性)。
-                // 查 Write CF: Seek(key, commit_ts)
-                // 如果找到且 StartTS 匹配 -> 返回 OK。
-                // 否则 -> 报错 LockNotFound。
-                
-                // 简化：直接报错。Client 重试时会发现已提交(通过 CheckTxnStatus)
+                uint64_t existing_commit_ts = 0;
+                bool is_commit = false;
+                if (find_write_record(key, start_ts, &existing_commit_ts, &is_commit) && is_commit && existing_commit_ts > 0) {
+                    return Status::OK();
+                }
                 return Status::NotFound("Lock not found for Commit");
             }
         }
@@ -1692,6 +2188,9 @@ Status DBImpl::MvccCommit(const std::vector<std::string>& keys,
 }
 
 Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) {
+    // Update MaxTS for Async Commit
+    UpdateMaxTS(start_ts);
+
     // 1. 检查 Lock (Lock CF)
     //fprintf(stderr, "[MvccGet] Checking Lock for Key: %s\n", key.ToString().c_str());
     std::string lock_val;
@@ -1704,10 +2203,23 @@ Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) 
         uint64_t lock_ts = ParseLockStartTs(lock_val);
         
         if (lock_ts == 0 || lock_ts <= start_ts) {
-            // 确实冲突了
-            fprintf(stderr, "[MvccGet] Key Locked! Key: %s, MyTS: %lu, LockTS: %lu\n", 
-                    key.ToString().c_str(), start_ts, lock_ts);
-            return Status::Aborted("Key is locked");
+            if (lock_ts == start_ts) {
+                // fprintf(stderr, "[MvccGet] Own Lock Detected. Key: %s, TS: %lu\n", ToHex(key.ToString()).c_str(), start_ts);
+                // Own lock. Check if we have uncommitted data (Read-Your-Own-Write)
+                std::string my_val;
+                Status s_my = GetCF(kCFDefault, key, &my_val, start_ts);
+                if (s_my.ok()) {
+                    *value = my_val;
+                    return Status::OK();
+                }
+                // If not found in Default CF, it's a Pessimistic Lock (no data).
+                // Proceed to read previous committed version.
+            } else {
+                // 确实冲突了
+                fprintf(stderr, "[MvccGet] Key Locked! Key: %s, MyTS: 0x%lx, LockTS: 0x%lx, Diff: %ld\n", 
+                        key.ToString().c_str(), start_ts, lock_ts, (int64_t)(start_ts - lock_ts));
+                return Status::Aborted("Key is locked");
+            }
         }
     }
     else {
@@ -1723,21 +2235,6 @@ Status DBImpl::MvccGet(const Slice& key, uint64_t start_ts, std::string* value) 
 
     s = reader.SeekWrite(key, &commit_ts, &write_info);
     if (!s.ok()) {
-        //fprintf(stderr, "[MvccGet] Write Record Not Found. Status: %s\n", s.ToString().c_str());
-        
-        // 【新增调试】全量扫描 Write CF，看看有没有数据
-        std::unique_ptr<Iterator> debug_iter(NewIterator(ReadOptions(), kCFWrite));
-        debug_iter->SeekToFirst();
-        int count = 0;
-        while (debug_iter->Valid()) {
-            if (count++ > 10) break; // 只打前10个
-            Slice k = debug_iter->key();
-            // 这里的 k 是 InternalKey，我们需要提取 UserKey (MVCC Key)
-            Slice user_k = ExtractUserKey(k);
-            fprintf(stderr, "[DebugDump] DB Key: %s\n", ToHex(user_k.ToString()).c_str());
-            debug_iter->Next();
-        }
-
         return Status::NotFound("Key not found");
     }
 
@@ -1782,7 +2279,9 @@ Status DBImpl::CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t c
     if (s.ok()) {
         // --- 锁存在 ---
         uint64_t existing_start_ts, ttl;
-        if (!ParseLockValue(lock_val, &existing_start_ts, &ttl)) {
+        uint64_t min_commit_ts = 0;
+        // 使用 DecodeLockValue 直接解析，获取 min_commit_ts
+        if (!DecodeLockValue(lock_val, nullptr, &existing_start_ts, &ttl, nullptr, &min_commit_ts)) {
             // 锁格式错误，防御性 Rollback
              ttl = 0; 
         }
@@ -1798,6 +2297,13 @@ Status DBImpl::CheckTxnStatus(const Slice& primary, uint64_t lock_ts, uint64_t c
              // 这意味着我们的事务大概率已经提交或回滚了，去查 Write CF 确认状态
              // Fallthrough to check Write CF
              goto check_write;
+        }
+
+        // Async Commit check: If min_commit_ts is set, the transaction is considered committed.
+        if (min_commit_ts > 0) {
+            *action = 2; // Commit
+            *res_commit_ts = min_commit_ts;
+            return Status::OK();
         }
         
         // 计算物理时间 (ms)
@@ -1839,7 +2345,8 @@ check_write:
 
         // 获取 CommitTS (从 Key 中解码)
         uint64_t commit_ts_decoded;
-        DecodeMvccKey(key, &commit_ts_decoded);
+        Slice decoded_key = DecodeMvccKey(key, &commit_ts_decoded);
+        if (decoded_key != primary) break;
 
         // 解析 Value
         uint64_t rec_start_ts;
@@ -1870,89 +2377,299 @@ check_write:
 }
 
 Status DBImpl::MvccGC(uint64_t safe_point) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    gc_safe_point_.store(safe_point, std::memory_order_release);
+    fprintf(stderr, "[MvccGC] Set GC Safe Point to %lu. Old versions will be removed in Compaction.\n", safe_point);
     
-    // 1. 创建 Write CF 迭代器
-    std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
-    //iter->SeekToFirst();
-    std::string start_key;
-    start_key.push_back(kCFWrite); 
-    iter->Seek(start_key);
-    WriteBatch batch;
-    std::string current_user_key;
-    bool keep_next = true; // 是否保留下一个遇到的 <= SafePoint 的版本
-    uint64_t delete_count = 0;
-
-    // 遍历所有 Write 记录 (已按 Key 升序、TS 降序排列)
-    while (iter->Valid()) {
-        Slice key = iter->key(); // w{UserKey}{CommitTS}
-        if (key.empty() || key[0] != kCFWrite) {
-            break; 
-        }
-        // 解析 Key
-        // 【关键修复】NewIterator 返回的是 Internal Key！
-        // 我们需要提取 User Key (即 MVCC Key) 才能进行检查
-        Slice user_key = ExtractUserKey(key);
-        
-        // 检查前缀
-        if (user_key.empty() || user_key[0] != kCFWrite) {
-             break;
-        }
-
-        // 解析 MVCC Key
-        uint64_t commit_ts;
-        Slice real_user_key = DecodeMvccKey(user_key, &commit_ts);
-        //fprintf(stderr, "[MvccGC] MvccKeyHex: %s, CommitTS: %lu\n", 
-                //ToHex(user_key.data(), user_key.size()).c_str(), commit_ts);
-        
-        // 切换了新的 UserKey
-        if (real_user_key.compare(Slice(current_user_key)) != 0) {
-            current_user_key = real_user_key.ToString();
-            keep_next = true; // 新 Key，重置保留标志
-        }
-        
-        // 判断版本
-        if (commit_ts <= safe_point) {
-            if (keep_next) {
-                // 这是 SafePoint 之前的最新版本，必须保留
-                keep_next = false;
-            } else {
-                
-                // 1. 解析 Value 拿到 StartTS
-                uint64_t start_ts;
-                bool is_commit;
-                ParseWriteValue(iter->value().ToString(), &start_ts, &is_commit);
-                
-                // 2. 删除 Default CF 数据 (d{UserKey}{StartTS})
-                if (is_commit) { // 只有 Put 才有数据
-                    std::string data_key = EncodeMvccKey(kCFDefault, real_user_key, start_ts);
-                    batch.Delete(data_key);
-                }
-                
-                // 3. 删除 Write CF 记录
-                batch.Delete(user_key.ToString());
-                delete_count++;
-            }
-        }
-        
-        // 如果 Batch 太大，分批提交
-        if (batch.entries().size() > 1000) {
-            Status s = Write(WriteOptions(), &batch);
-            if (!s.ok()) return s;
-            batch.Clear();
-        }
-
-        iter->Next();
-    }
-    
-    // 提交剩余 Batch
-    if (batch.entries().size() > 0) {
-        return Write(WriteOptions(), &batch);
+    // Trigger Blob GC asynchronously
+    {
+        std::lock_guard<std::mutex> l(bg_gc_mutex_);
+        bg_gc_scheduled_ = true;
+        bg_gc_cv_.notify_one();
     }
     
     return Status::OK();
 }
 
+Status DBImpl::CheckConflict(const std::vector<std::string>& keys, uint64_t start_ts) {
+    // 1. Check Locks (Point Lookup)
+    for (const auto& key : keys) {
+        std::string val;
+        // Lock CF keys are just user keys.
+        Status s = GetCF(kCFLock, key, &val);
+        if (s.ok()) {
+            return Status::IOError("Key is locked");
+        }
+    }
 
+    // 2. Check Writes (Range Lookup)
+    // Create Iterator for Write CF
+    std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+    
+    for (const auto& key : keys) {
+        // Seek to the latest version of the key (Key | MaxTs)
+        // MvccKey encoding: Key + (Max - Ts) (Big Endian)
+        // So Key | MaxTs corresponds to Key + 0x00...00
+        // We seek to this target.
+        std::string target = EncodeMvccKey(kCFWrite, key, std::numeric_limits<uint64_t>::max());
+        iter->Seek(target);
+        
+        if (iter->Valid()) {
+             Slice found_key = iter->key();
+             Slice user_key = ExtractUserKey(found_key);
+             uint64_t commit_ts;
+             Slice found_real_key = DecodeMvccKey(user_key, &commit_ts);
+             
+             // Check if it's the same user key
+             if (found_real_key == key) {
+                 // Found a version. Check conflict: commit_ts >= start_ts
+                 // Since we seeked to MaxTs (latest possible), if this version is older than start_ts,
+                 // then no version >= start_ts exists (because they are sorted descending).
+                 // Wait! 
+                 // If found commit_ts >= start_ts, it's a conflict.
+                 // If found commit_ts < start_ts, it's safe (visible history).
+                 if (commit_ts >= start_ts) {
+                     return Status::IOError("Write conflict");
+                 }
+             }
+        }
+    }
+    return Status::OK();
+}
+
+void DBImpl::BGGC() {
+    fprintf(stderr, "[GC] Background GC thread started.\n");
+    while (bg_gc_running_) {
+        std::unique_lock<std::mutex> lock(bg_gc_mutex_);
+        // Wait for notification or periodic check (e.g., every 60 seconds)
+        bg_gc_cv_.wait_for(lock, std::chrono::seconds(60), [this] {
+            return !bg_gc_running_ || bg_gc_scheduled_;
+        });
+
+        if (!bg_gc_running_) break;
+
+        // Reset scheduled flag
+        bool expected = true;
+        bg_gc_scheduled_.compare_exchange_strong(expected, false);
+
+        lock.unlock();
+
+        // Perform GC (without holding mutex)
+        GarbageCollect();
+    }
+    fprintf(stderr, "[GC] Background GC thread stopped.\n");
+}
+
+Status DBImpl::ExecuteCoprocessor(const CoprocessorRequest& req, CoprocessorResponse* resp) {
+    if (req.type != CoprocessorType::kCount && req.type != CoprocessorType::kSum) {
+        return Status::NotSupported("Only Count/Sum coprocessor is supported");
+    }
+
+    // 1. Create Iterator for Write CF (MVCC)
+    // We scan Write CF to find committed versions visible at start_ts
+    std::unique_ptr<Iterator> iter(NewIterator(ReadOptions(), kCFWrite));
+    // Optimization: Create Iterator for Default CF to avoid repeated GetCF calls
+    std::unique_ptr<Iterator> default_iter(NewIterator(ReadOptions(), kCFDefault));
+    
+    std::string start = req.start_key;
+    std::string end = req.end_key;
+    uint64_t ts = req.start_ts;
+    uint64_t count = 0;
+    int64_t sum = 0;
+
+    // Seek to the first key
+    // MvccKey: Key + (Max - CommitTS)
+    // We want to find the first version of start_key (or after)
+    std::string seek_key;
+    if (start.empty()) {
+        // If start is empty, we should start from the beginning of Write CF.
+        // But MvccKey has a CF prefix.
+        // kCFWrite should be handled.
+        // EncodeMvccKey handles CF prefix.
+        seek_key = EncodeMvccKey(kCFWrite, "", std::numeric_limits<uint64_t>::max());
+    } else {
+        seek_key = EncodeMvccKey(kCFWrite, start, std::numeric_limits<uint64_t>::max());
+    }
+    
+    iter->Seek(seek_key);
+
+    if (!iter->Valid()) {
+        // fprintf(stderr, "Iterator invalid after Seek. Seek Key: %s\n", ToHex(seek_key).c_str());
+    } else {
+        // fprintf(stderr, "Iterator valid after Seek. Key: %s\n", ToHex(iter->key().ToString()).c_str());
+    }
+
+    std::string current_user_key;
+    bool has_valid_version = false;
+    int scanned_count = 0;
+
+    while (iter->Valid()) {
+        scanned_count++;
+        Slice internal_key = iter->key();
+        Slice key = ExtractUserKey(internal_key);
+        
+        // fprintf(stderr, "Scanning Write CF key: %s\n", ToHex(key.ToString()).c_str());
+        
+        // Check if key belongs to Write CF
+        if (key.size() < 1 || key[0] != kCFWrite) {
+             break;
+        }
+
+        uint64_t commit_ts;
+                Slice real_key = DecodeMvccKey(key, &commit_ts);
+
+                // Check End Key
+        if (!end.empty() && real_key.compare(end) >= 0) {
+            break;
+        }
+
+        // Check if we moved to a new user key
+        if (real_key.compare(Slice(current_user_key)) != 0) {
+            // New key found
+            current_user_key = real_key.ToString();
+            has_valid_version = false;
+        }
+
+        if (has_valid_version) {
+             // We already found a visible version for this key, skip older versions.
+             iter->Next();
+             continue;
+        }
+
+        // Check visibility
+        if (commit_ts <= ts) {
+            // Found the latest committed version <= ts
+            has_valid_version = true;
+
+            // Check value type (Put or Delete)
+            // Value in Write CF is: start_ts | type
+            uint64_t start_ts;
+            bool is_commit;
+            
+            if (ParseWriteValue(iter->value().ToString(), &start_ts, &is_commit)) {
+                
+                std::string val_str = iter->value().ToString();
+                size_t pipe_pos = val_str.find('|');
+                if (pipe_pos != std::string::npos) {
+                    std::string type_str = val_str.substr(pipe_pos + 1);
+                    if (type_str != "Delete" && type_str != "Rollback" && type_str != "Lock") {
+                        // It's a valid Put
+                        std::string value;
+                        bool match = true;
+
+                        // If filter_value is set, we must check the value
+                        if (!req.filter_value.empty() || req.type == CoprocessorType::kSum) {
+                             // Optimization: Use Iterator instead of GetCF
+            std::string default_key = EncodeMvccKey(kCFDefault, current_user_key, start_ts);
+            default_iter->Seek(default_key);
+            
+            if (default_iter->Valid()) {
+                 Slice internal_iter_key = default_iter->key();
+                 // Must extract User Key (MvccKey) from Internal Key first!
+                 Slice iter_key = ExtractUserKey(internal_iter_key);
+                 
+                  uint64_t iter_ts;
+                  if (iter_key.size() < 9) {
+                       fprintf(stderr, "Invalid key size in Default CF: %zu\n", iter_key.size());
+                       match = false;
+                  } else {
+                      Slice iter_user_key = DecodeMvccKey(iter_key, &iter_ts);
+                        
+                        // Robust Search: If we found an earlier version (larger TS implies newer version in MVCC, but smaller key in Max-TS encoding),
+                        // and Seek stopped at it, it means Seek stopped at a smaller key.
+                        // We need to scan forward to find the exact timestamp.
+                        while (iter_user_key == current_user_key && iter_ts > start_ts) {
+                             default_iter->Next();
+                             if (!default_iter->Valid()) break;
+                             Slice internal_next_key = default_iter->key();
+                             Slice iter_next_key = ExtractUserKey(internal_next_key);
+                             if (iter_next_key.size() < 9) break;
+                             iter_user_key = DecodeMvccKey(iter_next_key, &iter_ts);
+                        }
+
+                        if (iter_user_key != current_user_key) {
+                            match = false;
+                        } else if (iter_ts != start_ts) {
+                            // Still mismatch? Then the version is missing.
+                            match = false;
+                        } else {
+                            // Found the version
+                            value = default_iter->value().ToString();
+                        }
+                  }
+            } else {
+                 // fprintf(stderr, "Default CF Iterator invalid for key: %s, seek_key: %s\n", current_user_key.c_str(), ToHex(default_key).c_str());
+                 match = false;
+             }
+
+            if (match) {
+                Status s = ResolveBlobIndex(&value);
+                if (!s.ok()) {
+                    // fprintf(stderr, "ResolveBlobIndex failed for key: %s, status: %s\n", current_user_key.c_str(), s.ToString().c_str());
+                    match = false;
+                } else {
+                    // DEBUG: Log scanned key info
+                    if (req.type == CoprocessorType::kSum) {
+                        // fprintf(stderr, "[DEBUG] Scan Key: %s, CommitTS: %lu, ReaderTS: %lu, Val: %s\n", current_user_key.c_str(), commit_ts, ts, value.c_str());
+                    }
+
+                    // Filter logic
+                    if (!req.filter_value.empty()) {
+                        switch (req.filter_operator) {
+                            case FilterOperator::kEqual:
+                                if (value != req.filter_value) match = false;
+                                break;
+                            case FilterOperator::kNotEqual:
+                                if (value == req.filter_value) match = false;
+                                break;
+                            case FilterOperator::kGreater:
+                                if (value <= req.filter_value) match = false;
+                                break;
+                            case FilterOperator::kLess:
+                                if (value >= req.filter_value) {
+                                    match = false;
+                                }
+                                break;
+                            case FilterOperator::kGreaterOrEqual:
+                                if (value < req.filter_value) match = false;
+                                break;
+                            case FilterOperator::kLessOrEqual:
+                                if (value > req.filter_value) match = false;
+                                break;
+                        }
+                    }
+                }
+            } else {
+                match = false;
+            }
+                        }
+
+                        if (match) {
+                            if (req.type == CoprocessorType::kCount) {
+                                count++;
+                            } else if (req.type == CoprocessorType::kSum) {
+                                 try {
+                                     long long v = std::stoll(value);
+                                     sum += v;
+                                 } catch (...) {
+                                     // fprintf(stderr, "stoll failed for key: %s, value: %s\n", current_user_key.c_str(), value.c_str());
+                                 }
+                             }
+                        }
+                    }
+                }
+            }
+        }
+        
+        iter->Next();
+    }
+
+    if (scanned_count == 0) {
+        // fprintf(stderr, "Write CF scan found 0 keys. Seek key: %s\n", ToHex(seek_key).c_str());
+    }
+
+    resp->count = count;
+    resp->sum = sum;
+    return Status::OK();
+}
 
 } // namespace titankv

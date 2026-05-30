@@ -1,3 +1,31 @@
+cmake_minimum_required(VERSION 3.10)
+project(TitanKV)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# Add third-party dependencies
+add_subdirectory(../third_party/liburing liburing_build)
+set(CRC32C_BUILD_TESTS OFF CACHE BOOL "Build crc32c tests" FORCE)
+set(CRC32C_BUILD_BENCHMARKS OFF CACHE BOOL "Build crc32c benchmarks" FORCE)
+set(CRC32C_USE_GLOG OFF CACHE BOOL "Build crc32c with glog" FORCE)
+add_subdirectory(../third_party/crc32c crc32c_build)
+
+find_package(GTest)
+if(NOT GTest_FOUND)
+    message(STATUS "GTest not found, fetching from git...")
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    )
+    # For Windows: Prevent overriding the parent project's compiler/linker settings
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+    
+    add_library(GTest::GTest ALIAS gtest)
+    add_library(GTest::Main ALIAS gtest_main)
+endif()
+
 # 1. 定义源文件列表
 set(CORE_SOURCES
     # 核心实现
@@ -58,6 +86,7 @@ target_include_directories(titankv PRIVATE src)
 # 链接依赖库
 # 注意：liburing (uring) 和 crc32c 是私有依赖
 target_link_libraries(titankv PRIVATE crc32c uring)
+target_include_directories(titankv PRIVATE ../third_party/liburing/src/include ../third_party/crc32c/include)
 
 # 4. 自动构建所有测试
 # 移除 if(BUILD_TESTING) 以确保总是编译测试，或者确保你在根目录开启了它

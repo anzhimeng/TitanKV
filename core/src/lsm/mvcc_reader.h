@@ -28,8 +28,7 @@ class MvccReader {
  private:
   DB* db_;
   uint64_t snapshot_;
-  // 缓存迭代器，避免每次 Seek 都重新创建
-  // (Day 3 简化：每次创建，Week 15 优化复用)
+  std::unique_ptr<Iterator> write_iter_;
 };
 
 } // namespace titankv

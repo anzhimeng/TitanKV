@@ -1,10 +1,12 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "titankv/status.h"
 #include "titankv/slice.h"
 #include "titankv/options.h"
 #include "titankv/write_batch.h"
+#include "titankv/coprocessor.h"
 #include "util/coding.h"
 #include "lsm/block.h"
 
@@ -87,8 +89,22 @@ class DB {
   virtual Status MvccPrewrite(const std::vector<Mutation>& mutations, 
                               const std::string& primary,
                               uint64_t start_ts, 
-                              uint64_t ttl) = 0;
-                              // MVCC Commit
+                              uint64_t ttl,
+                              uint64_t min_commit_ts = 0,
+                              bool is_pessimistic_lock = false,
+                              const std::vector<std::string>& secondaries = {}) = 0;
+
+  // Pessimistic Lock
+  virtual Status AcquirePessimisticLock(const std::vector<std::string>& keys,
+                                        const std::string& primary,
+                                        uint64_t start_ts,
+                                        uint64_t ttl,
+                                        uint64_t for_update_ts,
+                                        bool return_values,
+                                        std::vector<std::string>* values,
+                                        std::vector<bool>* not_found) = 0;
+
+  // MVCC Commit
   // keys: 需要提交的 Key 列表
   // start_ts: 事务开始时间
   // commit_ts: 事务提交时间
@@ -108,6 +124,8 @@ class DB {
   // MVCC GC
   // safe_point: 清理早于此 TS 的数据
   virtual Status MvccGC(uint64_t safe_point) = 0;
+
+  virtual Status ExecuteCoprocessor(const CoprocessorRequest& req, CoprocessorResponse* resp) = 0;
 };
 
 } // namespace titankv
